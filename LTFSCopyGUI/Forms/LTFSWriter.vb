@@ -3876,30 +3876,30 @@ Public Class LTFSWriter
         selectedItems.Count > 0 AndAlso
         MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_DelConfrm}{selectedItems.Count}{My.Resources.ResText_Files_C}", My.Resources.ResText_Warning, MessageBoxButtons.OKCancel) = DialogResult.OK Then
             For Each ItemSelected As ListViewItem In selectedItems
-                    If ItemSelected.Tag IsNot Nothing AndAlso TypeOf (ItemSelected.Tag) Is ltfsindex.file Then
-                        Dim f As ltfsindex.file = DirectCast(ItemSelected.Tag, ltfsindex.file)
-                        Dim d As ltfsindex.directory = DirectCast(ListView1.Tag, ltfsindex.directory)
-                        If d.UnwrittenFiles.Contains(f) Then
-                            While True
-                                Threading.Thread.Sleep(0)
-                                SyncLock UFReadCount
-                                    If UFReadCount > 0 Then Continue While
-                                    For Each fr As FileRecord In UnwrittenFiles
-                                        If fr.File Is f Then
-                                            fr.RemoveUnwritten()
-                                            UnwrittenFiles.Remove(fr)
-                                            Exit For
-                                        End If
-                                    Next
-                                    Exit While
-                                End SyncLock
-                            End While
-                        End If
-                        If d.contents._file.Contains(f) Then
-                            d.contents._file.Remove(f)
-                            If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
-                        End If
+                If ItemSelected.Tag IsNot Nothing AndAlso TypeOf (ItemSelected.Tag) Is ltfsindex.file Then
+                    Dim f As ltfsindex.file = DirectCast(ItemSelected.Tag, ltfsindex.file)
+                    Dim d As ltfsindex.directory = DirectCast(ListView1.Tag, ltfsindex.directory)
+                    If d.UnwrittenFiles.Contains(f) Then
+                        While True
+                            Threading.Thread.Sleep(0)
+                            SyncLock UFReadCount
+                                If UFReadCount > 0 Then Continue While
+                                For Each fr As FileRecord In UnwrittenFiles
+                                    If fr.File Is f Then
+                                        fr.RemoveUnwritten()
+                                        UnwrittenFiles.Remove(fr)
+                                        Exit For
+                                    End If
+                                Next
+                                Exit While
+                            End SyncLock
+                        End While
                     End If
+                    If d.contents._file.Contains(f) Then
+                        d.contents._file.Remove(f)
+                        If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
+                    End If
+                End If
             Next
             UnwrittenCountOverrideValue = 0
             UnwrittenSizeOverrideValue = 0
@@ -9384,10 +9384,10 @@ Public Class LTFSWriter
         If ListView1.Tag IsNot Nothing AndAlso
         selectedItems.Count > 0 Then
             For Each ItemSelected As ListViewItem In selectedItems
-                    If ItemSelected.Tag IsNot Nothing AndAlso TypeOf (ItemSelected.Tag) Is ltfsindex.file Then
-                        Dim f As ltfsindex.file = DirectCast(ItemSelected.Tag, ltfsindex.file)
-                        result.AppendLine(f.name)
-                    End If
+                If ItemSelected.Tag IsNot Nothing AndAlso TypeOf (ItemSelected.Tag) Is ltfsindex.file Then
+                    Dim f As ltfsindex.file = DirectCast(ItemSelected.Tag, ltfsindex.file)
+                    result.AppendLine(f.name)
+                End If
             Next
         End If
         Clipboard.SetText(result.ToString)
@@ -9442,10 +9442,10 @@ Public Class LTFSWriter
             If selectedItems.Count > 0 Then
                 If selectedItems.Count > 1 Then
                     For Each ItemSelected As ListViewItem In selectedItems
-                            If ItemSelected.Tag IsNot Nothing AndAlso TypeOf (ItemSelected.Tag) Is ltfsindex.file Then
-                                Dim f As ltfsindex.file = DirectCast(ItemSelected.Tag, ltfsindex.file)
-                                result.AppendLine(f.GetSerializedText())
-                            End If
+                        If ItemSelected.Tag IsNot Nothing AndAlso TypeOf (ItemSelected.Tag) Is ltfsindex.file Then
+                            Dim f As ltfsindex.file = DirectCast(ItemSelected.Tag, ltfsindex.file)
+                            result.AppendLine(f.GetSerializedText())
+                        End If
                     Next
                     MessageBox.Show(New Form With {.TopMost = True}, result.ToString)
                 Else
@@ -9962,10 +9962,10 @@ Public Class LTFSWriter
         If ListView1.Tag IsNot Nothing AndAlso
         selectedItems.Count > 0 Then
             For Each ItemSelected As ListViewItem In selectedItems
-                    If ItemSelected.Tag IsNot Nothing AndAlso TypeOf (ItemSelected.Tag) Is ltfsindex.file Then
-                        Dim f As ltfsindex.file = DirectCast(ItemSelected.Tag, ltfsindex.file)
-                        result.AppendLine(f.GetSerializedText())
-                    End If
+                If ItemSelected.Tag IsNot Nothing AndAlso TypeOf (ItemSelected.Tag) Is ltfsindex.file Then
+                    Dim f As ltfsindex.file = DirectCast(ItemSelected.Tag, ltfsindex.file)
+                    result.AppendLine(f.GetSerializedText())
+                End If
             Next
         End If
         Clipboard.SetText(result.ToString)
@@ -9977,10 +9977,10 @@ Public Class LTFSWriter
         If ListView1.Tag IsNot Nothing AndAlso
         selectedItems.Count > 0 Then
             For Each ItemSelected As ListViewItem In selectedItems
-                    If ItemSelected.Tag IsNot Nothing AndAlso TypeOf (ItemSelected.Tag) Is ltfsindex.file Then
-                        Dim f As ltfsindex.file = DirectCast(ItemSelected.Tag, ltfsindex.file)
-                        result.AppendLine(f.GetXAttrText())
-                    End If
+                If ItemSelected.Tag IsNot Nothing AndAlso TypeOf (ItemSelected.Tag) Is ltfsindex.file Then
+                    Dim f As ltfsindex.file = DirectCast(ItemSelected.Tag, ltfsindex.file)
+                    result.AppendLine(f.GetXAttrText())
+                End If
             Next
         End If
         Clipboard.SetText(result.ToString)
