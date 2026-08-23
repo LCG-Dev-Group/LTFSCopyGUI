@@ -10,6 +10,7 @@ Imports System.Text
 Imports System.Threading
 Imports Fsp.Interop
 Imports Microsoft.WindowsAPICodePack.Dialogs
+Imports Microsoft.Extensions.FileSystemGlobbing
 Imports Serilog
 Imports Serilog.Context
 Imports ZstdSharp
@@ -3928,105 +3929,156 @@ Public Class LTFSWriter
             'RefreshDisplay()
         End If
     End Sub
+    Private Sub AddFilePlanOnWorker(d As ltfsindex.directory,
+                                    fileSeq As List(Of GlobHelper.AddFile),
+                                    overwrite As Boolean,
+                                    itemCount As Integer)
+        Dim succeeded As Boolean = False
+        Try
+            StopFlag = False
+            If fileSeq Is Nothing Then fileSeq = New List(Of GlobHelper.AddFile)
+            PrintMsg($"{My.Resources.ResText_Adding}{itemCount}{My.Resources.ResText_Items_x}")
+
+            Dim helper As New GlobHelper() With {
+                .schema = schema,
+                .OnStopFlagInquiry = Function() As Boolean
+                                         Return StopFlag
+                                     End Function
+            }
+
+            If My.Settings.LTFSWriter_SkipSymlink Then
+                Dim reparseCache As New Dictionary(Of String, Boolean)(StringComparer.OrdinalIgnoreCase)
+                Dim filteredFiles As New List(Of GlobHelper.AddFile)(fileSeq.Count)
+                For Each f In fileSeq
+                    Try
+                        Dim fi As IO.FileInfo = f.SourceInfo
+                        If fi Is Nothing Then fi = New IO.FileInfo(f.SourceFullPath)
+                        fi.Refresh()
+                        Dim keepFile As Boolean = Not fi.Attributes.HasFlag(IO.FileAttributes.ReparsePoint)
+
+                        Dim dir As IO.DirectoryInfo = fi.Directory
+                        While keepFile AndAlso dir IsNot Nothing
+                            Dim dirPath = dir.FullName
+                            Dim isReparse As Boolean = False
+                            If Not reparseCache.TryGetValue(dirPath, isReparse) Then
+                                isReparse = dir.Attributes.HasFlag(IO.FileAttributes.ReparsePoint)
+                                reparseCache(dirPath) = isReparse
+                            End If
+                            keepFile = Not isReparse
+                            dir = dir.Parent
+                        End While
+
+                        If keepFile Then filteredFiles.Add(f)
+                    Catch
+                    End Try
+                Next
+                fileSeq = filteredFiles
+            End If
+
+            ltfsindex.WSort({d}.ToList, Nothing, Sub(d1 As ltfsindex.directory)
+                                                     d1.LastUnwrittenFilesCount = d1.UnwrittenFiles.Count
+                                                 End Sub)
+
+            Dim relDirSet As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            For Each f In fileSeq
+                If StopFlag Then Exit For
+                Dim parentRel As String = IO.Path.GetDirectoryName(f.RelativePath)
+                If String.IsNullOrEmpty(parentRel) Then Continue For
+
+                Dim parts = parentRel.Split(New Char() {IO.Path.DirectorySeparatorChar, IO.Path.AltDirectorySeparatorChar},
+                                            StringSplitOptions.RemoveEmptyEntries)
+                If parts.Length = 0 Then Continue For
+
+                Dim cur As String = parts(0)
+                relDirSet.Add(cur)
+                For i = 1 To parts.Length - 1
+                    cur = cur & IO.Path.DirectorySeparatorChar & parts(i)
+                    relDirSet.Add(cur)
+                Next
+            Next
+
+            Dim dirSeq As IEnumerable(Of String) = relDirSet.OrderBy(Function(s) s, StringComparer.OrdinalIgnoreCase)
+            Dim targetDirs As New Dictionary(Of String, ltfsindex.directory)(StringComparer.OrdinalIgnoreCase)
+            For Each relDir In dirSeq
+                If StopFlag Then Exit For
+                targetDirs(relDir) = helper.EnsureDirectoryChain(d, "", relDir)
+            Next
+
+            For Each af In fileSeq
+                If StopFlag Then Exit For
+
+                Dim parentRel = IO.Path.GetDirectoryName(af.RelativePath)
+                Dim targetDir As ltfsindex.directory = d
+                If Not String.IsNullOrEmpty(parentRel) Then
+                    If Not targetDirs.TryGetValue(parentRel, targetDir) Then
+                        targetDir = helper.EnsureDirectoryChain(d, "", parentRel)
+                        targetDirs(parentRel) = targetDir
+                    End If
+                End If
+
+                Try
+                    Dim fi As IO.FileInfo = af.SourceInfo
+                    If fi Is Nothing Then fi = New IO.FileInfo(af.SourceFullPath)
+                    fi.Refresh()
+                    AddFile(fi, targetDir, overwrite, af.SourceXattrPath)
+                Catch
+                End Try
+            Next
+
+            succeeded = Not StopFlag
+        Catch ex As Exception
+            PrintMsg($"Add failed: {ex.Message}")
+            SetStatusLight(LWStatus.Err)
+            Try
+                Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex}{vbCrLf}{ex.StackTrace}"))
+            Catch
+            End Try
+        Finally
+            StopFlag = False
+            UnwrittenSizeOverrideValue = 0
+            UnwrittenCountOverrideValue = 0
+            RefreshDisplay()
+            If succeeded Then
+                PrintMsg(My.Resources.ResText_AddFin)
+                SetStatusLight(LWStatus.Succ)
+            End If
+            LockGUI(False)
+        End Try
+    End Sub
+
     Public Sub AddFileOrDir(d As ltfsindex.directory, Paths As String(), ByVal match As String, Optional ByVal overwrite As Boolean = False)
         SetStatusLight(LWStatus.Busy)
         Dim th As New Threading.Thread(
             Sub()
-                StopFlag = False
-                PrintMsg($"{My.Resources.ResText_Adding}{Paths.Length}{My.Resources.ResText_Items_x}")
-                Dim helper As New GlobHelper() With {
-                    .schema = schema,
-                    .OnStopFlagInquiry = Function() As Boolean
-                                             Return StopFlag
-                                         End Function
-                }
-                Dim matcher = GlobCollector.BuildMatcherFromString(match)
-                Dim results = GlobCollector.PlanAdd_ByFullPathInputs(Paths, matcher)
-
-                Dim fileSeq As List(Of GlobHelper.AddFile) = results.Files
-
-                If My.Settings.LTFSWriter_SkipSymlink Then
-                    Dim reparseCache As New Dictionary(Of String, Boolean)(StringComparer.OrdinalIgnoreCase)
-                    Dim filteredFiles As New List(Of GlobHelper.AddFile)(fileSeq.Count)
-                    For Each f In fileSeq
-                        Try
-                            Dim fi As IO.FileInfo = f.SourceInfo
-                            If fi Is Nothing Then fi = New IO.FileInfo(f.SourceFullPath)
-                            Dim keepFile As Boolean = Not fi.Attributes.HasFlag(IO.FileAttributes.ReparsePoint)
-
-                            Dim dir As IO.DirectoryInfo = fi.Directory
-                            While keepFile AndAlso dir IsNot Nothing
-                                Dim dirPath = dir.FullName
-                                Dim isReparse As Boolean = False
-                                If Not reparseCache.TryGetValue(dirPath, isReparse) Then
-                                    isReparse = dir.Attributes.HasFlag(IO.FileAttributes.ReparsePoint)
-                                    reparseCache(dirPath) = isReparse
-                                End If
-                                keepFile = Not isReparse
-                                dir = dir.Parent
-                            End While
-
-                            If keepFile Then filteredFiles.Add(f)
-                        Catch
-                        End Try
-                    Next
-                    fileSeq = filteredFiles
-                End If
-
-                Dim relDirSet As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-
-                For Each f In fileSeq
-                    Dim parentRel As String = IO.Path.GetDirectoryName(f.RelativePath)
-                    If String.IsNullOrEmpty(parentRel) Then Continue For
-
-                    Dim parts = parentRel.Split(New Char() {IO.Path.DirectorySeparatorChar, IO.Path.AltDirectorySeparatorChar},
-                                                StringSplitOptions.RemoveEmptyEntries)
-                    If parts.Length = 0 Then Continue For
-
-                    Dim cur As String = parts(0)
-                    If Not relDirSet.Contains(cur) Then relDirSet.Add(cur)
-                    For i = 1 To parts.Length - 1
-                        cur = cur & IO.Path.DirectorySeparatorChar & parts(i)
-                        If Not relDirSet.Contains(cur) Then relDirSet.Add(cur)
-                    Next
-                Next
-
-                Dim dirSeq As IEnumerable(Of String) = relDirSet.OrderBy(Function(s) s, StringComparer.OrdinalIgnoreCase)
-                Dim targetDirs As New Dictionary(Of String, ltfsindex.directory)(StringComparer.OrdinalIgnoreCase)
-
-                For Each relDir In dirSeq
-                    If StopFlag Then Exit Sub
-
-                    targetDirs(relDir) = helper.EnsureDirectoryChain(d, "", relDir)
-                Next
-
-                For Each af In fileSeq
-                    If StopFlag Then Exit Sub
-
-                    Dim parentRel = IO.Path.GetDirectoryName(af.RelativePath)
-                    Dim targetDir As ltfsindex.directory = d
-                    If Not String.IsNullOrEmpty(parentRel) Then
-                        If Not targetDirs.TryGetValue(parentRel, targetDir) Then
-                            targetDir = helper.EnsureDirectoryChain(d, "", parentRel)
-                            targetDirs(parentRel) = targetDir
-                        End If
-                    End If
-
+                Try
+                    Dim matcher = GlobCollector.BuildMatcherFromString(match)
+                    Dim results = GlobCollector.PlanAdd_ByFullPathInputs(Paths, matcher)
+                    AddFilePlanOnWorker(d, results.Files, overwrite, Paths.Length)
+                Catch ex As Exception
+                    PrintMsg($"Add failed: {ex.Message}")
+                    SetStatusLight(LWStatus.Err)
                     Try
-                        Dim fi As IO.FileInfo = af.SourceInfo
-                        If fi Is Nothing Then fi = New IO.FileInfo(af.SourceFullPath)
-                        AddFile(fi, targetDir, overwrite, af.SourceXattrPath)
+                        Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex}{vbCrLf}{ex.StackTrace}"))
                     Catch
                     End Try
-                Next
+                    LockGUI(False)
+                End Try
+            End Sub)
+        LockGUI()
+        th.Start()
+    End Sub
 
-                StopFlag = False
-                UnwrittenSizeOverrideValue = 0
-                UnwrittenCountOverrideValue = 0
-                RefreshDisplay()
-                PrintMsg(My.Resources.ResText_AddFin)
-                SetStatusLight(LWStatus.Succ)
-                LockGUI(False)
+    Public Sub AddStableFilePlan(d As ltfsindex.directory,
+                                 fileSeq As IEnumerable(Of GlobHelper.AddFile),
+                                 Optional ByVal overwrite As Boolean = False)
+        If fileSeq Is Nothing Then Exit Sub
+        Dim snapshot As New List(Of GlobHelper.AddFile)(fileSeq)
+        If snapshot.Count = 0 Then Exit Sub
+
+        SetStatusLight(LWStatus.Busy)
+        Dim th As New Threading.Thread(
+            Sub()
+                AddFilePlanOnWorker(d, snapshot, overwrite, snapshot.Count)
             End Sub)
         LockGUI()
         th.Start()
@@ -11495,147 +11547,444 @@ Public Class LTFSWriter
         End If
     End Sub
 
+    Private Class MonitorFileState
+        Public Property Length As Long
+        Public Property LastWriteTimeUtc As DateTime
+        Public Property StableSinceUtc As DateTime
+        Public Property Queued As Boolean
+    End Class
+
+    Private Shared ReadOnly DefaultMonitorFilter As String = String.Join(vbCrLf, New String() {
+        "**/*",
+        "!**/*.!qb",
+        "!**/*.bc!",
+        "!**/*.!ut",
+        "!**/*.part",
+        "!**/*.tmp",
+        "!**/*.temp",
+        "!**/*.download",
+        "!**/*.downloading",
+        "!**/*.downloading.cfg",
+        "!**/*.crdownload",
+        "!**/*.filepart",
+        "!**/*.opdownload",
+        "!**/*.partial",
+        "!**/*.aria2",
+        "!**/~*",
+        "!**/.~lock.*"})
+
+    Private Shared Function NormalizeMonitorPath(path As String) As String
+        If String.IsNullOrWhiteSpace(path) Then Return String.Empty
+
+        Dim normalized As String = path.Trim()
+        If normalized.StartsWith("\\?\UNC\", StringComparison.OrdinalIgnoreCase) Then
+            normalized = "\\" & normalized.Substring(8)
+        ElseIf normalized.StartsWith("\\?\", StringComparison.OrdinalIgnoreCase) Then
+            normalized = normalized.Substring(4)
+        End If
+
+        Try
+            normalized = IO.Path.GetFullPath(normalized)
+            Dim root As String = IO.Path.GetPathRoot(normalized)
+            If Not String.IsNullOrEmpty(root) AndAlso
+                Not normalized.Equals(root, StringComparison.OrdinalIgnoreCase) Then
+                normalized = normalized.TrimEnd(IO.Path.DirectorySeparatorChar, IO.Path.AltDirectorySeparatorChar)
+            End If
+        Catch
+        End Try
+        Return normalized
+    End Function
+
+    Private Shared Function TryReadMonitorFileInfo(candidate As GlobHelper.AddFile,
+                                                    ByRef fileInfo As IO.FileInfo) As Boolean
+        fileInfo = Nothing
+        If candidate Is Nothing OrElse String.IsNullOrWhiteSpace(candidate.SourceFullPath) Then Return False
+        If candidate.SourceFullPath.EndsWith(".xattr", StringComparison.OrdinalIgnoreCase) Then Return False
+
+        Try
+            If Not IO.File.Exists(candidate.SourceFullPath) Then Return False
+            fileInfo = New IO.FileInfo(candidate.SourceFullPath)
+            fileInfo.Refresh()
+            Return fileInfo.Exists
+        Catch
+            fileInfo = Nothing
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function CollectStableMonitorFiles(sourcePaths As String(),
+                                                       matcher As Matcher,
+                                                       states As Dictionary(Of String, MonitorFileState),
+                                                       nowUtc As DateTime,
+                                                       token As Threading.CancellationToken,
+                                                       ByRef matchedCount As Integer) As List(Of GlobHelper.AddFile)
+        matchedCount = 0
+        Dim ready As New List(Of GlobHelper.AddFile)
+        Dim plan As GlobHelper.AddPlan = GlobCollector.PlanAdd_ByFullPathInputs(sourcePaths, matcher)
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        For Each candidate As GlobHelper.AddFile In plan.Files
+            token.ThrowIfCancellationRequested()
+            Dim info As IO.FileInfo = Nothing
+            If Not TryReadMonitorFileInfo(candidate, info) Then Continue For
+
+            Dim key As String = NormalizeMonitorPath(info.FullName)
+            If String.IsNullOrEmpty(key) OrElse Not seen.Add(key) Then Continue For
+            matchedCount += 1
+
+            Dim state As MonitorFileState = Nothing
+            Dim lastWrite As DateTime = info.LastWriteTimeUtc
+            If Not states.TryGetValue(key, state) OrElse
+               state.Length <> info.Length OrElse
+               state.LastWriteTimeUtc <> lastWrite Then
+                state = New MonitorFileState With {
+                    .Length = info.Length,
+                    .LastWriteTimeUtc = lastWrite,
+                    .StableSinceUtc = nowUtc,
+                    .Queued = False}
+                states(key) = state
+                Continue For
+            End If
+
+            If state.Queued Then Continue For
+            If nowUtc.Subtract(state.StableSinceUtc).TotalSeconds < 10.0 Then Continue For
+
+            ready.Add(New GlobHelper.AddFile With {
+                .SourceFullPath = info.FullName,
+                .RelativePath = candidate.RelativePath,
+                .SourceInfo = info,
+                .SourceXattrPath = candidate.SourceXattrPath})
+        Next
+
+        For Each key As String In states.Keys.ToList()
+            If Not seen.Contains(key) Then states.Remove(key)
+        Next
+        Return ready
+    End Function
+
+    Private Function WaitForMonitorOperation(token As Threading.CancellationToken) As Boolean
+        While AllowOperation
+            If token.IsCancellationRequested Then Return False
+            Threading.Thread.Sleep(100)
+        End While
+        While Not AllowOperation
+            If token.IsCancellationRequested Then Return False
+            Threading.Thread.Sleep(100)
+        End While
+        Return True
+    End Function
+
     Private Sub 监控写入ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 监控写入ToolStripMenuItem.Click
         Dim frm As New Form With {
-            .Width = 640,
-            .Height = 200,
-            .Font = DisplayHelper.DisplayFont
-        }
-        Dim lbl1 As New Label With {.Parent = frm, .Top = 11, .Left = 7, .Width = 51, .Text = "SrcPath"}
-        Dim txtLocation As New TextBox With {.Top = 7, .Left = 65, .Width = 640 - 7 * 3 - 65,
-            .Anchor = AnchorStyles.Left Or AnchorStyles.Right Or AnchorStyles.Top,
-            .Text = "F:\DLTEMP\test", .Parent = frm}
-        Dim lbl2 As New Label With {.Parent = frm, .Top = 7 + txtLocation.Top + txtLocation.Height, .Left = 7, .Width = 51, .Text = "Filter"}
-        Dim txtFilter As New TextBox With {.Top = 7 + txtLocation.Top + txtLocation.Height, .Left = 65, .Width = 640 - 7 * 3 - 65,
-           .Anchor = AnchorStyles.Left Or AnchorStyles.Right, .Parent = frm,
-           .Text = ".!qb|.downloading|.downloading.cfg|.tmp"}
-        Dim chkAutoDelete As New CheckBox With {.Parent = frm, .Top = txtFilter.Top + txtFilter.Height + 7,
-            .Left = 7, .Text = "AutoDelete", .Checked = True}
-        Dim ButtonStart As New Button With {.Parent = frm, .Width = 73, .Height = 23,
-            .Top = frm.Height - 73 - 23, .Left = CInt(frm.Width / 2 - 73 / 2), .Anchor = AnchorStyles.Bottom,
-            .Text = "Start"}
-        DisplayHelper.ApplyDynamicFormLayout(frm)
-        Dim isStarted As Boolean = False
-        Dim frmLock As New Object
-        AddHandler frm.FormClosing, Sub()
-                                        isStarted = False
-                                    End Sub
+            .Width = 780,
+            .Height = 560,
+            .Font = DisplayHelper.DisplayFont,
+            .FormBorderStyle = FormBorderStyle.FixedDialog,
+            .MaximizeBox = False,
+            .MinimizeBox = False,
+            .StartPosition = FormStartPosition.CenterParent,
+            .Text = "文件监控写入"}
+        frm.ClientSize = New Size(780, 560)
 
-        AddHandler ButtonStart.Click,
-        Sub(sender0 As Object, e0 As EventArgs)
-            Task.Run(Sub()
-                         isStarted = Not isStarted
-                         SyncLock frmLock
-                             Threading.Thread.Sleep(10)
-                         End SyncLock
-                         frm.Invoke(Sub()
-                                        If isStarted Then
-                                            ButtonStart.Text = "Stop"
-                                            Task.Run(
-                                            Sub()
-                                                SyncLock frmLock
-                                                    While isStarted
-                                                        Threading.Thread.Sleep(100)
-                                                        If Not AllowOperation Then Continue While
-                                                        Dim cap() As Long = RefreshCapacity()
-                                                        frm.Invoke(Sub() frm.Text = $"Idle. Capactiy remain: {cap(cap.Count - 2)}")
-                                                        Dim dirListen As New IO.DirectoryInfo(txtLocation.Text)
-                                                        If dirListen.GetDirectories().Count > 0 OrElse dirListen.GetFiles().Count > 0 Then
-                                                            For i As Integer = 2 To 1 Step -1
-                                                                Dim startsec As Integer = i
-                                                                frm.Invoke(Sub() frm.Text = $"Will start in {startsec}s")
-                                                                Threading.Thread.Sleep(1000)
-                                                            Next
-                                                        End If
-                                                        Dim pathlist As New List(Of String)
-                                                        For Each f As IO.FileInfo In dirListen.GetFiles()
-                                                            pathlist.Add(f.FullName)
-                                                        Next
-                                                        For Each d As IO.DirectoryInfo In dirListen.GetDirectories()
-                                                            pathlist.Add(d.FullName)
-                                                        Next
-                                                        Dim filter As String() = txtFilter.Text.Split({"|"}, StringSplitOptions.RemoveEmptyEntries)
-                                                        If pathlist.Count > 0 Then
-                                                            If Not isStarted Then Exit Sub
-                                                            frm.Invoke(Sub() ButtonStart.Enabled = False)
-                                                            frm.Invoke(Sub() frm.Text = $"Writing")
-                                                            Dim caps As Long() = RefreshCapacity()
-                                                            Dim cap1 As Long
-                                                            If caps(3) > 0 Then cap1 = caps(2) Else cap1 = caps(0)
-                                                            Dim keepindex As Integer = -1
-                                                            Dim CapRemain As Long = LastRemainCapValue
-                                                            While (keepindex >= pathlist.Count - 1) OrElse (CapRemain > (4 << 30))
-                                                                Dim size As Long = 0
-                                                                If IO.File.Exists(pathlist(keepindex + 1)) Then
-                                                                    size = (New IO.FileInfo(pathlist(keepindex + 1))).Length
-                                                                Else
-                                                                    size = (New IO.DirectoryInfo(pathlist(keepindex + 1))).GetFiles("*", IO.SearchOption.AllDirectories).Sum(
-                                                                    Function(f As IO.FileInfo) As Long
-                                                                        Return f.Length
-                                                                    End Function)
-                                                                End If
+        Dim lblTarget As New Label With {.Parent = frm, .Left = 7, .Top = 8,
+            .Width = frm.ClientSize.Width - 14, .Height = 22,
+            .Text = "目标 LTFS 目录：" & If(ListView1.Tag Is Nothing, "未选择", TryCast(ListView1.Tag, ltfsindex.directory)?.name)}
+        Dim lblSources As New Label With {.Parent = frm, .Left = 7, .Top = 34,
+            .Width = 300, .Height = 22, .Text = "监控源（文件或目录）"}
 
-                                                                If size > (CapRemain - (4 << 30)) Then
-                                                                    Exit While
-                                                                End If
-                                                                CapRemain -= size
-                                                                keepindex += 1
-                                                            End While
-                                                            If keepindex = -1 Then
-                                                                isStarted = False
-                                                                frm.BeginInvoke(Sub() ButtonStart.Enabled = True)
-                                                                Exit While
-                                                            ElseIf keepindex < pathlist.Count - 1 Then
-                                                                pathlist.RemoveRange(keepindex + 1, pathlist.Count - keepindex - 1)
-                                                                isStarted = False
-                                                            End If
-                                                            Invoke(Sub()
-                                                                       AddFileOrDir(DirectCast(ListView1.Tag, ltfsindex.directory), pathlist.ToArray(), 覆盖已有文件ToolStripMenuItem.Checked, filter)
-                                                                   End Sub)
-                                                            While AllowOperation
-                                                                Threading.Thread.Sleep(100)
-                                                            End While
-                                                            While Not AllowOperation
-                                                                Threading.Thread.Sleep(100)
-                                                            End While
-                                                            Dim DelList As New List(Of String)
-                                                            For Each f As FileRecord In UnwrittenFiles
-                                                                DelList.Add(f.SourcePath)
-                                                            Next
-                                                            Invoke(Sub()
-                                                                       写入数据ToolStripMenuItem_Click(sender0, e0)
-                                                                   End Sub)
-                                                            While AllowOperation
-                                                                Threading.Thread.Sleep(100)
-                                                            End While
-                                                            While Not AllowOperation
-                                                                Threading.Thread.Sleep(100)
-                                                            End While
-                                                            If chkAutoDelete.Checked Then
-                                                                Dim mResult As Boolean
-                                                                Invoke(Sub() mResult = MessageBox.Show(New Form With {.TopMost = True}, $"Delete written files?{vbCrLf}{DelList.Count}", "Confirm", MessageBoxButtons.OKCancel) = DialogResult.OK)
-                                                                If mResult Then
-                                                                    For Each s As String In DelList
-                                                                        If IO.File.Exists(s) Then IO.File.Delete(s)
-                                                                    Next
-                                                                End If
-                                                            End If
+        Dim sourceList As New ListView With {
+            .Parent = frm,
+            .Left = 7,
+            .Top = 58,
+            .Width = 630,
+            .Height = 250,
+            .View = View.Details,
+            .FullRowSelect = True,
+            .GridLines = True,
+            .HideSelection = False,
+            .MultiSelect = True,
+            .HeaderStyle = ColumnHeaderStyle.Nonclickable}
+        sourceList.Columns.Add("路径", sourceList.Width - 5)
 
-                                                            Threading.Thread.Sleep(5000)
-                                                            frm.BeginInvoke(Sub() ButtonStart.Enabled = True)
-                                                        End If
-                                                    End While
-                                                End SyncLock
-                                            End Sub)
-                                        Else
-                                            ButtonStart.Text = "Start"
+        Dim buttonAddFolder As New Button With {.Parent = frm, .Text = "添加目录"}
+        Dim buttonAddFile As New Button With {.Parent = frm, .Text = "添加文件"}
+        Dim buttonEdit As New Button With {.Parent = frm, .Text = "编辑"}
+        Dim buttonRemove As New Button With {.Parent = frm, .Text = "删除"}
+        buttonAddFolder.SetBounds(647, 58, 118, 30)
+        buttonAddFile.SetBounds(647, 94, 118, 30)
+        buttonEdit.SetBounds(647, 130, 118, 30)
+        buttonRemove.SetBounds(647, 166, 118, 30)
+
+        Dim lblFilter As New Label With {.Parent = frm, .Left = 7, .Top = 316,
+            .Width = 300, .Height = 22, .Text = "Glob 过滤规则（每行一条，! 表示排除）"}
+        Dim txtFilter As New TextBox With {
+            .Parent = frm,
+            .Left = 7,
+            .Top = 340,
+            .Width = frm.ClientSize.Width - 14,
+            .Height = 145,
+            .Multiline = True,
+            .AcceptsReturn = True,
+            .ScrollBars = ScrollBars.Both,
+            .WordWrap = False,
+            .Text = DefaultMonitorFilter}
+
+        Dim chkAutoDelete As New CheckBox With {.Parent = frm, .Left = 7, .Top = 493,
+            .Width = 220, .Height = 24, .Text = "写入成功后静默删除源文件", .Checked = True}
+        Dim buttonStart As New Button With {.Parent = frm, .Text = "开始"}
+        buttonStart.SetBounds(CInt(frm.ClientSize.Width / 2 - 45), 523, 90, 28)
+
+        Dim addSource As Action(Of String) =
+            Sub(path As String)
+                If String.IsNullOrWhiteSpace(path) Then Exit Sub
+                Dim value As String = path.Trim()
+                For Each item As ListViewItem In sourceList.Items
+                    If String.Equals(item.Text, value, StringComparison.OrdinalIgnoreCase) Then Exit Sub
+                Next
+                sourceList.Items.Add(New ListViewItem(value))
+            End Sub
+
+        If IO.Directory.Exists("F:\DLTEMP\test") Then addSource("F:\DLTEMP\test")
+
+        AddHandler buttonAddFolder.Click,
+            Sub()
+                Dim selectedPath As String = FileDialogHelper.SelectFolder()
+                If Not String.IsNullOrWhiteSpace(selectedPath) Then addSource(selectedPath)
+            End Sub
+        AddHandler buttonAddFile.Click,
+            Sub()
+                Using dialog As New OpenFileDialog With {
+                    .Multiselect = True,
+                    .CheckFileExists = True,
+                    .Filter = "所有文件|*.*"}
+                    If dialog.ShowDialog(frm) = DialogResult.OK Then
+                        For Each path As String In dialog.FileNames
+                            addSource(path)
+                        Next
+                    End If
+                End Using
+            End Sub
+        AddHandler buttonEdit.Click,
+            Sub()
+                If sourceList.SelectedItems.Count <> 1 Then
+                    MessageBox.Show(frm, "请选择一个源项目。", "监控源")
+                    Exit Sub
+                End If
+                Dim item As ListViewItem = sourceList.SelectedItems(0)
+                Dim value As String = item.Text
+                If DisplayHelper.ShowInputDialog("文件或目录路径", "编辑监控源", value) = DialogResult.OK AndAlso
+                    Not String.IsNullOrWhiteSpace(value) Then
+                    item.Text = value.Trim()
+                End If
+            End Sub
+        AddHandler buttonRemove.Click,
+            Sub()
+                Dim indexes As List(Of Integer) = sourceList.SelectedIndices.Cast(Of Integer)().OrderByDescending(Function(i) i).ToList()
+                For Each index As Integer In indexes
+                    sourceList.Items.RemoveAt(index)
+                Next
+            End Sub
+        AddHandler sourceList.DoubleClick,
+            Sub() buttonEdit.PerformClick()
+        AddHandler sourceList.KeyDown,
+            Sub(keySender As Object, keyEvent As KeyEventArgs)
+                If keyEvent.KeyCode = Keys.Delete Then
+                    buttonRemove.PerformClick()
+                    keyEvent.Handled = True
+                End If
+            End Sub
+
+        Dim monitorCts As Threading.CancellationTokenSource = Nothing
+        Dim closing As Boolean = False
+        Dim editorControls As New List(Of Control) From {
+            sourceList, buttonAddFolder, buttonAddFile, buttonEdit, buttonRemove, txtFilter, chkAutoDelete}
+
+        Dim updateStatus As Action(Of String) =
+            Sub(status As String)
+                If closing OrElse frm.IsDisposed OrElse Not frm.IsHandleCreated Then Exit Sub
+                Try
+                    Dim update As Action =
+                        Sub()
+                            If Not frm.IsDisposed Then frm.Text = status
+                        End Sub
+                    If frm.InvokeRequired Then frm.BeginInvoke(update) Else update()
+                Catch
+                End Try
+            End Sub
+
+        Dim setRunningUi As Action(Of Boolean) =
+            Sub(running As Boolean)
+                If closing OrElse frm.IsDisposed OrElse Not frm.IsHandleCreated Then Exit Sub
+                Try
+                    Dim update As Action =
+                        Sub()
+                            If frm.IsDisposed Then Exit Sub
+                            For Each control As Control In editorControls
+                                control.Enabled = Not running
+                            Next
+                            buttonStart.Text = If(running, "停止", "开始")
+                            buttonStart.Enabled = True
+                        End Sub
+                    If frm.InvokeRequired Then frm.BeginInvoke(update) Else update()
+                Catch
+                End Try
+            End Sub
+
+        AddHandler frm.FormClosing,
+            Sub()
+                closing = True
+                If monitorCts IsNot Nothing Then monitorCts.Cancel()
+            End Sub
+
+        AddHandler buttonStart.Click,
+            Sub()
+                If monitorCts IsNot Nothing Then
+                    monitorCts.Cancel()
+                    buttonStart.Enabled = False
+                    frm.Text = "正在停止监控..."
+                    Exit Sub
+                End If
+
+                Dim targetDirectory As ltfsindex.directory = TryCast(ListView1.Tag, ltfsindex.directory)
+                If targetDirectory Is Nothing Then
+                    MessageBox.Show(frm, "请先在 LTFS 窗口中选择目标目录。", "文件监控写入")
+                    Exit Sub
+                End If
+
+                Dim sourcePaths As String() = sourceList.Items.Cast(Of ListViewItem)().
+                    Select(Function(item) item.Text.Trim()).
+                    Where(Function(path) Not String.IsNullOrWhiteSpace(path)).
+                    ToArray()
+                If sourcePaths.Length = 0 Then
+                    MessageBox.Show(frm, "请至少添加一个文件或目录作为监控源。", "文件监控写入")
+                    Exit Sub
+                End If
+
+                Dim filterText As String = txtFilter.Text
+                If String.IsNullOrWhiteSpace(filterText) Then filterText = DefaultMonitorFilter
+                Dim autoDelete As Boolean = chkAutoDelete.Checked
+                Dim overwrite As Boolean = 覆盖已有文件ToolStripMenuItem.Checked
+                Dim currentCts As New Threading.CancellationTokenSource()
+                monitorCts = currentCts
+                setRunningUi(True)
+
+                Threading.Tasks.Task.Run(
+                    Sub()
+                        Dim token As Threading.CancellationToken = currentCts.Token
+                        Dim states As New Dictionary(Of String, MonitorFileState)(StringComparer.OrdinalIgnoreCase)
+                        Try
+                            Dim matcher As Matcher = GlobCollector.BuildMatcherFromString(filterText)
+                            While Not token.IsCancellationRequested
+                                If Not AllowOperation Then
+                                    updateStatus("等待当前 LTFS 操作完成...")
+                                    token.WaitHandle.WaitOne(500)
+                                    Continue While
+                                End If
+
+                                Dim matchedCount As Integer = 0
+                                Dim ready As List(Of GlobHelper.AddFile) = Nothing
+                                Try
+                                    ready = CollectStableMonitorFiles(sourcePaths, matcher, states, DateTime.UtcNow, token, matchedCount)
+                                Catch ex As OperationCanceledException
+                                    Exit While
+                                Catch ex As Exception
+                                    updateStatus($"监控扫描失败：{ex.Message}")
+                                    token.WaitHandle.WaitOne(1000)
+                                    Continue While
+                                End Try
+
+                                If ready.Count = 0 Then
+                                    updateStatus($"监控中：匹配 {matchedCount} 个，等待大小和修改时间稳定 10 秒")
+                                    token.WaitHandle.WaitOne(1000)
+                                    Continue While
+                                End If
+
+                                Dim remainingCapacity As Long
+                                Try
+                                    RefreshCapacity()
+                                    remainingCapacity = LastRemainCapValue
+                                Catch ex As Exception
+                                    updateStatus($"读取磁带容量失败：{ex.Message}")
+                                    token.WaitHandle.WaitOne(1000)
+                                    Continue While
+                                End Try
+
+                                Const ReserveBytes As Long = 4294967296L
+                                Dim available As Long = remainingCapacity - ReserveBytes
+                                Dim batch As New List(Of GlobHelper.AddFile)
+                                If available > 0 Then
+                                    For Each fileItem As GlobHelper.AddFile In ready
+                                        token.ThrowIfCancellationRequested()
+                                        Dim length As Long = fileItem.SourceInfo.Length
+                                        If length <= available Then
+                                            batch.Add(fileItem)
+                                            available -= length
                                         End If
-                                    End Sub)
+                                    Next
+                                End If
 
-                     End Sub)
+                                If batch.Count = 0 Then
+                                    updateStatus($"等待容量：可用 {IOManager.FormatSize(Math.Max(0, remainingCapacity))}，稳定文件 {ready.Count} 个")
+                                    token.WaitHandle.WaitOne(1000)
+                                    Continue While
+                                End If
 
-        End Sub
-        frm.Show()
+                                updateStatus($"正在加入队列：{batch.Count} 个稳定文件")
+                                Me.Invoke(Sub() AddStableFilePlan(targetDirectory, batch, overwrite))
+                                If Not WaitForMonitorOperation(token) Then Exit While
+
+                                Dim batchKeys As New HashSet(Of String)(
+                                    batch.Select(Function(fileItem) NormalizeMonitorPath(fileItem.SourceFullPath)),
+                                    StringComparer.OrdinalIgnoreCase)
+                                For Each key As String In batchKeys
+                                    Dim state As MonitorFileState = Nothing
+                                    If states.TryGetValue(key, state) Then state.Queued = True
+                                Next
+
+                                Dim deleteList As New List(Of String)
+                                For Each fileRecord As FileRecord In UnwrittenFiles.ToList()
+                                    If batchKeys.Contains(NormalizeMonitorPath(fileRecord.SourcePath)) Then
+                                        deleteList.Add(fileRecord.SourcePath)
+                                    End If
+                                Next
+
+                                If UnwrittenFiles.Count > 0 Then
+                                    updateStatus($"正在写入：{batch.Count} 个稳定文件")
+                                    Me.Invoke(Sub() 写入数据ToolStripMenuItem_Click(sender, e))
+                                    If Not WaitForMonitorOperation(token) Then Exit While
+                                End If
+
+                                If autoDelete AndAlso deleteList.Count > 0 AndAlso Not token.IsCancellationRequested Then
+                                    For Each sourcePath As String In deleteList
+                                        Try
+                                            If IO.File.Exists(sourcePath) Then IO.File.Delete(sourcePath)
+                                        Catch ex As Exception
+                                            updateStatus($"删除失败：{ex.Message}")
+                                        End Try
+                                    Next
+                                End If
+                            End While
+                        Catch ex As OperationCanceledException
+                        Catch ex As Exception
+                            updateStatus($"监控已停止（错误）：{ex.Message}")
+                        Finally
+                            If ReferenceEquals(monitorCts, currentCts) Then
+                                monitorCts = Nothing
+                                setRunningUi(False)
+                                If token.IsCancellationRequested Then
+                                    updateStatus("监控已停止")
+                                Else
+                                    updateStatus("监控已结束")
+                                End If
+                            End If
+                            currentCts.Dispose()
+                        End Try
+                    End Sub,
+                    currentCts.Token)
+            End Sub
+
+        DisplayHelper.ApplyDynamicFormLayout(frm)
+        frm.Show(Me)
     End Sub
 
     Private Sub 停止等待缓存ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 停止等待缓存ToolStripMenuItem.Click
