@@ -11,6 +11,7 @@ Imports System.Globalization
 Imports System.Xml.Serialization
 Imports System.Buffers
 Imports System.Text.RegularExpressions
+Imports LTFSCopyGUI.Native
 
 <TypeConverter(GetType(ExpandableObjectConverter))>
 Public Class IOManager
@@ -1526,19 +1527,20 @@ Public Class IOManager
     End Class
 
     Public Shared Function CreateSparceFile(path As String, size As Long) As Boolean
-        Const FSCTL_SET_SPARSE As Integer = &H900C4
         Dim result As Boolean = False
         Try
             Using fs As New FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None)
 
                 ' 标记为稀疏文件
-                Dim bytesReturned As UInteger = 0
-                result = TapeUtils.DeviceIoControl(fs.SafeFileHandle.DangerousGetHandle(),
-                                FSCTL_SET_SPARSE,
-                                IntPtr.Zero, 0,
-                                IntPtr.Zero, 0,
-                                bytesReturned,
-                                IntPtr.Zero)
+                Dim nativeResult As NativeCallResult = NativeMethods.DeviceIoControl(
+                    fs.SafeFileHandle.DangerousGetHandle(),
+                    NativeMethods.FsctlSetSparse,
+                    IntPtr.Zero,
+                    0,
+                    IntPtr.Zero,
+                    0)
+                result = nativeResult.Succeeded
+                If Not result Then Return False
 
                 ' 设置大小
                 fs.SetLength(size)
@@ -2400,28 +2402,25 @@ Public Class DiskQuery
     ' 1. Total size (bytes)
     '========================
     Public Shared Function GetDiskLength(hDevice As IntPtr) As Long
-
-        Const IOCTL_DISK_GET_LENGTH_INFO As UInteger = &H7405C
-
         Dim outInfo As Long = 0
-        Dim bytesReturned As Integer
 
         Dim outSize As Integer = Marshal.SizeOf(Of Long)()
 
         Dim outPtr As IntPtr = Marshal.AllocHGlobal(outSize)
 
         Try
-            Dim ok = TapeUtils.DeviceIoControl(
+            Dim nativeResult As NativeCallResult = NativeMethods.DeviceIoControl(
                 hDevice,
-                IOCTL_DISK_GET_LENGTH_INFO,
+                NativeMethods.IoctlDiskGetLengthInfo,
                 IntPtr.Zero,
                 0,
                 outPtr,
-                CUInt(outSize),
-                CUInt(bytesReturned),
-                IntPtr.Zero)
+                CUInt(outSize))
 
-            If Not ok Then Throw New Win32Exception()
+            nativeResult.ThrowIfFailed("IOCTL_DISK_GET_LENGTH_INFO failed.")
+            If nativeResult.BytesReturned < CUInt(outSize) Then
+                Throw New InvalidDataException("IOCTL_DISK_GET_LENGTH_INFO returned an incomplete result.")
+            End If
 
             outInfo = Marshal.ReadInt64(outPtr)
 
@@ -2437,9 +2436,6 @@ Public Class DiskQuery
     ' 2. Sector size
     '========================
     Public Shared Function GetSectorSize(hDevice As IntPtr) As Integer
-
-        Const IOCTL_STORAGE_QUERY_PROPERTY As UInteger = &H2D1400
-
         Const PropertyStandardQuery As UInteger = 0
         Const StorageAccessAlignmentProperty As UInteger = 6
 
@@ -2451,8 +2447,6 @@ Public Class DiskQuery
         Dim outSize As Integer = 1024
         Dim outPtr As IntPtr = Marshal.AllocHGlobal(outSize)
 
-        Dim bytesReturned As Integer
-
         Try
             ' fill input struct
             Dim query As New STORAGE_PROPERTY_QUERY With {
@@ -2463,17 +2457,18 @@ Public Class DiskQuery
 
             Marshal.StructureToPtr(query, inPtr, False)
 
-            Dim ok = TapeUtils.DeviceIoControl(
+            Dim nativeResult As NativeCallResult = NativeMethods.DeviceIoControl(
                 hDevice,
-                IOCTL_STORAGE_QUERY_PROPERTY,
+                NativeMethods.IoctlStorageQueryProperty,
                 inPtr,
                 CUInt(querySize),
                 outPtr,
-                CUInt(outSize),
-                CUInt(bytesReturned),
-                IntPtr.Zero)
+                CUInt(outSize))
 
-            If Not ok Then Throw New Win32Exception()
+            nativeResult.ThrowIfFailed("IOCTL_STORAGE_QUERY_PROPERTY failed.")
+            If nativeResult.BytesReturned = 0 Then
+                Throw New InvalidDataException("IOCTL_STORAGE_QUERY_PROPERTY returned no data.")
+            End If
 
             Dim desc As STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR =
                 Marshal.PtrToStructure(Of STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR)(outPtr)
@@ -2517,11 +2512,12 @@ Public Class DiskQuery
 End Class
 Public Class ExplorerUtils
     Implements IComparer(Of String)
-    Declare Unicode Function StrCmpLogicalW Lib "shlwapi.dll" (ByVal s1 As String, ByVal s2 As String) As Int32
 
     Public Function Compare(ByVal x As String, ByVal y As String) As Integer _
         Implements IComparer(Of String).Compare
-        Return StrCmpLogicalW(x, y)
+        Dim result As NativeStringCompareResult = NativeMethods.CompareLogical(x, y)
+        result.ThrowIfFailed("Compare file names failed.")
+        Return result.Comparison
     End Function
 End Class
 

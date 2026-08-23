@@ -2,7 +2,6 @@ Imports System
 Imports System.ComponentModel
 Imports System.IO
 Imports System.Reflection
-Imports System.Runtime.InteropServices
 Imports System.Runtime.Serialization
 Imports System.Text
 Imports System.Xml.Serialization
@@ -11,6 +10,7 @@ Imports Microsoft.Extensions.FileSystemGlobbing
 Imports Serilog
 Imports Serilog.Context
 Imports stdole
+Imports LTFSCopyGUI.Native
 Public Class SerializationHelper
     Public Shared Function GetSerializeString(ByVal c As Object) As String
         Dim s As New MemoryStream
@@ -1338,60 +1338,13 @@ End Class
 
 Public NotInheritable Class FileDropHandler
     Implements IMessageFilter, IDisposable
-    <DllImport("user32.dll", SetLastError:=True, CallingConvention:=CallingConvention.Winapi)>
-    Private Shared Function ChangeWindowMessageFilterEx(ByVal hWnd As IntPtr, ByVal message As UInteger, ByVal action As ChangeFilterAction, pChangeFilterStruct As ChangeFilterStruct) As <MarshalAs(UnmanagedType.Bool)> Boolean
 
-    End Function
-
-    <DllImport("shell32.dll", SetLastError:=False, CallingConvention:=CallingConvention.Winapi)>
-    Private Shared Sub DragAcceptFiles(ByVal hWnd As IntPtr, ByVal fAccept As Boolean)
-    End Sub
-
-    <DllImport("shell32.dll", SetLastError:=False, CharSet:=CharSet.Unicode, CallingConvention:=CallingConvention.Winapi)>
-    Private Shared Function DragQueryFile(ByVal hWnd As IntPtr, ByVal iFile As UInteger, ByVal lpszFile As StringBuilder, ByVal cch As Integer) As UInteger
-
-    End Function
-
-    <DllImport("shell32.dll", SetLastError:=False, CallingConvention:=CallingConvention.Winapi)>
-    Private Shared Sub DragFinish(ByVal hDrop As IntPtr)
-
-    End Sub
-
-    <StructLayout(LayoutKind.Sequential)>
-    Private Structure ChangeFilterStruct
-
-        Public CbSize As UInteger
-
-        Public ExtStatus As ChangeFilterStatus
-    End Structure
-
-    Private Enum ChangeFilterAction As UInteger
-
-        MSGFLT_RESET
-
-        MSGFLT_ALLOW
-
-        MSGFLT_DISALLOW
-    End Enum
-
-    Private Enum ChangeFilterStatus As UInteger
-
-        MSGFLTINFO_NONE
-
-        MSGFLTINFO_ALREADYALLOWED_FORWND
-
-        MSGFLTINFO_ALREADYDISALLOWED_FORWND
-
-        MSGFLTINFO_ALLOWED_HIGHER
-    End Enum
 
     Private Const WM_COPYGLOBALDATA As UInteger = 73
 
     Private Const WM_COPYDATA As UInteger = 74
 
     Private Const WM_DROPFILES As UInteger = 563
-
-    Private Const GetIndexCount As UInteger = 4294967295
 
     Private _ContainerControl As Control
 
@@ -1419,20 +1372,11 @@ Public NotInheritable Class FileDropHandler
         End If
 
         _DisposeControl = releaseControl
-        Dim status = New ChangeFilterStruct With {.CbSize = 8}
-        If Not ChangeWindowMessageFilterEx(containerControl.Handle, WM_DROPFILES, ChangeFilterAction.MSGFLT_ALLOW, Nothing) Then
-            Throw New Win32Exception(Marshal.GetLastWin32Error)
-        End If
+        NativeMethods.ChangeWindowMessageFilterEx(containerControl.Handle, WM_DROPFILES, 1UI).ThrowIfFailed("Allow WM_DROPFILES failed.")
+        NativeMethods.ChangeWindowMessageFilterEx(containerControl.Handle, WM_COPYGLOBALDATA, 1UI).ThrowIfFailed("Allow WM_COPYGLOBALDATA failed.")
+        NativeMethods.ChangeWindowMessageFilterEx(containerControl.Handle, WM_COPYDATA, 1UI).ThrowIfFailed("Allow WM_COPYDATA failed.")
 
-        If Not ChangeWindowMessageFilterEx(containerControl.Handle, WM_COPYGLOBALDATA, ChangeFilterAction.MSGFLT_ALLOW, Nothing) Then
-            Throw New Win32Exception(Marshal.GetLastWin32Error)
-        End If
-
-        If Not ChangeWindowMessageFilterEx(containerControl.Handle, WM_COPYDATA, ChangeFilterAction.MSGFLT_ALLOW, Nothing) Then
-            Throw New Win32Exception(Marshal.GetLastWin32Error)
-        End If
-
-        DragAcceptFiles(containerControl.Handle, True)
+        NativeMethods.DragAcceptFiles(containerControl.Handle, True).ThrowIfFailed("Enable file drop failed.")
         Application.AddMessageFilter(Me)
     End Sub
 
@@ -1447,20 +1391,15 @@ Public NotInheritable Class FileDropHandler
         End If
         If (m.Msg = WM_DROPFILES) Then
             Dim handle = m.WParam
-            Dim fileCount = DragQueryFile(handle, GetIndexCount, Nothing, 0)
-            Dim fileNames(CInt((fileCount) - 1)) As String
-            Dim sb = New StringBuilder(262)
-            Dim charLength = sb.Capacity
-            Dim i As UInteger = 0
-            Do While (i < fileCount)
-                If (DragQueryFile(handle, i, sb, charLength) > 0) Then
-                    fileNames(CInt(i)) = sb.ToString
+            Dim fileNames() As String
+            Try
+                fileNames = NativeMethods.GetDroppedFiles(handle)
+            Finally
+                Dim finishResult As NativeCallResult = NativeMethods.DragFinish(handle)
+                If Not finishResult.Succeeded Then
+                    Log.Warning("Finishing dropped file handle failed. NativeError={NativeError}.", finishResult.Win32Error)
                 End If
-
-                i = CUInt((i + 1))
-            Loop
-
-            DragFinish(handle)
+            End Try
             _ContainerControl.AllowDrop = True
             _ContainerControl.DoDragDrop(fileNames, DragDropEffects.All)
             _ContainerControl.AllowDrop = False

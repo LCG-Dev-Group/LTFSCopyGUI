@@ -3,6 +3,7 @@ Imports System.Collections.Generic
 Imports System.IO
 Imports System.Runtime.InteropServices
 Imports Microsoft.VisualBasic.ApplicationServices
+Imports LTFSCopyGUI.Native
 
 Namespace My
     ' 以下事件可用于 MyApplication: 
@@ -13,21 +14,11 @@ Namespace My
     ' NetworkAvailabilityChanged:在连接或断开网络连接时引发。
     <TypeConverter(GetType(ExpandableObjectConverter))>
     Partial Friend Class MyApplication
-        <DllImport("kernel32.dll")>
-        Public Shared Function AllocConsole() As Boolean
-
-        End Function
-        <DllImport("kernel32.dll")>
-        Shared Function FreeConsole() As Boolean
-
-        End Function
-        <DllImport("kernel32.dll")>
-        Shared Function AttachConsole(pid As Integer) As Boolean
-
-        End Function
         Public Shared Sub InitConsole()
-            If Not AttachConsole(-1) Then
-                AllocConsole()
+            Dim attachResult As NativeCallResult = NativeMethods.AttachConsole(-1)
+            If Not attachResult.Succeeded Then
+                Dim allocResult As NativeCallResult = NativeMethods.AllocConsole()
+                allocResult.ThrowIfFailed("AllocConsole failed.")
             Else
                 Dim CurrentLine As Integer = Console.CursorTop
                 Console.SetCursorPosition(0, Console.CursorTop)
@@ -37,7 +28,8 @@ Namespace My
         End Sub
         Public Sub CloseConsole()
             SendKeys.SendWait("{ENTER}")
-            FreeConsole()
+            Dim freeResult As NativeCallResult = NativeMethods.FreeConsole()
+            freeResult.ThrowIfFailed("FreeConsole failed.")
         End Sub
         Public Function CheckUAC(e As StartupEventArgs) As Boolean
             If ApplicationElevation.IsAdministrator Then Return True

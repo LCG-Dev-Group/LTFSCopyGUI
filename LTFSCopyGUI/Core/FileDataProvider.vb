@@ -774,16 +774,17 @@ Public Class HardDriveDataProvider
             End Using
         End Using
         If Not TapeUtils.OpenTapeDrive(path, driveHandle) Then
+            Dim openError As Integer = TapeUtils.LastWin32Error
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(HardDriveDataProvider))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "HardDriveProvider")
                     Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
                         Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
-                            Log.Error("Hard drive stream read could not open the device. DevicePath={DevicePath} Win32Error={Win32Error}.", path, TapeUtils.GetLastError())
+                            Log.Error("Hard drive stream read could not open the device. DevicePath={DevicePath} Win32Error={Win32Error}.", path, openError)
                         End Using
                     End Using
                 End Using
             End Using
-            Throw New ComponentModel.Win32Exception(TapeUtils.GetLastError())
+            Throw New ComponentModel.Win32Exception(openError, $"Unable to open hard drive device: {path}")
         End If
         Try
             Dim batchSize As Integer = 128

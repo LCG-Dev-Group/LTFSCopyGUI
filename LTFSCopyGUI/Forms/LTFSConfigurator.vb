@@ -5,6 +5,7 @@ Imports System.IO
 Imports System.Runtime.InteropServices
 Imports System.Text
 Imports LTFSCopyGUI.TapeImage
+Imports LTFSCopyGUI.Native
 Imports NAudio.Wave
 Imports Serilog
 Imports Serilog.Context
@@ -12,10 +13,6 @@ Imports Serilog.Context
 Public Class LTFSConfigurator
     Private ReadOnly _logSessionId As String = $"configurator-{Guid.NewGuid().ToString("N").Substring(0, 8)}"
     Private Const WM_SETREDRAW As Integer = &HB
-
-    <DllImport("user32.dll", CharSet:=CharSet.Auto)>
-    Private Shared Function SendMessage(hWnd As IntPtr, msg As Integer, wParam As IntPtr, lParam As IntPtr) As IntPtr
-    End Function
 
     Private LoadComplete As Boolean = False
     Private _SelectedIndex As Integer
@@ -565,35 +562,34 @@ Public Class LTFSConfigurator
                     Dim succ As Boolean, BytesReturned As UInteger
                     SyncLock TapeUtils.GetSCSIOperationLock(ConfTapeDrive)
                         Dim handle As IntPtr
-                        TapeUtils.OpenTapeDrive(ConfTapeDrive, handle)
-                        If TapeUtils.DriverTypeSetting = TapeUtils.DriverType.TapeStream Then
-                            Dim ts As TapeImage = Nothing
-                            TapeStreamMapping.MappingTable.TryGetValue(handle, ts)
-                            If ts IsNot Nothing Then
-                                succ = ts.HandleSCSICommand(cdb, param, CByte(CInt(TextBoxDataDir.Text)), param.Length, param, sense)
-                            End If
-                        Else
-                            Dim cdbPtr As IntPtr = Marshal.AllocHGlobal(cdb.Length)
-                            Marshal.Copy(cdb, 0, cdbPtr, cdb.Length)
-                            Dim dataBufferPtr As IntPtr
-                            If param.Length > 0 Then
-                                dataBufferPtr = Marshal.AllocHGlobal(param.Length)
-                                Marshal.Copy(param, 0, dataBufferPtr, param.Length)
+                        If Not TapeUtils.OpenTapeDrive(ConfTapeDrive, handle) Then
+                            Throw New Win32Exception(TapeUtils.LastWin32Error, $"Unable to open {ConfTapeDrive}.")
+                        End If
+                        Try
+                            If TapeUtils.DriverTypeSetting = TapeUtils.DriverType.TapeStream Then
+                                Dim ts As TapeImage = Nothing
+                                TapeStreamMapping.MappingTable.TryGetValue(handle, ts)
+                                If ts IsNot Nothing Then
+                                    succ = ts.HandleSCSICommand(cdb, param, CByte(CInt(TextBoxDataDir.Text)), param.Length, param, sense)
+                                End If
                             Else
-                                dataBufferPtr = IntPtr.Zero
-                            End If
-                            Dim senseBufferPtr As IntPtr = Marshal.AllocHGlobal(64)
-                            Marshal.Copy(sense, 0, senseBufferPtr, 64)
-                            succ = TapeUtils.IOCtl.IOCtlDirect(handle, cdb, dataBufferPtr, CUInt(param.Length),
+                                Dim dataBufferPtr As IntPtr = IntPtr.Zero
+                                Try
+                                    If param.Length > 0 Then
+                                        dataBufferPtr = Marshal.AllocHGlobal(param.Length)
+                                        Marshal.Copy(param, 0, dataBufferPtr, param.Length)
+                                    End If
+                                    succ = TapeUtils.IOCtlDirect(handle, cdb, dataBufferPtr, CUInt(param.Length),
                                                            CByte(CInt(TextBoxDataDir.Text)), CUInt(CInt(TextBoxTimeoutValue.Text)), sense,
                                                            CByte(TextBoxTargetID.Text), CByte(TextBoxLUN.Text), BytesReturned)
-                            Marshal.FreeHGlobal(cdbPtr)
-                            If param.Length > 0 Then Marshal.Copy(dataBufferPtr, param, 0, param.Length)
-                            Marshal.FreeHGlobal(dataBufferPtr)
-                            Marshal.Copy(senseBufferPtr, sense, 0, sense.Length)
-                            Marshal.FreeHGlobal(senseBufferPtr)
-                        End If
-                        TapeUtils.CloseTapeDrive(handle)
+                                    If param.Length > 0 Then Marshal.Copy(dataBufferPtr, param, 0, param.Length)
+                                Finally
+                                    If dataBufferPtr <> IntPtr.Zero Then Marshal.FreeHGlobal(dataBufferPtr)
+                                End Try
+                            End If
+                        Finally
+                            TapeUtils.CloseTapeDrive(handle)
+                        End Try
                     End SyncLock
                     Invoke(Sub()
                                PrintCommandResult(cdb, param, sense)
@@ -601,7 +597,7 @@ Public Class LTFSConfigurator
                     If succ Then
                         Invoke(Sub() TextBoxDebugOutput.Text &= $"{vbCrLf}OK{vbCrLf}Bytesreturned = {BytesReturned}")
                     Else
-                        Dim ErrCode As Integer = TapeUtils.GetLastError()
+                        Dim ErrCode As Integer = TapeUtils.LastWin32Error
                         Dim win32ex As New Win32Exception(ErrCode)
                         Invoke(Sub() TextBoxDebugOutput.Text &= $"{vbCrLf}FAIL{vbCrLf}ErrCode: 0x{ErrCode.ToString("X8")}h{vbCrLf}{win32ex.Message}")
                     End If
@@ -1995,7 +1991,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
 
         ' SelectionBackColor causes RichEdit to repaint for every range. Suppress redraw
         ' while applying all channel colors so one output line becomes one repaint.
-        SendMessage(textbox.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero)
+        NativeMethods.SendMessage(textbox.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero).ThrowIfFailed("Disable text redraw failed.")
         Try
             For i As Integer = 0 To segmentCount - 1
                 Dim selectionStart As Integer = lineStart + i * seglen
@@ -2008,7 +2004,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
             Next
         Finally
             textbox.Select(textbox.TextLength, 0)
-            SendMessage(textbox.Handle, WM_SETREDRAW, New IntPtr(1), IntPtr.Zero)
+            NativeMethods.SendMessage(textbox.Handle, WM_SETREDRAW, New IntPtr(1), IntPtr.Zero).ThrowIfFailed("Enable text redraw failed.")
             textbox.Invalidate()
         End Try
     End Sub
@@ -2478,9 +2474,6 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
             End If
         End If
     End Sub
-    <DllImport("winmm.dll")> Public Shared Function sndPlaySoundA(lpszSoundName As IntPtr, uFlags As Integer) As Integer
-
-    End Function
     <Category("AudioPlayer")>
     Public Property sampleRate As Integer = 44100
     <Category("AudioPlayer")>
@@ -2615,13 +2608,13 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
         End If
     End Sub
     Public Class devListBrowser
-        <TypeConverter(GetType(ListTypeDescriptor(Of List(Of SetupAPIHelper.Device), SetupAPIHelper.Device)))>
-        Public Property devList As List(Of SetupAPIHelper.Device)
+        <TypeConverter(GetType(ListTypeDescriptor(Of List(Of NativeDevice), NativeDevice)))>
+        Public Property devList As List(Of NativeDevice)
 
     End Class
     Private Sub BrowseToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles BrowseToolStripMenuItem.Click
         Dim obj As New devListBrowser
-        obj.devList = SetupAPIHelper.Device.EnumerateDevices().ToList()
+        obj.devList = NativeMethods.EnumerateDevices().ToList()
         Dim pf As New SettingPanel With {.SelectedObject = obj}
         pf.Show()
     End Sub
@@ -3203,7 +3196,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                                                                                                                                    senseData = s
                                                                                                                                    Return True
                                                                                                                                End Function, 30) Then
-                                                            Dim ErrCode As Integer = TapeUtils.GetLastError()
+                                                            Dim ErrCode As Integer = TapeUtils.LastWin32Error
                                                             Dim win32ex As New Win32Exception(ErrCode)
                                                             Select Case MessageBox.Show($"WinError{vbCrLf}Code: 0x{ErrCode.ToString("X8")}h{vbCrLf}{win32ex.Message}",
                                                                                         My.Resources.ResText_Warning,

@@ -3,339 +3,24 @@ Imports System.Runtime.InteropServices
 Imports System.Text
 Imports System.ComponentModel
 Imports System.Xml.Serialization
+Imports LTFSCopyGUI.Native
 
 <TypeConverter(GetType(ExpandableObjectConverter))>
 <Serializable>
 Public Class TapeUtils
-#Region "winapi"
-    Public Class SetupAPIWheels
-        <StructLayout(LayoutKind.Sequential, Pack:=1, CharSet:=CharSet.Ansi)>
-        Public Structure SP_DEVINFO_DATA
+    <ThreadStatic>
+    Private Shared _lastWin32Error As Integer
 
-            Public cbSize As UInteger
+    Public Shared ReadOnly Property LastWin32Error As Integer
+        Get
+            Return _lastWin32Error
+        End Get
+    End Property
 
-            Public ClassGuid As Guid
+    Private Shared Sub SetLastNativeError(errorCode As Integer)
+        _lastWin32Error = errorCode
+    End Sub
 
-            Public DevInst As UInteger
-
-            Public Reserved As IntPtr
-        End Structure
-        <StructLayout(LayoutKind.Sequential, Pack:=1, CharSet:=CharSet.Ansi)>
-        Public Structure SP_DEVINFO_DETAIL_DATA
-
-            Public cbSize As UInteger
-
-            <MarshalAs(UnmanagedType.ByValTStr, SizeConst:=256)>
-            Public DevicePath As String
-
-        End Structure
-
-        <StructLayout(LayoutKind.Sequential, Pack:=1, CharSet:=CharSet.Ansi)>
-        Public Structure SP_DEVICE_INTERFACE_DATA
-
-            Public cbSize As UInteger
-
-            Public InterfaceClassGuid As Guid
-
-            Public Flags As UInteger
-
-            Public Reserved As IntPtr
-        End Structure
-        <StructLayout(LayoutKind.Sequential, Pack:=1, CharSet:=CharSet.Ansi)>
-        Public Structure SP_DEVICE_INTERFACE_DETAIL_DATA
-
-            Public cbSize As UInteger
-
-            <MarshalAs(UnmanagedType.ByValTStr, SizeConst:=256)>
-            Public DevicePath As String
-        End Structure
-        <StructLayout(LayoutKind.Sequential, Pack:=1, CharSet:=CharSet.Ansi)>
-        Public Structure TAPE_DRIVE
-            <MarshalAs(UnmanagedType.ByValTStr, SizeConst:=8)>
-            Public VendorId As String
-            <MarshalAs(UnmanagedType.ByValTStr, SizeConst:=16)>
-            Public ProductId As String
-            <MarshalAs(UnmanagedType.ByValTStr, SizeConst:=128)>
-            Public SerialNumber As String
-            Public DevIndex As Int32
-            Public NextTapeDrive As IntPtr
-        End Structure
-        <StructLayout(LayoutKind.Sequential, Pack:=1, CharSet:=CharSet.Ansi)>
-        Public Structure SP_DRVINFO_DATA
-
-            Public cbSize As UInteger
-
-            Public DriverType As UInteger
-
-            Public Reserved As IntPtr
-
-            <MarshalAs(UnmanagedType.ByValTStr, SizeConst:=256)>
-            Public Description As String
-
-            <MarshalAs(UnmanagedType.ByValTStr, SizeConst:=256)>
-            Public MfgName As String
-
-            <MarshalAs(UnmanagedType.ByValTStr, SizeConst:=256)>
-            Public ProviderName As String
-
-            Public DriverDate As ComTypes.FILETIME
-
-            Public DriverVersion As UInt64
-        End Structure
-
-        <StructLayout(LayoutKind.Sequential, Pack:=1, CharSet:=CharSet.Ansi)>
-        Public Class STORAGE_DEVICE_NUMBER
-            Public DeviceType As Int32
-            Public DeviceNumber As Int32
-            Public PartitionNumber As Int32
-        End Class
-        Private Function GetVersionFromLong(ByVal version As UInt64) As String
-            Dim baseNumber As UInt64 = 65535
-            Dim sb As StringBuilder = New StringBuilder
-            Dim temp As UInt64
-            Dim offset As Integer = 48
-            Do While (offset >= 0)
-                temp = CULng(CLng(CDec(version) + offset) _
-                        And CLng(baseNumber))
-                sb.Append((temp.ToString + "."))
-                offset = (offset - 16)
-            Loop
-
-            Return sb.ToString
-        End Function
-        ' Flags for CM_Locate_DevNode
-        Public Const CM_LOCATE_DEVNODE_NORMAL As UInteger = 0
-
-        Public Const CM_LOCATE_DEVNODE_PHANTOM As UInteger = 1
-
-        Public Const CM_LOCATE_DEVNODE_CANCELREMOVE As UInteger = 2
-
-        Public Const CM_LOCATE_DEVNODE_NOVALIDATION As UInteger = 4
-
-        Public Const CM_LOCATE_DEVNODE_BITS As UInteger = 7
-
-        ' Flags for CM_Disable_DevNode
-        Public Const CM_DISABLE_POLITE As UInteger = 0
-
-        Public Const CM_DISABLE_ABSOLUTE As UInteger = 1
-
-        Public Const CM_DISABLE_HARDWARE As UInteger = 2
-
-        Public Const CM_DISABLE_UI_NOT_OK As UInteger = 4
-
-        Public Const CM_DISABLE_PERSIST As UInteger = 8
-
-        Public Const CM_DISABLE_BITS As UInteger = 15
-
-        ' Flags for CM_Query_And_Remove_SubTree
-        Public Const CM_REMOVE_UI_OK As UInteger = 0
-
-        Public Const CM_REMOVE_UI_NOT_OK As UInteger = 1
-
-        Public Const CM_REMOVE_NO_RESTART As UInteger = 2
-
-        Public Const CM_REMOVE_BITS As UInteger = 3
-
-        Public Const DIGCF_DEFAULT As UInteger = &H1
-        Public Const DIGCF_PRESENT As UInteger = &H2
-        Public Const DIGCF_ALLCLASSES As UInteger = &H4
-        Public Const DIGCF_PROFILE As UInteger = &H8
-        Public Const DIGCF_DEVICEINTERFACE As UInteger = &H10
-        Public Const INVALID_HANDLE_VALUE As Integer = -1
-        Public Const MAX_DEV_LEN As Integer = 256
-        Public Const SPDRP_DEVICEDESC As UInteger = &H0 ' DeviceDesc (R/W)
-        Public Const SPDRP_HARDWAREID As UInteger = &H1 ' HardwareID (R/W)
-        Public Const SPDRP_COMPATIBLEIDS As UInteger = &H2 ' CompatibleIDs (R/W)
-        Public Const SPDRP_UNUSED0 As UInteger = &H3 ' unused
-        Public Const SPDRP_SERVICE As UInteger = &H4 ' Service (R/W)
-        Public Const SPDRP_UNUSED1 As UInteger = &H5 ' unused
-        Public Const SPDRP_UNUSED2 As UInteger = &H6 ' unused
-        Public Const SPDRP_CLASS As UInteger = &H7 ' Class (R--tied to ClassGUID)
-        Public Const SPDRP_CLASSGUID As UInteger = &H8 ' ClassGUID (R/W)
-        Public Const SPDRP_DRIVER As UInteger = &H9 ' Driver (R/W)
-        Public Const SPDRP_CONFIGFLAGS As UInteger = &HA ' ConfigFlags (R/W)
-        Public Const SPDRP_MFG As UInteger = &HB ' Mfg (R/W)
-        Public Const SPDRP_FRIENDLYNAME As UInteger = &HC ' FriendlyName (R/W)
-        Public Const SPDRP_LOCATION_INFORMATION As UInteger = &HD ' LocationInformation (R/W)
-        Public Const SPDRP_PHYSICAL_DEVICE_OBJECT_NAME As UInteger = &HE ' PhysicalDeviceObjectName (R)
-        Public Const SPDRP_CAPABILITIES As UInteger = &HF ' Capabilities (R)
-        Public Const SPDRP_UI_NUMBER As UInteger = &H10 ' UiNumber (R)
-        Public Const SPDRP_UPPERFILTERS As UInteger = &H11 ' UpperFilters (R/W)
-        Public Const SPDRP_LOWERFILTERS As UInteger = &H12 ' LowerFilters (R/W)
-        Public Const SPDRP_BUSTYPEGUID As UInteger = &H13 ' BusTypeGUID (R)
-        Public Const SPDRP_LEGACYBUSTYPE As UInteger = &H14 ' LegacyBusType (R)
-        Public Const SPDRP_BUSNUMBER As UInteger = &H15 ' BusNumber (R)
-        Public Const SPDRP_ENUMERATOR_NAME As UInteger = &H16 ' Enumerator Name (R)
-        Public Const SPDRP_SECURITY As UInteger = &H17 ' Security (R/W, binary form)
-        Public Const SPDRP_SECURITY_SDS As UInteger = &H18 ' Security (W, SDS form)
-        Public Const SPDRP_DEVTYPE As UInteger = &H19 ' Device Type (R/W)
-        Public Const SPDRP_EXCLUSIVE As UInteger = &H1A ' Device is exclusive-access (R/W)
-        Public Const SPDRP_CHARACTERISTICS As UInteger = &H1B ' Device Characteristics (R/W)
-        Public Const SPDRP_ADDRESS As UInteger = &H1C ' Device Address (R)
-        Public Const SPDRP_UI_NUMBER_DESC_FORMAT As UInteger = &H1D ' UiNumberDescFormat (R/W)
-        Public Const SPDRP_DEVICE_POWER_DATA As UInteger = &H1E ' Device Power Data (R)
-        Public Const SPDRP_REMOVAL_POLICY As UInteger = &H1F ' Removal Policy (R)
-        Public Const SPDRP_REMOVAL_POLICY_HW_DEFAULT As UInteger = &H20 ' Hardware Removal Policy (R)
-        Public Const SPDRP_REMOVAL_POLICY_OVERRIDE As UInteger = &H21 ' Removal Policy Override (RW)
-        Public Const SPDRP_INSTALL_STATE As UInteger = &H22 ' Device Install State (R)
-        Public Const SPDRP_LOCATION_PATHS As UInteger = &H23 ' Device Location Paths (R)
-        Public Const SPDRP_BASE_CONTAINERID As UInteger = &H24 ' Base ContainerID (R)
-        Public Const SPDRP_MAXIMUM_PROPERTY As UInteger = &H25 ' Upper bound on ordinals
-        Public Const DICS_FLAG_GLOBAL As Integer = 1
-
-
-
-
-        Public Class GUID_DEVINTERFACE
-            Public Shared GUID_DEVINTERFACE_DISK As New Guid("53f56307-b6bf-11d0-94f2-00a0c91efb8b")
-            Public Shared GUID_DEVINTERFACE_CDROM As New Guid("53f56308-b6bf-11d0-94f2-00a0c91efb8b")
-            Public Shared GUID_DEVINTERFACE_PARTITION As New Guid("53f5630a-b6bf-11d0-94f2-00a0c91efb8b")
-            Public Shared GUID_DEVINTERFACE_TAPE As New Guid("53f5630b-b6bf-11d0-94f2-00a0c91efb8b")
-            Public Shared GUID_DEVINTERFACE_WRITEONCEDISK As New Guid("53f5630c-b6bf-11d0-94f2-00a0c91efb8b")
-            Public Shared GUID_DEVINTERFACE_VOLUME As New Guid("53f5630d-b6bf-11d0-94f2-00a0c91efb8b")
-            Public Shared GUID_DEVINTERFACE_MEDIUMCHANGER As New Guid("53f56310-b6bf-11d0-94f2-00a0c91efb8b")
-            Public Shared GUID_DEVINTERFACE_FLOPPY As New Guid("53f56311-b6bf-11d0-94f2-00a0c91efb8b")
-            Public Shared GUID_DEVINTERFACE_CDCHANGER As New Guid("53f56312-b6bf-11d0-94f2-00a0c91efb8b")
-            Public Shared GUID_DEVINTERFACE_STORAGEPORT As New Guid("2accfe60-c130-11d2-b082-00a0c91efb8b")
-            Public Shared GUID_DEVINTERFACE_VMLUN As New Guid("6f416619-9f29-42a5-b20b-37e219ca02b0")
-            Public Shared GUID_DEVINTERFACE_SES As New Guid("1790C9EC-47D5-4DF3-B5AF-9ADF3CF23E48")
-            Public Shared GUID_DEVINTERFACE_SERVICE_VOLUME As New Guid("6EAD3D82-25EC-46BC-B7FD-C1F0DF8F5037")
-            Public Shared GUID_DEVINTERFACE_HIDDEN_VOLUME As New Guid("7F108A28-9833-4B3B-B780-2C6B5FA5C062")
-            Public Shared GUID_DEVINTERFACE_UNIFIED_ACCESS_RPMB As New Guid("27447C21-BCC3-4D07-A05B-A3395BB4EEE7")
-            Public Shared GUID_DEVINTERFACE_COMPORT As New Guid("86E0D1E0-8089-11D0-9CE4-08003E301F73")
-            Public Shared GUID_DEVINTERFACE_SERENUM_BUS_ENUMERATOR As New Guid("4D36E978-E325-11CE-BFC1-08002BE10318")
-        End Class
-        <DllImport("setupapi.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Winapi)>
-        Public Shared Function SetupDiGetClassDevs(
-            ByRef classGuid As IntPtr,
-            ByVal Enumerator As IntPtr,
-            ByVal hwndParent As IntPtr,
-            ByVal Flags As UInteger) As IntPtr
-        End Function
-        <DllImport("setupapi.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Winapi)>
-        Public Shared Function SetupDiEnumDeviceInfo(
-            ByVal DeviceInfoSet As IntPtr,
-            ByVal MemberIndex As UInteger,
-            ByRef DeviceInfoData As SP_DEVINFO_DATA) As Boolean
-        End Function
-        <DllImport("setupapi.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Winapi)>
-        Public Shared Function SetupDiEnumDeviceInterfaces(
-            ByVal DeviceInfoSet As IntPtr,
-            ByVal DeviceInfoData As IntPtr,
-            ByRef InterfaceClassGuid As IntPtr,
-            ByVal MemberIndex As UInteger,
-            ByRef DeviceInterfaceData As IntPtr) As Boolean
-        End Function
-        <DllImport("setupapi.dll", CharSet:=CharSet.Auto, SetLastError:=True)>
-        Public Shared Function SetupDiGetDeviceInterfaceDetail(
-            ByVal hDevInfo As IntPtr,
-            ByRef deviceInterfaceData As SP_DEVICE_INTERFACE_DATA,
-            ByVal mustPassIntPtrZero As IntPtr,
-            ByVal mustPassZero As Int32,
-            ByRef RequiredSize As Int32,
-            ByVal mustPassIntPtrZero2 As IntPtr) As Boolean
-        End Function
-        <DllImport("setupapi.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Winapi)>
-        Public Shared Function SetupDiGetDeviceRegistryProperty(
-            ByVal DeviceInfoSet As IntPtr,
-            ByRef DeviceInfoData As SP_DEVINFO_DATA,
-            ByVal [Property] As UInteger,
-            ByVal PropertyRegDataType As UInteger,
-            ByVal PropertyBuffer As StringBuilder,
-            ByVal PropertyBufferSize As UInteger,
-            ByVal RequiredSize As IntPtr) As Boolean
-        End Function
-
-
-        <DllImport("setupapi.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Winapi)>
-        Public Shared Function SetupDiGetDeviceRegistryProperty(
-            ByVal DeviceInfoSet As IntPtr,
-            ByRef DeviceInfoData As SP_DEVINFO_DATA,
-            ByVal [Property] As UInteger,
-            ByVal PropertyRegDataType As UInteger,
-            ByVal PropertyBuffer() As Byte,
-            ByVal PropertyBufferSize As UInteger,
-            ByVal RequiredSize As IntPtr) As Boolean
-        End Function
-
-        <DllImport("setupapi.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Winapi)>
-        Public Shared Function SetupDiGetDeviceInstanceId(
-            ByVal DeviceInfoSet As IntPtr,
-            ByRef DeviceInfoData As SP_DEVINFO_DATA,
-            ByVal DeviceInstanceId As StringBuilder,
-            ByVal DeviceInstanceIdSize As Integer,
-            ByRef RequiredSize As Integer) As Boolean
-        End Function
-        <DllImport("setupapi.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Winapi)>
-        Public Shared Function SetupDiGetDeviceInterfaceDetailA(
-            ByVal DeviceInfoSet As IntPtr,
-            ByRef DeviceInterfaceData As SP_DEVICE_INTERFACE_DATA,
-            ByVal DeviceInterfaceDetailData As SP_DEVINFO_DETAIL_DATA,
-            ByVal DeviceInterfaceDetailDataSize As Integer,
-            ByRef RequiredSize As Integer,
-            ByRef DeviceInfoData As SP_DEVINFO_DATA) As Boolean
-        End Function
-
-        <DllImport("setupapi.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Winapi)>
-        Public Shared Function SetupDiDestroyDeviceInfoList(
-            ByVal DeviceInfoSet As IntPtr) As Boolean
-        End Function
-
-    End Class
-
-
-    <DllImport("kernel32.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Winapi)>
-    Public Shared Function GetLastError() As Integer
-    End Function
-
-    <DllImport("kernel32.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Winapi)>
-    Public Shared Function DeviceIoControl(
-        HDevice As IntPtr,
-        dwIoControlCode As UInt32,
-        lpInBuffer As IntPtr,
-        nInBufferSize As UInt32,
-        lpOutBuffer As IntPtr,
-        nOutBufferSize As UInt32,
-        ByRef lpBytesReturned As UInt32,
-        lpOverlapped As IntPtr) As Boolean
-    End Function
-
-#End Region
-
-#Region "LTFSCommand"
-    Private Declare Function _GetTapeDriveList Lib "LtfsCommand.dll" () As IntPtr
-    Private Declare Function _GetDiskDriveList Lib "LtfsCommand.dll" () As IntPtr
-    Private Declare Function _GetMediumChangerList Lib "LtfsCommand.dll" () As IntPtr
-    Private Declare Function _GetDriveMappings Lib "LtfsCommand.dll" () As IntPtr
-    Private Declare Function _StartLtfsService Lib "LtfsCommand.dll" () As IntPtr
-    Private Declare Function _StopLtfsService Lib "LtfsCommand.dll" () As IntPtr
-    Private Declare Function _RemapTapeDrives Lib "LtfsCommand.dll" () As IntPtr
-    <DllImport("LtfsCommand.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Cdecl)>
-    Private Shared Function _MapTapeDrive(driveLetter As Char, TapeDrive As String, tapeIndex As Byte, ByVal logDir As String, ByVal workDir As String, showOffline As Boolean) As IntPtr
-
-    End Function
-    <DllImport("LtfsCommand.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Cdecl)>
-    Private Shared Function _UnmapTapeDrive(driveLetter As Char) As IntPtr
-
-    End Function
-    <DllImport("LtfsCommand.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Cdecl)>
-    Private Shared Function _LoadTapeDrive(driveLetter As Char, mount As Boolean) As IntPtr
-
-    End Function
-    <DllImport("LtfsCommand.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Cdecl)>
-    Private Shared Function _EjectTapeDrive(driveLetter As Char) As IntPtr
-
-    End Function
-    <DllImport("LtfsCommand.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Cdecl)>
-    Private Shared Function _MountTapeDrive(driveLetter As Char) As IntPtr
-
-    End Function
-    <DllImport("LtfsCommand.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Cdecl)>
-    Private Shared Function _CheckTapeMedia(driveLetter As Char) As IntPtr
-
-    End Function
-
-#End Region
 
     Public Shared ReadOnly SCSILockManager As SCSIDeviceLockManager = SCSIDeviceLockManager.Instance
 
@@ -359,88 +44,45 @@ Public Class TapeUtils
                                            ByRef senseBuffer As Byte()) As Boolean
 
         Dim driveHandle As IntPtr
-        Dim result As Boolean = False
-        If OpenTapeDrive(TapeDrive, driveHandle) Then
+        If Not OpenTapeDrive(TapeDrive, driveHandle) Then Return False
+
+        Try
             SyncLock SCSILockManager.GetLock(TapeDrive)
                 RaiseEvent IOCtlStart()
-                result = IOCtl.IOCtlDirect(driveHandle, cdb, dataBuffer, bufferLength, dataIn, timeoutValue, senseBuffer)
-                RaiseEvent IOCtlFinished()
+                Try
+                    Return IOCtl.IOCtlDirect(driveHandle, cdb, dataBuffer, bufferLength, dataIn, timeoutValue, senseBuffer)
+                Finally
+                    RaiseEvent IOCtlFinished()
+                End Try
             End SyncLock
+        Finally
             CloseTapeDrive(driveHandle)
-        End If
-        Return result
+        End Try
+    End Function
+
+    Public Shared Function IOCtlDirect(handle As IntPtr,
+                                       cdb As Byte(),
+                                       dataBuffer As IntPtr,
+                                       bufferLength As UInt32,
+                                       dataIn As Byte,
+                                       timeoutValue As UInt32,
+                                       ByRef senseBuffer As Byte(),
+                                       Optional TargetID As Byte = 0,
+                                       Optional LUN As Byte = 0,
+                                       Optional ByRef BytesReturned As UInteger = 0) As Boolean
+        Return IOCtl.IOCtlDirect(handle,
+                                 cdb,
+                                 dataBuffer,
+                                 bufferLength,
+                                 dataIn,
+                                 timeoutValue,
+                                 senseBuffer,
+                                 TargetID,
+                                 LUN,
+                                 BytesReturned)
     End Function
 
     Public Class IOCtl
-        Public Const IOCTL_SCSI_GET_INQUIRY_DATA As Integer = &H4100C
-        Public Const IOCTL_SCSI_PASS_THROUGH_DIRECT As Integer = &H4D014
-        Public Const IOCTL_STORAGE_BASE As Integer = &H2D
-        Public Const METHOD_BUFFERED As Integer = 0
-        Public Const FILE_ANY_ACCESS As Integer = 0
-        Public Shared ReadOnly Property IOCTL_STORAGE_GET_DEVICE_NUMBER As Integer
-            Get
-                Return CTL_CODE(IOCTL_STORAGE_BASE, &H420, METHOD_BUFFERED, FILE_ANY_ACCESS)
-            End Get
-        End Property
-        Public Shared Function CTL_CODE(DeviceType As Integer, [Function] As Integer, [Method] As Integer, Access As Integer) As Integer
-            Return ((DeviceType << 16) Or (Access << 14) Or ([Function] << 2) Or [Method])
-        End Function
-        <StructLayout(LayoutKind.Sequential)>
-        Public Class SCSI_PASS_THROUGH_DIRECT
-            Public Const CdbBufferLength As Integer = 16
-
-            Public Length As UShort
-            Public ScsiStatus As Byte
-            Public PathId As Byte
-            Public TargetId As Byte
-            Public Lun As Byte
-            Public CdbLength As Byte
-            Public SenseInfoLength As Byte
-            Public DataIn As Byte
-            Public DataTransferLength As UInteger
-            Public TimeOutValue As UInteger
-            Public DataBuffer As IntPtr
-            Public SenseInfoOffset As UInteger
-
-            <MarshalAs(UnmanagedType.ByValArray, SizeConst:=CdbBufferLength)>
-            Public Cdb(CdbBufferLength - 1) As Byte
-
-            Public Sub New()
-                ReDim Cdb(CdbBufferLength - 1)
-            End Sub
-        End Class
-        <StructLayout(LayoutKind.Sequential)>
-        Public Class SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER
-            Public Const SendBufferLength As Integer = 64
-            Public Spt As SCSI_PASS_THROUGH_DIRECT = New SCSI_PASS_THROUGH_DIRECT()
-            <MarshalAs(UnmanagedType.ByValArray, SizeConst:=SendBufferLength)>
-            Public Sense(SendBufferLength - 1) As Byte
-            Public Sub New()
-            End Sub
-        End Class
-        Public Shared Function BuildSCSIPassThroughStructure(cdb As Byte(),
-                                                   dataBuffer As IntPtr,
-                                                   bufferLength As UInt32,
-                                                   dataIn As Byte,
-                                                   timeoutValue As UInt32,
-                                                   Optional ByVal TargetID As Byte = 0,
-                                                   Optional ByVal LUN As Byte = 0) As SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER
-            Dim scsi As SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER = New SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER()
-            With scsi.Spt
-                .Length = CUShort(Marshal.SizeOf(scsi.Spt))
-                .CdbLength = CByte(cdb.Length)
-                Array.Copy(cdb, .Cdb, cdb.Length)
-                .DataIn = dataIn
-                .DataTransferLength = bufferLength
-                .DataBuffer = dataBuffer
-                .TimeOutValue = timeoutValue
-                .SenseInfoOffset = CUInt(Marshal.OffsetOf(GetType(SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER), "Sense"))
-                .SenseInfoLength = CByte(scsi.Sense.Length)
-                .TargetId = TargetID
-                .Lun = LUN
-            End With
-            Return scsi
-        End Function
         Public Shared Function IOCtlDirect(handle As IntPtr,
                                                    cdb As Byte(),
                                                    dataBuffer As IntPtr,
@@ -451,29 +93,31 @@ Public Class TapeUtils
                                                    Optional ByVal TargetID As Byte = 0,
                                                    Optional ByVal LUN As Byte = 0,
                                                    Optional ByRef BytesReturned As UInteger = 0) As Boolean
-            If handle = IntPtr.Zero OrElse handle = New IntPtr(-1) Then Return False
+            If handle = IntPtr.Zero OrElse handle = New IntPtr(-1) Then
+                SetLastNativeError(6)
+                Return False
+            End If
 
             Dim operationScope As IDisposable = SCSIDeviceLockManager.Instance.TryEnterOperation(handle)
-            If operationScope Is Nothing Then Return False
+            If operationScope Is Nothing Then
+                SetLastNativeError(170)
+                Return False
+            End If
 
             Using operationScope
-                Dim scsi As SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER = BuildSCSIPassThroughStructure(cdb, dataBuffer, bufferLength, dataIn, timeoutValue, TargetID, LUN)
-                Dim size As UInteger = CUInt(Marshal.SizeOf(scsi))
-                Dim inBuffer As IntPtr = Marshal.AllocHGlobal(CInt(size))
-                Marshal.StructureToPtr(scsi, inBuffer, True)
-                'Dim packet(size - 1) As Byte
-                'Marshal.Copy(inBuffer, packet, 0, size)
-                Dim result As Boolean
-                Try
-                    result = DeviceIoControl(handle, IOCTL_SCSI_PASS_THROUGH_DIRECT, inBuffer, size, inBuffer, size, BytesReturned, IntPtr.Zero)
-                    If result Then
-                        Marshal.PtrToStructure(inBuffer, scsi)
-                        sense = scsi.Sense
-                    End If
-                    Return result
-                Finally
-                    Marshal.FreeHGlobal(inBuffer)
-                End Try
+                Dim nativeResult As NativeScsiResult = NativeMethods.ExecuteScsiPassThrough(
+                    handle,
+                    cdb,
+                    dataBuffer,
+                    bufferLength,
+                    dataIn,
+                    timeoutValue,
+                    TargetID,
+                    LUN)
+                BytesReturned = nativeResult.BytesReturned
+                sense = nativeResult.Sense
+                SetLastNativeError(nativeResult.Win32Error)
+                Return nativeResult.Succeeded
             End Using
         End Function
     End Class
@@ -626,10 +270,24 @@ Public Class TapeUtils
                                 handle = New IntPtr(vt.GetHashCode())
                                 TapeStreamMapping.MappingTable.Add(handle, vt)
                             Else
-                                handle = CreateFile(TapeDrive, GENERIC_READ Or GENERIC_WRITE, 0, IntPtr.Zero, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero)
+                                Dim openResult As NativeHandleResult = NativeMethods.OpenFile(
+                                    TapeDrive,
+                                    GENERIC_READ Or GENERIC_WRITE,
+                                    0,
+                                    OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL)
+                                SetLastNativeError(openResult.Win32Error)
+                                handle = openResult.Handle
                             End If
                         Case Else
-                            handle = CreateFile(TapeDrive, GENERIC_READ Or GENERIC_WRITE, 0, IntPtr.Zero, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero)
+                            Dim openResult As NativeHandleResult = NativeMethods.OpenFile(
+                                TapeDrive,
+                                GENERIC_READ Or GENERIC_WRITE,
+                                0,
+                                OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL)
+                            SetLastNativeError(openResult.Win32Error)
+                            handle = openResult.Handle
                     End Select
                     If handle = IntPtr.Zero OrElse handle = New IntPtr(-1) Then
                         DriveHandle(TapeDrive) = IntPtr.Zero
@@ -676,14 +334,14 @@ Public Class TapeUtils
                             ts = Nothing
                             result = True
                         Else
-                            Try
-                                result = CloseHandle(handle)
-                            Catch ex As Exception
-                                result = False
-                            End Try
+                            Dim closeResult As NativeCallResult = NativeMethods.CloseHandle(handle)
+                            SetLastNativeError(closeResult.Win32Error)
+                            result = closeResult.Succeeded
                         End If
                     Case Else
-                        result = CloseHandle(handle)
+                        Dim closeResult As NativeCallResult = NativeMethods.CloseHandle(handle)
+                        SetLastNativeError(closeResult.Win32Error)
+                        result = closeResult.Succeeded
                 End Select
                 SCSILockManager.UnregisterHandle(handle)
                 Return result
@@ -722,21 +380,6 @@ Public Class TapeUtils
         Dim lpSecurityDescriptor As UIntPtr
         Dim bInheritHandle As Boolean
     End Structure
-    <DllImport("kernel32.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Winapi, SetLastError:=True)>
-    Public Shared Function CreateFile(lpFileName As String,
-                                        dwDesiredAccess As UInt32,
-                                        dwShareMode As UInt32,
-                                        lpSecurityAttributes As IntPtr,
-                                        dwCreationDisposition As UInt32,
-                                        dwFlagsAndAttributes As UInt32,
-                                        hTemplateFile As IntPtr
-    ) As IntPtr
-
-    End Function
-    <DllImport("kernel32.dll", CharSet:=CharSet.Ansi, CallingConvention:=CallingConvention.Winapi, SetLastError:=True)>
-    Public Shared Function CloseHandle(hObject As IntPtr) As Boolean
-
-    End Function
     Public Const GENERIC_READ As UInteger = &H80000000UI
     Public Const GENERIC_WRITE As UInteger = &H40000000UI
     Public Const OPEN_EXISTING As UInteger = 3UI
@@ -1391,7 +1034,7 @@ Public Class TapeUtils
         Marshal.Copy(paramData, 0, dataBuffer, paramLen)
         Dim senseData(63) As Byte
         While Not TapeSCSIIOCtlUnmanaged(handle, cdbData, dataBuffer, CUInt(paramLen), 1, 60000, senseData)
-            Dim ErrCode As Integer = GetLastError()
+            Dim ErrCode As Integer = LastWin32Error
             Dim win32ex As New Win32Exception(ErrCode)
             Dim ActiveFrm = ApplicationWheels.GetActiveWindow()
             Dim dResult As DialogResult
@@ -6987,7 +6630,7 @@ Public Class TapeUtils
                             Return True
                         End Function)
                 If Not succ Then
-                    Dim ErrCode As Integer = GetLastError()
+                    Dim ErrCode As Integer = LastWin32Error
                     Dim win32ex As New Win32Exception(ErrCode)
                     Throw New Exception($"SCSI Failure. {vbCrLf}ErrCode: 0x{ErrCode.ToString("X8")}h{vbCrLf}{win32ex.Message}")
                 End If
@@ -7000,7 +6643,7 @@ Public Class TapeUtils
                             Return True
                         End Function)
                 If Not succ Then
-                    Dim ErrCode As Integer = GetLastError()
+                    Dim ErrCode As Integer = LastWin32Error
                     Dim win32ex As New Win32Exception(ErrCode)
                     Throw New Exception($"SCSI Failure. {vbCrLf}ErrCode: 0x{ErrCode.ToString("X8")}h{vbCrLf}{win32ex.Message}")
                 End If
@@ -7021,7 +6664,7 @@ Public Class TapeUtils
                             Return True
                         End Function)
                 If Not succ Then
-                    Dim ErrCode As Integer = GetLastError()
+                    Dim ErrCode As Integer = LastWin32Error
                     Dim win32ex As New Win32Exception(ErrCode)
                     Throw New Exception($"SCSI Failure. {vbCrLf}ErrCode: 0x{ErrCode.ToString("X8")}h{vbCrLf}{win32ex.Message}")
                 End If
@@ -7053,7 +6696,7 @@ Public Class TapeUtils
                 Dim cdbData As Byte() = {&HA, 0, CByte(Length >> 16 And &HFF), CByte(Length >> 8 And &HFF), CByte(Length And &HFF), 0}
                 Dim succ As Boolean = TapeSCSIIOCtlUnmanaged(handle, cdbData, Data, Length, 0, 900, sense)
                 If Not succ Then
-                    Dim ErrCode As Integer = GetLastError()
+                    Dim ErrCode As Integer = LastWin32Error
                     Dim win32ex As New Win32Exception(ErrCode)
                     Throw New Exception($"SCSI Failure. {vbCrLf}ErrCode: 0x{ErrCode.ToString("X8")}h{vbCrLf}{win32ex.Message}")
                 End If
@@ -7120,7 +6763,7 @@ Public Class TapeUtils
                     Dim succ As Boolean = TapeSCSIIOCtlUnmanaged(handle, cdbData, dataBuffer, TransferLen, 0, 60000, sense)
                     If Not succ Then
                         Marshal.FreeHGlobal(dataBuffer)
-                        Dim ErrCode As Integer = GetLastError()
+                        Dim ErrCode As Integer = LastWin32Error
                         Dim win32ex As New Win32Exception(ErrCode)
                         Throw New Exception($"SCSI Failure. {vbCrLf}ErrCode: 0x{ErrCode.ToString("X8")}h{vbCrLf}{win32ex.Message}")
                         Return sense
@@ -7199,7 +6842,7 @@ Public Class TapeUtils
         Data.Close()
         Marshal.FreeHGlobal(DataPtr)
         If Not succ Then
-            Dim ErrCode As Integer = GetLastError()
+            Dim ErrCode As Integer = LastWin32Error
             Dim win32ex As New Win32Exception(ErrCode)
             Throw New Exception($"SCSI Failure. {vbCrLf}ErrCode: 0x{ErrCode.ToString("X8")}h{vbCrLf}{win32ex.Message}")
         End If
@@ -7271,7 +6914,7 @@ Public Class TapeUtils
         fs.Close()
         Marshal.FreeHGlobal(DataPtr)
         If Not succ Then
-            Dim ErrCode As Integer = GetLastError()
+            Dim ErrCode As Integer = LastWin32Error
             Dim win32ex As New Win32Exception(ErrCode)
             Throw New Exception($"SCSI Failure. {vbCrLf}ErrCode: 0x{ErrCode.ToString("X8")}h{vbCrLf}{win32ex.Message}")
         End If
@@ -7694,40 +7337,33 @@ Public Class TapeUtils
     Public Const DEFAULT_WORK_DIR As String = "C:\tmp\LTFS"
     Public Shared Function GetTapeDriveList() As List(Of BlockDevice)
         Dim LDrive As New List(Of BlockDevice)
-        Dim obj As List(Of SetupAPIHelper.Device)
+        Dim obj As List(Of NativeDevice)
         Try
-            obj = SetupAPIHelper.Device.EnumerateDevices("SCSI").ToList()
-            obj.AddRange(SetupAPIHelper.Device.EnumerateDevices("USBSTOR").ToList())
-            obj.AddRange(SetupAPIHelper.Device.EnumerateDevices("MPIO").ToList())
+            obj = NativeMethods.EnumerateDevices("SCSI").ToList()
+            obj.AddRange(NativeMethods.EnumerateDevices("USBSTOR").ToList())
+            obj.AddRange(NativeMethods.EnumerateDevices("MPIO").ToList())
         Catch ex As Exception
-            obj = New List(Of SetupAPIHelper.Device)
+            obj = New List(Of NativeDevice)
         End Try
-        Dim tapeobj As New List(Of SetupAPIHelper.Device)
-        For Each dev As SetupAPIHelper.Device In obj
+        Dim tapeobj As New List(Of NativeDevice)
+        For Each dev As NativeDevice In obj
             If dev.Present Then
                 If dev.ClassName.ToLower = "tapedrive" OrElse dev.ClassName.ToLower = "unknown" Then
                     tapeobj.Add(dev)
                 End If
             End If
         Next
-        For Each dev As SetupAPIHelper.Device In tapeobj
+        For Each dev As NativeDevice In tapeobj
             If dev.PDOName = "" Then Continue For
-            Dim handle As IntPtr = CreateFile($"\\.\Globalroot{dev.PDOName}", 3221225472UL, 7UL, IntPtr.Zero, 3, 0, IntPtr.Zero)
-            Dim result As Boolean = False
-            Dim devNum As New SetupAPIWheels.STORAGE_DEVICE_NUMBER
-
-            Dim devNumPtr As IntPtr = Marshal.AllocHGlobal(Marshal.SizeOf(devNum))
-            Dim lpBytesReturned As Int32
-            Marshal.StructureToPtr(devNum, devNumPtr, True)
-            result = DeviceIoControl(handle, CUInt(IOCtl.IOCTL_STORAGE_GET_DEVICE_NUMBER), IntPtr.Zero, 0, devNumPtr, CUInt(Marshal.SizeOf(GetType(SetupAPIWheels.STORAGE_DEVICE_NUMBER))), CUInt(lpBytesReturned), IntPtr.Zero)
-            CloseHandle(handle)
-            If result Then Marshal.PtrToStructure(devNumPtr, devNum)
-            Marshal.FreeHGlobal(devNumPtr)
-            Dim drv As BlockDevice = Inquiry($"\\.\Globalroot{dev.PDOName}")
+            Dim devicePath As String = $"\\.\Globalroot{dev.PDOName}"
+            Dim deviceNumberResult As NativeStorageDeviceNumberResult = NativeMethods.QueryStorageDeviceNumber(devicePath)
+            SetLastNativeError(deviceNumberResult.Win32Error)
+            Dim result As Boolean = deviceNumberResult.Succeeded
+            Dim drv As BlockDevice = Inquiry(devicePath)
             If drv Is Nothing Then drv = New BlockDevice()
-            drv.DevicePath = $"\\.\Globalroot{dev.PDOName}"
+            drv.DevicePath = devicePath
             If result Then
-                drv.DevIndex = CStr(devNum.DeviceNumber)
+                drv.DevIndex = CStr(deviceNumberResult.DeviceNumber)
                 drv.DevicePath = $"\\.\TAPE{drv.DevIndex}"
             End If
             LDrive.Add(drv)
@@ -7772,9 +7408,9 @@ Public Class TapeUtils
     End Function
     Public Shared Function GetDiskDriveList() As List(Of BlockDevice)
         Dim LDrive As New List(Of BlockDevice)
-        Dim obj As List(Of SetupAPIHelper.Device) = SetupAPIHelper.Device.EnumerateDevices("SCSI").ToList()
-        Dim diskobj As New List(Of SetupAPIHelper.Device)
-        For Each dev As SetupAPIHelper.Device In obj
+        Dim obj As List(Of NativeDevice) = NativeMethods.EnumerateDevices("SCSI").ToList()
+        Dim diskobj As New List(Of NativeDevice)
+        For Each dev As NativeDevice In obj
             If dev.Present Then
                 If dev.ClassName.ToLower.Contains("disk") Then
                     diskobj.Add(dev)
@@ -7782,43 +7418,36 @@ Public Class TapeUtils
             End If
         Next
         Try
-            obj = SetupAPIHelper.Device.EnumerateDevices("MPIO").ToList()
+            obj = NativeMethods.EnumerateDevices("MPIO").ToList()
         Catch ex As Exception
-            obj = New List(Of SetupAPIHelper.Device)
+            obj = New List(Of NativeDevice)
         End Try
-        For Each dev As SetupAPIHelper.Device In obj
+        For Each dev As NativeDevice In obj
             If dev.Present Then
                 If dev.ClassName.ToLower.Contains("disk") Then
                     diskobj.Add(dev)
                 End If
             End If
         Next
-        For Each dev As SetupAPIHelper.Device In diskobj
+        For Each dev As NativeDevice In diskobj
 
-            Dim handle As IntPtr = CreateFile($"\\.\Globalroot{dev.PDOName}", 3221225472UL, 7UL, IntPtr.Zero, 3, 0, IntPtr.Zero)
-            Dim result As Boolean = False
-            Dim devNum As New SetupAPIWheels.STORAGE_DEVICE_NUMBER
-
-            Dim devNumPtr As IntPtr = Marshal.AllocHGlobal(Marshal.SizeOf(devNum))
-            Dim lpBytesReturned As Int32
-            Marshal.StructureToPtr(devNum, devNumPtr, True)
-            result = DeviceIoControl(handle, CUInt(IOCtl.IOCTL_STORAGE_GET_DEVICE_NUMBER), IntPtr.Zero, 0, devNumPtr, CUInt(Marshal.SizeOf(GetType(SetupAPIWheels.STORAGE_DEVICE_NUMBER))), CUInt(lpBytesReturned), IntPtr.Zero)
-            If result Then Marshal.PtrToStructure(devNumPtr, devNum)
-            Marshal.FreeHGlobal(devNumPtr)
-            CloseHandle(handle)
+            Dim devicePath As String = $"\\.\Globalroot{dev.PDOName}"
+            Dim deviceNumberResult As NativeStorageDeviceNumberResult = NativeMethods.QueryStorageDeviceNumber(devicePath)
+            SetLastNativeError(deviceNumberResult.Win32Error)
+            Dim result As Boolean = deviceNumberResult.Succeeded
             Dim drv As BlockDevice
             If Not result Then
-                drv = Inquiry($"\\.\Globalroot{dev.PDOName}")
+                drv = Inquiry(devicePath)
             Else
-                drv = Inquiry($"\\.\PhysicalDrive{devNum.DeviceNumber}")
+                drv = Inquiry($"\\.\PhysicalDrive{deviceNumberResult.DeviceNumber}")
             End If
             If drv Is Nothing Then Continue For
             drv.DeviceType = "PhysicalDrive"
             If result Then
-                drv.DevIndex = CStr(devNum.DeviceNumber)
+                drv.DevIndex = CStr(deviceNumberResult.DeviceNumber)
                 drv.DevicePath = $"\\.\PhysicalDrive{drv.DevIndex}"
             Else
-                drv.DevicePath = $"\\.\Globalroot{dev.PDOName}"
+                drv.DevicePath = devicePath
             End If
             LDrive.Add(drv)
         Next
@@ -7848,34 +7477,27 @@ Public Class TapeUtils
     End Function
     Public Shared Function GetMediumChangerList() As List(Of MediumChanger)
         Dim LChanger As New List(Of MediumChanger)
-        Dim obj As List(Of SetupAPIHelper.Device) = SetupAPIHelper.Device.EnumerateDevices("SCSI").ToList()
-        obj.AddRange(SetupAPIHelper.Device.EnumerateDevices("MPIO").ToList())
-        Dim tapeobj As New List(Of SetupAPIHelper.Device)
-        For Each dev As SetupAPIHelper.Device In obj
+        Dim obj As List(Of NativeDevice) = NativeMethods.EnumerateDevices("SCSI").ToList()
+        obj.AddRange(NativeMethods.EnumerateDevices("MPIO").ToList())
+        Dim tapeobj As New List(Of NativeDevice)
+        For Each dev As NativeDevice In obj
             If dev.Present Then
                 If dev.ClassName.ToLower = "mediumchanger" Then
                     tapeobj.Add(dev)
                 End If
             End If
         Next
-        For Each dev As SetupAPIHelper.Device In tapeobj
-            Dim handle As IntPtr = CreateFile($"\\.\Globalroot{dev.PDOName}", 3221225472UL, 7UL, IntPtr.Zero, 3, 0, IntPtr.Zero)
-            Dim result As Boolean = False
-            Dim devNum As New SetupAPIWheels.STORAGE_DEVICE_NUMBER
-
-            Dim devNumPtr As IntPtr = Marshal.AllocHGlobal(Marshal.SizeOf(devNum))
-            Dim lpBytesReturned As Int32
-            Marshal.StructureToPtr(devNum, devNumPtr, True)
-            result = DeviceIoControl(handle, CUInt(IOCtl.IOCTL_STORAGE_GET_DEVICE_NUMBER), IntPtr.Zero, 0, devNumPtr, CUInt(Marshal.SizeOf(GetType(SetupAPIWheels.STORAGE_DEVICE_NUMBER))), CUInt(lpBytesReturned), IntPtr.Zero)
-            If result Then Marshal.PtrToStructure(devNumPtr, devNum)
-            Marshal.FreeHGlobal(devNumPtr)
-            CloseHandle(handle)
-            Dim drv As BlockDevice = Inquiry($"\\.\Globalroot{dev.PDOName}")
+        For Each dev As NativeDevice In tapeobj
+            Dim devicePath As String = $"\\.\Globalroot{dev.PDOName}"
+            Dim deviceNumberResult As NativeStorageDeviceNumberResult = NativeMethods.QueryStorageDeviceNumber(devicePath)
+            SetLastNativeError(deviceNumberResult.Win32Error)
+            Dim result As Boolean = deviceNumberResult.Succeeded
+            Dim drv As BlockDevice = Inquiry(devicePath)
             If drv Is Nothing Then Continue For
             drv.DeviceType = "CHANGER"
-            drv.DevicePath = $"\\.\Globalroot{dev.PDOName}"
+            drv.DevicePath = devicePath
             If result Then
-                drv.DevIndex = CStr(devNum.DeviceNumber)
+                drv.DevIndex = CStr(deviceNumberResult.DeviceNumber)
                 drv.DevicePath = $"\\.\CHANGER{drv.DevIndex}"
             End If
             Dim nc As New MediumChanger(drv.DevIndex, drv.SerialNumber, drv.VendorId, drv.ProductId)
@@ -7895,16 +7517,16 @@ Public Class TapeUtils
     End Function
     Public Shared Function GetHBAList() As List(Of BlockDevice)
         Dim LAdapter As New List(Of BlockDevice)
-        Dim obj As List(Of SetupAPIHelper.Device) = SetupAPIHelper.Device.EnumerateDevices("PCI").ToList()
-        Dim devobj As New List(Of SetupAPIHelper.Device)
-        For Each dev As SetupAPIHelper.Device In obj
+        Dim obj As List(Of NativeDevice) = NativeMethods.EnumerateDevices("PCI").ToList()
+        Dim devobj As New List(Of NativeDevice)
+        For Each dev As NativeDevice In obj
             If dev.Present Then
                 If dev.ClassName.ToLower = "scsiadapter" Then
                     devobj.Add(dev)
                 End If
             End If
         Next
-        For Each dev As SetupAPIHelper.Device In devobj
+        For Each dev As NativeDevice In devobj
             Dim drv As New BlockDevice
             drv.DeviceType = "SCSIAdapter"
             drv.DevicePath = $"\\.\Globalroot{dev.PDOName}"
@@ -7915,10 +7537,18 @@ Public Class TapeUtils
         Next
         Return LAdapter
     End Function
+    Private Shared Function NativeCommandText(result As NativeTextResult) As String
+        If result Is Nothing Then
+            SetLastNativeError(31)
+            Return String.Empty
+        End If
+
+        SetLastNativeError(result.Win32Error)
+        Return result.Text
+    End Function
+
     Public Shared Function GetDriveMappings() As String
-        Dim p As IntPtr = _GetDriveMappings()
-        Dim s As String = Marshal.PtrToStringAnsi(p)
-        Return s
+        Return NativeCommandText(NativeLtfsCommands.GetDriveMappings())
     End Function
 
     Private Shared Function ResolveMappedTapeDrive(driveLetter As Char) As String
@@ -7951,48 +7581,55 @@ Public Class TapeUtils
     End Function
 
     Private Shared Function RunMappedTapeCommand(driveLetter As Char,
-                                                  command As Func(Of IntPtr)) As String
+                                                  command As Func(Of NativeTextResult)) As String
         Dim operationScope As IDisposable = EnterMappedTapeOperation(driveLetter)
-        If operationScope Is Nothing Then Return "Device is busy in another process."
+        If operationScope Is Nothing Then
+            SetLastNativeError(170)
+            Return "Device is busy in another process."
+        End If
 
         Using operationScope
-            Return Marshal.PtrToStringAnsi(command())
+            Return NativeCommandText(command())
         End Using
     End Function
 
     Public Shared Function StartLtfsService() As String
-        Dim p As IntPtr = _StartLtfsService()
-        Dim s As String = Marshal.PtrToStringAnsi(p)
-        Return s
+        Return NativeCommandText(NativeLtfsCommands.StartLtfsService())
     End Function
     Public Shared Function StopLtfsService() As String
-        Dim p As IntPtr = _StopLtfsService()
-        Dim s As String = Marshal.PtrToStringAnsi(p)
-        Return s
+        Return NativeCommandText(NativeLtfsCommands.StopLtfsService())
     End Function
     Public Shared Function RemapTapeDrives() As String
-        Dim p As IntPtr = _RemapTapeDrives()
-        Dim s As String = Marshal.PtrToStringAnsi(p)
-        Return s
+        Return NativeCommandText(NativeLtfsCommands.RemapTapeDrives())
     End Function
     Public Shared Function MapTapeDrive(driveLetter As Char, TapeDrive As String, Optional ByVal logDir As String = DEFAULT_LOG_DIR, Optional ByVal workDir As String = DEFAULT_WORK_DIR, Optional ByVal showOffline As Boolean = False) As String
         Dim tapeIndex As Byte = Byte.Parse(TapeDrive.Substring(4))
         Dim operationScope As IDisposable = SCSILockManager.TryEnterOperation(TapeDrive)
-        If operationScope Is Nothing Then Return "Device is busy in another process."
+        If operationScope Is Nothing Then
+            SetLastNativeError(170)
+            Return "Device is busy in another process."
+        End If
 
         Using operationScope
-            Dim p As IntPtr = _MapTapeDrive(driveLetter, TapeDrive, tapeIndex, logDir, workDir, showOffline)
-            Return Marshal.PtrToStringAnsi(p)
+            Return NativeCommandText(NativeLtfsCommands.MapTapeDrive(driveLetter.ToString(),
+                                                                       TapeDrive,
+                                                                       tapeIndex,
+                                                                       logDir,
+                                                                       workDir,
+                                                                       showOffline))
         End Using
     End Function
     Public Shared Function UnMapTapeDrive(driveLetter As Char) As String
-        Return RunMappedTapeCommand(driveLetter, Function() _UnmapTapeDrive(driveLetter))
+        Return RunMappedTapeCommand(driveLetter,
+                                     Function() NativeLtfsCommands.UnmapTapeDrive(driveLetter.ToString()))
     End Function
     Public Shared Function LoadTapeDrive(driveLetter As Char, mount As Boolean) As String
-        Return RunMappedTapeCommand(driveLetter, Function() _LoadTapeDrive(driveLetter, mount))
+        Return RunMappedTapeCommand(driveLetter,
+                                     Function() NativeLtfsCommands.LoadTapeDrive(driveLetter.ToString(), mount))
     End Function
     Public Shared Function EjectTapeDrive(driveLetter As Char) As String
-        Return RunMappedTapeCommand(driveLetter, Function() _EjectTapeDrive(driveLetter))
+        Return RunMappedTapeCommand(driveLetter,
+                                     Function() NativeLtfsCommands.EjectTapeDrive(driveLetter.ToString()))
     End Function
     Public Shared Function SetEncryption(handle As IntPtr, Optional ByVal EncryptionKey As Byte() = Nothing, Optional ByVal SenseReport As Func(Of Byte(), Boolean) = Nothing) As Boolean
         Dim result As Boolean = False
@@ -8116,10 +7753,12 @@ Public Class TapeUtils
         End SyncLock
     End Function
     Public Shared Function MountTapeDrive(driveLetter As Char) As String
-        Return RunMappedTapeCommand(driveLetter, Function() _MountTapeDrive(driveLetter))
+        Return RunMappedTapeCommand(driveLetter,
+                                     Function() NativeLtfsCommands.MountTapeDrive(driveLetter.ToString()))
     End Function
     Public Shared Function CheckTapeMedia(driveLetter As Char) As String
-        Return RunMappedTapeCommand(driveLetter, Function() _CheckTapeMedia(driveLetter))
+        Return RunMappedTapeCommand(driveLetter,
+                                     Function() NativeLtfsCommands.CheckTapeMedia(driveLetter.ToString()))
     End Function
     <Category("Options")>
     <TypeConverter(GetType(ExpandableObjectConverter))>

@@ -6,7 +6,6 @@ Imports System.Security.Cryptography
 Imports System.Text
 Imports System.Threading
 Imports LTFSCopyGUI.TapeUtils
-Imports LTFSCopyGUI.TapeUtils.SetupAPIWheels
 Imports NAudio.MediaFoundation
 Imports Serilog
 Imports Serilog.Context

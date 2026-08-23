@@ -177,9 +177,6 @@
     <Reference Include="SimpleWMI">
       <HintPath>..\packages\SimpleWMI\SimpleWMI.dll</HintPath>
     </Reference>
-    <Reference Include="SetupAPIHelper">
-      <HintPath>..\packages\SetupAPIHelper\SetupAPIHelper.dll</HintPath>
-    </Reference>
     <Reference Include="FubarDev.FtpServer.Abstractions, Version=3.1.2.0, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>..\packages\FubarDev.FtpServer.Abstractions.3.1.2\lib\net461\FubarDev.FtpServer.Abstractions.dll</HintPath>
     </Reference>
@@ -562,6 +559,13 @@
       <Isolated>False</Isolated>
       <EmbedInteropTypes>True</EmbedInteropTypes>
     </COMReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\LTFSCopyGUI.Native\LTFSCopyGUI.Native.vcxproj">
+      <Project>{9D4AA9BA-85F4-4DA7-AC43-83B48DDE6C0F}</Project>
+      <Name>LTFSCopyGUI.Native</Name>
+      <ReferenceOutputAssembly>true</ReferenceOutputAssembly>
+    </ProjectReference>
   </ItemGroup>
   <ItemGroup>
     <Content Include="Assets\configure.ico" />

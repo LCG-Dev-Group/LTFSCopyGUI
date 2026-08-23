@@ -5,8 +5,8 @@ Imports System.Diagnostics
 Imports System.Drawing
 Imports System.Globalization
 Imports System.Numerics
-Imports System.Runtime.InteropServices
 Imports System.Windows.Forms
+Imports LTFSCopyGUI.Native
 Imports Vortice
 Imports Vortice.DCommon
 Imports Vortice.Direct2D1
@@ -34,14 +34,6 @@ Public Class Direct2DChartControl
     Private Const PlotTopMargin As Single = 12.0F
     Private Const AnimationIntervalMilliseconds As Integer = 15
     Private Const AnimationDurationMilliseconds As Double = 180.0R
-
-    <DllImport("user32.dll", SetLastError:=False)>
-    Private Shared Function GetClientRect(hWnd As IntPtr, ByRef rect As RawRect) As Boolean
-    End Function
-
-    <DllImport("user32.dll", EntryPoint:="GetDpiForWindow", SetLastError:=False)>
-    Private Shared Function GetDpiForWindow(hWnd As IntPtr) As UInteger
-    End Function
 
     Private Structure AxisInfo
         Public Minimum As Double
@@ -998,10 +990,12 @@ Public Class Direct2DChartControl
         Dim dpi As Integer = 96
         If IsHandleCreated Then
             Try
-                dpi = CInt(GetDpiForWindow(Handle))
+                dpi = CInt(NativeMethods.GetDpiForWindow(Handle))
             Catch ex As EntryPointNotFoundException
                 dpi = DeviceDpi
             Catch ex As DllNotFoundException
+                dpi = DeviceDpi
+            Catch ex As Win32Exception
                 dpi = DeviceDpi
             End Try
         ElseIf DeviceDpi > 0 Then
@@ -1014,11 +1008,12 @@ Public Class Direct2DChartControl
 
     Private Function GetClientPixelSize() As Size
         If Not IsHandleCreated Then Return Size.Empty
-        Dim rect As RawRect
-        If GetClientRect(Handle, rect) Then
+        Try
+            Dim rect As NativeRect = NativeMethods.GetClientRect(Handle)
             Return New Size(Math.Max(0, rect.Right - rect.Left), Math.Max(0, rect.Bottom - rect.Top))
-        End If
-        Return ClientSize
+        Catch ex As Win32Exception
+            Return ClientSize
+        End Try
     End Function
 
     Private Shared Function ToColor4(color As DrawingColor) As D2DColor4

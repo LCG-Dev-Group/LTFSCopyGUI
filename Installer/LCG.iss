@@ -69,7 +69,7 @@ Name: "usepsexec"; Description: "{cm:UsePsExec}"; GroupDescription: "{cm:Optiona
 
 [Files]
 ; 主程序构建产物始终更新，并保持 Release 目录的子目录结构。
-Source: "..\LTFSCopyGUI\bin\x64\Release\*"; DestDir: "{app}"; Excludes: "\LtfsCommand.dll,\LtfsCommand.pdb,\config\*,\log\*,\logpages\*,\schema\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\LTFSCopyGUI\bin\x64\Release\*"; DestDir: "{app}"; Excludes: "\config\*,\log\*,\logpages\*,\schema\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; deploy 中的文件属于可选文件。默认只安装目标位置中不存在的文件；
 ; 选中“覆盖已有可选文件”后才覆盖同名文件。

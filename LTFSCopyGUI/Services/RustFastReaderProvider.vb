@@ -168,13 +168,6 @@ Public Class RustFastReaderProvider
         Public Shared Sub lfr_destroy(context As IntPtr)
         End Sub
 
-        <DllImport("kernel32.dll", CharSet:=CharSet.Unicode, SetLastError:=True)>
-        Public Shared Function LoadLibrary(lpFileName As String) As IntPtr
-        End Function
-
-        <DllImport("kernel32.dll", SetLastError:=True)>
-        Public Shared Function FreeLibrary(moduleHandle As IntPtr) As Boolean
-        End Function
     End Class
 
     Private Const AbiVersion As UInteger = 2UI
@@ -292,9 +285,10 @@ Public Class RustFastReaderProvider
             End Using
             Throw New DllNotFoundException($"{NativeMethods.DllName} not found: {dllPath}")
         End If
-        _moduleHandle = NativeMethods.LoadLibrary(dllPath)
-        If _moduleHandle = IntPtr.Zero Then
-            Dim nativeError = Marshal.GetLastWin32Error()
+        Dim loadResult = Global.LTFSCopyGUI.Native.NativeMethods.LoadNativeLibrary(dllPath)
+        _moduleHandle = loadResult.Handle
+        If Not loadResult.Succeeded Then
+            Dim nativeError = loadResult.Win32Error
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(RustFastReaderProvider))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")
                     Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
@@ -372,7 +366,12 @@ Public Class RustFastReaderProvider
                 _handle = Nothing
             End If
             If _moduleHandle <> IntPtr.Zero Then
-                NativeMethods.FreeLibrary(_moduleHandle)
+                Dim freeResult = Global.LTFSCopyGUI.Native.NativeMethods.FreeLibrary(_moduleHandle)
+                If Not freeResult.Succeeded Then
+                    Log.Warning("Fast reader native DLL cleanup failed. NativeDll={NativeDll} NativeError={NativeError}.",
+                                NativeMethods.DllName,
+                                freeResult.Win32Error)
+                End If
                 _moduleHandle = IntPtr.Zero
             End If
             Throw
@@ -1027,7 +1026,12 @@ Public Class RustFastReaderProvider
             Throw
         Finally
             If _moduleHandle <> IntPtr.Zero Then
-                NativeMethods.FreeLibrary(_moduleHandle)
+                Dim freeResult = Global.LTFSCopyGUI.Native.NativeMethods.FreeLibrary(_moduleHandle)
+                If Not freeResult.Succeeded Then
+                    Log.Warning("Fast reader native DLL cleanup failed. NativeDll={NativeDll} NativeError={NativeError}.",
+                                NativeMethods.DllName,
+                                freeResult.Win32Error)
+                End If
                 _moduleHandle = IntPtr.Zero
             End If
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(RustFastReaderProvider))
