@@ -35,19 +35,15 @@ LTFSCopyGUI.exe /?查看命令行用法
     LTFSCopyGUI.exe -raw
     LTFSCopyGUI.exe -mkltfs
 
-### 更新说明
+### 版本更新说明
 
-1. 最初的功能：排序生成脚本
+v1.x 排序生成脚本、复制&校验功能
 
-2. 新增校验功能，可覆盖保存原schema文件(建议另存到别处，防止被覆盖)
-
-3. 新增复制功能，边校验边复制文件
-
-4. 更多驱动器控制功能、SCSI命令直接发送、磁带标签修改、磁带信息读取
+v2.x 驱动器控制、SCSI指令面板、磁带标签修改、磁带信息读取
 
 LtfsCommand from **[inaxeon/ltfscmd](https://github.com/inaxeon/ltfscmd)**
 
-5. 新增LTFS直接读写（无需挂载），LTO4模拟LTFS数据区功能，FTP服务器（只读）
+v3.x LTFS直接读写
 
 ### 关于加密
 
@@ -69,9 +65,3 @@ LtfsCommand from **[inaxeon/ltfscmd](https://github.com/inaxeon/ltfscmd)**
 **欢迎加入LTO磁带技术交流QQ群 433387693 获取开发中的最新版本，以及相关资料**
 
 软著登字第11348107号
-
-## 如何赞助
-    【闲鱼】https://m.tb.cn/h.SbQMPCg?tk=6c1m4s3ww08 CZ007 「我在闲鱼发布了【LTFSCopyGUI软件商用许可/技术支持/个性化冠名服务】」
-点击链接直接打开
-
-
