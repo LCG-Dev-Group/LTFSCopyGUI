@@ -1,0 +1,4 @@
+[submodule "FtpServer"]
+	path = FtpServer
+	url = https://github.com/LCG-Dev-Group/FtpServer.git
+	branch = master
