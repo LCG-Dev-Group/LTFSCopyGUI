@@ -1,6 +1,5 @@
 Imports System.Runtime.InteropServices
 Imports System.Threading
-Imports ISCSI
 Imports ISCSI.Server
 Imports SCSI
 Imports Serilog
@@ -325,32 +324,32 @@ Public Class iSCSIService
                                   ReDim Preserve commandBytes(cdblen - 1)
                                   Dim sense(63) As Byte
                                   Dim responsedata(datalen - 1) As Byte
-                                   SyncLock TapeUtils.GetSCSIOperationLock(driveHandle)
-                                       Select Case My.Settings.TapeUtils_DriverType
-                                           Case TapeUtils.DriverType.TapeStream
-                                               Dim vt As TapeImage = Nothing
-                                               TapeStreamMapping.MappingTable.TryGetValue(driveHandle, vt)
-                                               If vt IsNot Nothing Then
-                                                   vt.HandleSCSICommand(commandBytes, data, cmddir, datalen, responsedata, sense)
-                                               Else
-                                                   sense = TapeImage.SenseData.NotPresent
-                                                   responsedata = {}
-                                               End If
-                                           Case Else
-                                               Dim databuffer As IntPtr = Marshal.AllocHGlobal(datalen)
-                                               Try
-                                                   If cmddir <> 1 Then
-                                                       Marshal.Copy(data, 0, databuffer, datalen)
-                                                   Else
-                                                       Marshal.Copy(responsedata, 0, databuffer, datalen)
-                                                   End If
-                                                   TapeUtils.TapeSCSIIOCtlUnmanaged(driveHandle, commandBytes, databuffer, CUInt(datalen), cmddir, 24 * 3600, sense)
-                                                   If cmddir <> 0 Then Marshal.Copy(databuffer, responsedata, 0, datalen)
-                                               Finally
-                                                   Marshal.FreeHGlobal(databuffer)
-                                               End Try
-                                       End Select
-                                   End SyncLock
+                                  SyncLock TapeUtils.GetSCSIOperationLock(driveHandle)
+                                      Select Case My.Settings.TapeUtils_DriverType
+                                          Case TapeUtils.DriverType.TapeStream
+                                              Dim vt As TapeImage = Nothing
+                                              TapeStreamMapping.MappingTable.TryGetValue(driveHandle, vt)
+                                              If vt IsNot Nothing Then
+                                                  vt.HandleSCSICommand(commandBytes, data, cmddir, datalen, responsedata, sense)
+                                              Else
+                                                  sense = TapeImage.SenseData.NotPresent
+                                                  responsedata = {}
+                                              End If
+                                          Case Else
+                                              Dim databuffer As IntPtr = Marshal.AllocHGlobal(datalen)
+                                              Try
+                                                  If cmddir <> 1 Then
+                                                      Marshal.Copy(data, 0, databuffer, datalen)
+                                                  Else
+                                                      Marshal.Copy(responsedata, 0, databuffer, datalen)
+                                                  End If
+                                                  TapeUtils.TapeSCSIIOCtlUnmanaged(driveHandle, commandBytes, databuffer, CUInt(datalen), cmddir, 24 * 3600, sense)
+                                                  If cmddir <> 0 Then Marshal.Copy(databuffer, responsedata, 0, datalen)
+                                              Finally
+                                                  Marshal.FreeHGlobal(databuffer)
+                                              End Try
+                                      End Select
+                                  End SyncLock
 
 
                                   Dim response As Byte()

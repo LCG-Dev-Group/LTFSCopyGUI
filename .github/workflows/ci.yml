@@ -20,6 +20,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@v4
+              with:
+                submodules: recursive
 
             - name: Set up MSBuild
               uses: microsoft/setup-msbuild@v2
@@ -29,6 +31,9 @@ jobs:
 
             - name: Restore NuGet packages
               run: nuget restore LTFSCopyGUI.sln -PackagesDirectory packages -NonInteractive
+
+            - name: Restore the local FTP server project
+              run: dotnet restore FtpServer/Zhaobang.FtpServer/Zhaobang.FtpServer.csproj --source . --ignore-failed-sources
 
             - name: Install Rust nightly for the Windows 7 target
               shell: pwsh

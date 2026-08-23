@@ -1054,7 +1054,10 @@ Public NotInheritable Class DisplayHelper
         If Not Double.TryParse(resp, Response) Then Return DialogResult.Cancel
         Return result
     End Function
-    Public Shared Function ShowInputDialog(Prompt As String, Title As String, ByRef Response As String) As DialogResult
+    Public Shared Function ShowInputDialog(Prompt As String,
+                                            Title As String,
+                                            ByRef Response As String,
+                                            Optional MaskInput As Boolean = False) As DialogResult
         Dim size As Size = New Size(200, 90)
         Dim inputDialog As Form = New Form()
         inputDialog.StartPosition = FormStartPosition.CenterParent
@@ -1074,6 +1077,7 @@ Public NotInheritable Class DisplayHelper
         textBox.Location = New Point(5, 25)
         textBox.Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
         textBox.Text = Response
+        textBox.UseSystemPasswordChar = MaskInput
         inputDialog.Controls.Add(textBox)
         Dim okButton As Button = New Button()
         okButton.DialogResult = DialogResult.OK

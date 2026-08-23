@@ -7,6 +7,8 @@ Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "LTFSCopyGUI", "LTFSCopyGUI\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "LTFSCopyGUI.Native", "LTFSCopyGUI.Native\LTFSCopyGUI.Native.vcxproj", "{9D4AA9BA-85F4-4DA7-AC43-83B48DDE6C0F}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Zhaobang.FtpServer", "FtpServer\Zhaobang.FtpServer\Zhaobang.FtpServer.csproj", "{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -41,6 +43,18 @@ Global
 		{9D4AA9BA-85F4-4DA7-AC43-83B48DDE6C0F}.Release|x64.Build.0 = Release|x64
 		{9D4AA9BA-85F4-4DA7-AC43-83B48DDE6C0F}.Release|x86.ActiveCfg = Release|Win32
 		{9D4AA9BA-85F4-4DA7-AC43-83B48DDE6C0F}.Release|x86.Build.0 = Release|Win32
+		{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}.Debug|x64.Build.0 = Debug|Any CPU
+		{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}.Debug|x86.Build.0 = Debug|Any CPU
+		{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}.Release|x64.ActiveCfg = Release|Any CPU
+		{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}.Release|x64.Build.0 = Release|Any CPU
+		{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}.Release|x86.ActiveCfg = Release|Any CPU
+		{67084B87-8BE0-4EF5-91D6-74757E5C5AB0}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

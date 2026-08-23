@@ -9986,23 +9986,83 @@ Public Class LTFSWriter
         Clipboard.SetText(result.ToString)
     End Sub
 
-    Private Sub 启动FTP服务只读ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 启动FTP服务只读ToolStripMenuItem.Click
+    Private Async Sub 启动FTP服务只读ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 启动FTP服务只读ToolStripMenuItem.Click
         Dim svc As New FTPService()
         SetStatusLight(LWStatus.Busy)
         AddHandler svc.LogPrint, Sub(s As String)
                                      PrintMsg($"FTPSVC> {s}", Category:="FTP")
                                  End Sub
         svc.port = 8021
-        If DisplayHelper.ShowInputDialog("Port", "FTP Service", svc.port) <> DialogResult.OK Then Exit Sub
+        If DisplayHelper.ShowInputDialog("Port", "FTP Service", svc.port) <> DialogResult.OK Then
+            SetStatusLight(LWStatus.Idle)
+            Exit Sub
+        End If
+
+        Dim username As String = String.Empty
+        If DisplayHelper.ShowInputDialog("Username (blank for anonymous)", "FTP Service", username) <> DialogResult.OK Then
+            SetStatusLight(LWStatus.Idle)
+            Exit Sub
+        End If
+
+        svc.Username = username.Trim()
+        If String.IsNullOrEmpty(svc.Username) Then
+            svc.Password = String.Empty
+            svc.AllowAnonymous = True
+        Else
+            Dim password As String = String.Empty
+            If DisplayHelper.ShowInputDialog("Password", "FTP Service", password, MaskInput:=True) <> DialogResult.OK Then
+                SetStatusLight(LWStatus.Idle)
+                Exit Sub
+            End If
+            svc.Password = password
+            svc.AllowAnonymous = False
+        End If
+
         svc.schema = schema
         svc.TapeDrive = TapeDrive
         svc.BlockSize = plabel.blocksize
         svc.ExtraPartitionCount = ExtraPartitionCount
-        svc.StartService()
-        MessageBox.Show(New Form With {.TopMost = True}, $"Service running on port {svc.port}.")
-        svc.StopService()
-        MessageBox.Show(New Form With {.TopMost = True}, "Service stopped.")
-        SetStatusLight(LWStatus.Idle)
+        Try
+            svc.StartService()
+            ShowFtpRunningDialog(svc.port)
+            Await svc.StopServiceAsync()
+            MessageBox.Show(New Form With {.TopMost = True}, "Service stopped.")
+        Finally
+            SetStatusLight(LWStatus.Idle)
+        End Try
+    End Sub
+
+    Private Sub ShowFtpRunningDialog(servicePort As Integer)
+        Using runningDialog As New Form()
+            runningDialog.StartPosition = FormStartPosition.CenterParent
+            runningDialog.FormBorderStyle = FormBorderStyle.FixedDialog
+            runningDialog.MinimizeBox = False
+            runningDialog.MaximizeBox = False
+            runningDialog.ClientSize = New Size(300, 120)
+            runningDialog.Text = "FTP Service"
+            runningDialog.TopMost = True
+
+            Dim statusLabel As New Label With {
+                .AutoSize = True,
+                .Text = $"Service running on port {servicePort}.",
+                .Location = New Point(12, 15)
+            }
+            runningDialog.Controls.Add(statusLabel)
+
+            Dim stopButton As New Button With {
+                .Name = "stopButton",
+                .Text = "Stop",
+                .DialogResult = DialogResult.OK,
+                .Size = New Size(80, 25),
+                .Location = New Point(208, 78),
+                .Anchor = AnchorStyles.Right Or AnchorStyles.Bottom
+            }
+            runningDialog.Controls.Add(stopButton)
+            runningDialog.AcceptButton = stopButton
+            runningDialog.CancelButton = stopButton
+            DisplayHelper.ApplyDynamicFormLayout(runningDialog)
+            runningDialog.ShowDialog(Me)
+        End Using
     End Sub
 
     Private Sub 右下角显示容量损失ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 右下角显示容量损失ToolStripMenuItem.Click

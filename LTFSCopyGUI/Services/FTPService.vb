@@ -1,471 +1,516 @@
 Imports System
+Imports System.Collections.Generic
 Imports System.IO
-Imports System.Security.Claims
+Imports System.Net
 Imports System.Threading
-Imports FubarDev.FtpServer
-Imports FubarDev.FtpServer.AccountManagement
-Imports FubarDev.FtpServer.BackgroundTransfer
-Imports FubarDev.FtpServer.FileSystem
-Imports FubarDev.FtpServer.FileSystem.Unix
-Imports Microsoft.Extensions.DependencyInjection
+Imports System.Threading.Tasks
 Imports Serilog
 Imports Serilog.Context
+Imports Zhaobang.FtpServer.Authenticate
+Imports Zhaobang.FtpServer.Connections
+Imports Zhaobang.FtpServer.File
 
 Public Class FTPService
     Private ReadOnly _logSessionId As String = $"ftp-service-{Guid.NewGuid().ToString("N").Substring(0, 8)}"
+    Private ReadOnly _lifecycleSync As New Object
+    Private _server As Zhaobang.FtpServer.FtpServer
+    Private _serverTask As Task
+    Private _stopTokenSource As CancellationTokenSource
+
     Public TapeDrive As String
     Public BlockSize As Integer = 524288
     Public ExtraPartitionCount As Integer = 1
     Public port As Integer
     Public schema As ltfsindex
-    Public Services As ServiceCollection
-    Public ftpServerHost As IFtpServerHost
+
+    ' Leave Username and Password empty to use anonymous FTP by default.
+    ' When Username is set, that exact username/password pair is also
+    ' accepted. Anonymous access remains enabled unless AllowAnonymous is
+    ' explicitly set to False.
+    Public Username As String = String.Empty
+    Public Password As String = String.Empty
+    Public AllowAnonymous As Boolean = True
 
     Public Event LogPrint(s As String)
-    Public MustInherit Class LTFSFileSystemEntry
-        Implements IUnixFileSystemEntry
-        Public AccMode As New Generic.GenericAccessMode(True, False, True)
-        Public ReadOnly Property FileInfo As ltfsindex.file
-        Public ReadOnly Property DirectoryInfo As ltfsindex.directory
-        Public ReadOnly Property Info As Object
-            Get
-                If FileInfo IsNot Nothing Then Return FileInfo
-                If DirectoryInfo IsNot Nothing Then Return DirectoryInfo
-                Return Nothing
-            End Get
-        End Property
-        Public Sub New()
 
-        End Sub
-        Public Sub New(fsInfo As ltfsindex.file)
-            FileInfo = fsInfo
-            Try
-                CreatedTime = New DateTimeOffset(ParseTimeStamp(fsInfo.creationtime))
-                LastWriteTime = New DateTimeOffset(ParseTimeStamp(fsInfo.changetime))
-            Catch ex As Exception
+    Private Class ConfiguredAuthenticator
+        Implements IAuthenticator
 
-            End Try
-            Name = fsInfo.name
-        End Sub
-        Public Sub New(fsInfo As ltfsindex.directory)
-            DirectoryInfo = fsInfo
-            Try
-                CreatedTime = New DateTimeOffset(ParseTimeStamp(fsInfo.creationtime))
-                LastWriteTime = New DateTimeOffset(ParseTimeStamp(fsInfo.changetime))
-            Catch ex As Exception
+        Private ReadOnly _username As String
+        Private ReadOnly _password As String
+        Private ReadOnly _allowAnonymous As Boolean
 
-            End Try
-            Name = fsInfo.name
-        End Sub
-        Public ReadOnly Property Name As String Implements IUnixFileSystemEntry.Name
-
-        Public ReadOnly Property Permissions As IUnixPermissions Implements IUnixFileSystemEntry.Permissions
-            Get
-                Return New Generic.GenericUnixPermissions(AccMode, AccMode, AccMode)
-            End Get
-        End Property
-        Public ReadOnly Property LastWriteTime As DateTimeOffset? Implements IUnixFileSystemEntry.LastWriteTime
-        Public ReadOnly Property CreatedTime As DateTimeOffset? Implements IUnixFileSystemEntry.CreatedTime
-
-        Public ReadOnly Property NumberOfLinks As Long Implements IUnixFileSystemEntry.NumberOfLinks
-            Get
-                Return 1
-            End Get
-        End Property
-
-        Public ReadOnly Property Owner As String Implements IUnixOwner.Owner
-            Get
-                Return "LTFSUser"
-            End Get
-        End Property
-
-        Public ReadOnly Property Group As String Implements IUnixOwner.Group
-            Get
-                Return "LTFSUsers"
-            End Get
-        End Property
-    End Class
-    Public Class LTFSFileEntry
-        Inherits LTFSFileSystemEntry
-        Implements IUnixFileEntry
-        Public Sub New(info As ltfsindex.file)
-            MyBase.New(info)
-            FileInfo = info
-        End Sub
-        Public Overloads ReadOnly Property FileInfo As ltfsindex.file
-        Public ReadOnly Property Size As Long Implements IUnixFileEntry.Size
-            Get
-                Return FileInfo.length
-            End Get
-        End Property
-    End Class
-    Public Class LTFSDirectoryEntry
-        Inherits LTFSFileSystemEntry
-        Implements IUnixDirectoryEntry
-        Public Sub New(dirInfo As ltfsindex.directory, _isRoot As Boolean)
-            MyBase.New(dirInfo)
-            IsRoot = _isRoot
-            DirectoryInfo = dirInfo
-        End Sub
-        Public ReadOnly Property IsRoot As Boolean Implements IUnixDirectoryEntry.IsRoot
-        Public Overloads ReadOnly Property DirectoryInfo As ltfsindex.directory
-        Public ReadOnly Property IsDeletable As Boolean Implements IUnixDirectoryEntry.IsDeletable
-            Get
-                Return False
-            End Get
-        End Property
-        Public Shared Function HasChildEntries(directoryInfo As ltfsindex.directory) As Boolean
-            If directoryInfo.contents._directory IsNot Nothing AndAlso directoryInfo.contents._directory.Count > 0 Then Return True
-            If directoryInfo.contents._file IsNot Nothing AndAlso directoryInfo.contents._file.Count > 0 Then Return True
-            Return False
-        End Function
-        Private Function CheckIfDeletable() As Boolean
-            Return False
-        End Function
-    End Class
-    Public Class LTFSFileSystem
-        Implements IUnixFileSystem
-        Private ReadOnly _logSessionId As String = $"ftp-filesystem-{Guid.NewGuid().ToString("N").Substring(0, 8)}"
-        Public Property TapeDrive As String
-        Public Property BlockSize As Integer = 524288
-        Public Property ExtraPartitionCount As Integer = 1
-        Public Event LogPrint(s As String)
-        Public Sub New(rootPath As ltfsindex.directory, ByVal drive As String, ByVal blksize As Integer, ByVal _extraPartitionCount As Integer, Optional ByVal LogHandler As Action(Of String) = Nothing)
-            FileSystemEntryComparer = StringComparer.OrdinalIgnoreCase
-            Root = New LTFSDirectoryEntry(rootPath, True)
-            TapeDrive = drive
-            BlockSize = blksize
-            ExtraPartitionCount = _extraPartitionCount
-            If LogHandler IsNot Nothing Then AddHandler LogPrint,
-                Sub(s As String)
-                    LogHandler(s)
-                End Sub
-            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSFileSystem))
-                Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
-                    Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                        Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Lifecycle")
-                            Log.Information("LTFS FTP file system created. TapeDrive={TapeDrive} BlockSize={BlockSize} ExtraPartitionCount={ExtraPartitionCount}.", TapeDrive, BlockSize, ExtraPartitionCount)
-                        End Using
-                    End Using
-                End Using
-            End Using
+        Public Sub New(username As String, password As String, allowAnonymous As Boolean)
+            _username = If(username, String.Empty)
+            _password = If(password, String.Empty)
+            _allowAnonymous = allowAnonymous
         End Sub
 
-        Public ReadOnly Property SupportsAppend As Boolean Implements IUnixFileSystem.SupportsAppend
-            Get
-                Return False
-            End Get
-        End Property
-
-        Public ReadOnly Property SupportsNonEmptyDirectoryDelete As Boolean Implements IUnixFileSystem.SupportsNonEmptyDirectoryDelete
-            Get
-                Return False
-            End Get
-        End Property
-
-        Public ReadOnly Property FileSystemEntryComparer As StringComparer Implements IUnixFileSystem.FileSystemEntryComparer
-        Public ReadOnly Property Root As IUnixDirectoryEntry Implements IUnixFileSystem.Root
-
-        Public Function GetEntriesAsync(directoryEntry As IUnixDirectoryEntry, cancellationToken As CancellationToken) As Task(Of IReadOnlyList(Of IUnixFileSystemEntry)) Implements IUnixFileSystem.GetEntriesAsync
-            Dim result As New List(Of IUnixFileSystemEntry)
-            Dim searchDirInfo As ltfsindex.directory = CType(directoryEntry, LTFSDirectoryEntry).DirectoryInfo
-            For Each d As ltfsindex.directory In searchDirInfo.contents._directory
-                result.Add(New LTFSDirectoryEntry(d, False))
-            Next
-            For Each f As ltfsindex.file In searchDirInfo.contents._file
-                result.Add(New LTFSFileEntry(f))
-            Next
-            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSFileSystem))
-                Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
-                    Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                        Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Directory")
-                            Log.Debug("FTP directory enumeration completed. DirectoryName={DirectoryName} EntryCount={EntryCount}.", searchDirInfo.name, result.Count)
-                        End Using
-                    End Using
-                End Using
-            End Using
-            Return Task.FromResult(Of IReadOnlyList(Of IUnixFileSystemEntry))(result)
-        End Function
-
-        Public Function GetEntryByNameAsync(directoryEntry As IUnixDirectoryEntry, name As String, cancellationToken As CancellationToken) As Task(Of IUnixFileSystemEntry) Implements IUnixFileSystem.GetEntryByNameAsync
-            Dim searchDirInfo As ltfsindex.directory = CType(directoryEntry, LTFSDirectoryEntry).DirectoryInfo
-            Dim result As IUnixFileSystemEntry = Nothing
-            For Each f As ltfsindex.file In searchDirInfo.contents._file
-                If f.name.ToLower().Equals(name.ToLower()) Then
-                    result = New LTFSFileEntry(f)
-                End If
-            Next
-            If result Is Nothing Then
-                For Each d As ltfsindex.directory In searchDirInfo.contents._directory
-                    If d.name.ToLower().Equals(name.ToLower()) Then
-                        result = New LTFSDirectoryEntry(d, False)
-                    End If
-                Next
+        Public Function Authenticate(userName As String, password As String) As Boolean Implements IAuthenticator.Authenticate
+            If _allowAnonymous AndAlso
+               (String.Equals(userName, "anonymous", StringComparison.OrdinalIgnoreCase) OrElse
+                String.Equals(userName, "ftp", StringComparison.OrdinalIgnoreCase)) Then
+                Return True
             End If
-            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSFileSystem))
-                Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
-                    Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                        Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Directory")
-                            Log.Debug("FTP directory lookup completed. DirectoryName={DirectoryName} RequestedName={RequestedName} Found={Found}.", searchDirInfo.name, name, result IsNot Nothing)
-                        End Using
-                    End Using
-                End Using
-            End Using
+
+            If String.IsNullOrWhiteSpace(_username) Then Return False
+            Return String.Equals(userName, _username, StringComparison.Ordinal) AndAlso
+                   String.Equals(If(password, String.Empty), _password, StringComparison.Ordinal)
+        End Function
+    End Class
+
+    Private Class LTFSFileProviderFactory
+        Implements IFileProviderFactory
+
+        Private ReadOnly _root As ltfsindex.directory
+        Private ReadOnly _tapeDrive As String
+        Private ReadOnly _blockSize As Integer
+        Private ReadOnly _extraPartitionCount As Integer
+        Private ReadOnly _logHandler As Action(Of String)
+
+        Public Sub New(root As ltfsindex.directory,
+                       tapeDrive As String,
+                       blockSize As Integer,
+                       extraPartitionCount As Integer,
+                       logHandler As Action(Of String))
+            _root = root
+            _tapeDrive = tapeDrive
+            _blockSize = blockSize
+            _extraPartitionCount = extraPartitionCount
+            _logHandler = logHandler
+        End Sub
+
+        Public Function GetProvider(user As String) As IFileProvider Implements IFileProviderFactory.GetProvider
+            Return New LTFSFileProvider(_root, _tapeDrive, _blockSize, _extraPartitionCount, _logHandler)
+        End Function
+    End Class
+
+    Private Class LTFSFileProvider
+        Implements IMLstFileProvider
+
+        Private ReadOnly _logSessionId As String = $"ftp-filesystem-{Guid.NewGuid().ToString("N").Substring(0, 8)}"
+        Private ReadOnly _root As ltfsindex.directory
+        Private ReadOnly _tapeDrive As String
+        Private ReadOnly _blockSize As Integer
+        Private ReadOnly _extraPartitionCount As Integer
+        Private ReadOnly _logHandler As Action(Of String)
+        Private _workingStack As List(Of ltfsindex.directory)
+
+        Private Class ResolvedPath
+            Public Property Directory As ltfsindex.directory
+            Public Property File As ltfsindex.file
+            Public Property DirectoryStack As List(Of ltfsindex.directory)
+        End Class
+
+        Public Sub New(root As ltfsindex.directory,
+                       tapeDrive As String,
+                       blockSize As Integer,
+                       extraPartitionCount As Integer,
+                       logHandler As Action(Of String))
+            If root Is Nothing Then Throw New ArgumentNullException(NameOf(root))
+
+            _root = root
+            _tapeDrive = tapeDrive
+            _blockSize = blockSize
+            _extraPartitionCount = extraPartitionCount
+            _logHandler = logHandler
+            _workingStack = New List(Of ltfsindex.directory) From {root}
+
+            LogInformation("LTFS FTP provider created. TapeDrive={TapeDrive} BlockSize={BlockSize} ExtraPartitionCount={ExtraPartitionCount}.",
+                           _tapeDrive, _blockSize, _extraPartitionCount)
+        End Sub
+
+        Public Function GetWorkingDirectory() As String Implements IFileProvider.GetWorkingDirectory
+            If _workingStack.Count <= 1 Then Return "/"
+
+            Dim names As New List(Of String)
+            For i As Integer = 1 To _workingStack.Count - 1
+                names.Add(_workingStack(i).name)
+            Next
+            Return "/" & String.Join("/", names.ToArray())
+        End Function
+
+        Public Function SetWorkingDirectory(path As String) As Boolean Implements IFileProvider.SetWorkingDirectory
+            Dim resolved As ResolvedPath = ResolvePath(path)
+            If resolved Is Nothing OrElse resolved.Directory Is Nothing Then Return False
+
+            _workingStack = New List(Of ltfsindex.directory)(resolved.DirectoryStack)
+            LogDebug("FTP working directory changed. DirectoryName={DirectoryName}.", GetWorkingDirectory())
+            Return True
+        End Function
+
+        Public Function CreateDirectoryAsync(path As String) As Task Implements IFileProvider.CreateDirectoryAsync
+            Throw ReadOnlyOperation("CreateDirectory", path)
+        End Function
+
+        Public Function DeleteDirectoryAsync(path As String) As Task Implements IFileProvider.DeleteDirectoryAsync
+            Throw ReadOnlyOperation("DeleteDirectory", path)
+        End Function
+
+        Public Function DeleteAsync(path As String) As Task Implements IFileProvider.DeleteAsync
+            Throw ReadOnlyOperation("Delete", path)
+        End Function
+
+        Public Function RenameAsync(fromPath As String, toPath As String) As Task Implements IFileProvider.RenameAsync
+            Throw ReadOnlyOperation("Rename", $"{fromPath} -> {toPath}")
+        End Function
+
+        Public Function OpenFileForReadAsync(path As String) As Task(Of Stream) Implements IFileProvider.OpenFileForReadAsync
+            Dim resolved As ResolvedPath = RequirePath(path)
+            If resolved.File Is Nothing Then
+                Throw New FileNoAccessException($"Path '{path}' is not a file.")
+            End If
+
+            Dim fileInfo As ltfsindex.file = resolved.File
+            LogInformation("FTP file read started. FileName={FileName} FileLength={FileLength}.", fileInfo.name, fileInfo.length)
+            RaiseLog($"OpenFileForReadAsync file={fileInfo.name}")
+
+            Dim input As New IOManager.LTFSFileStream(fileInfo, _tapeDrive, _blockSize, _extraPartitionCount)
+            AddHandler input.LogPrint, Sub(message As String)
+                                           RaiseLog(message)
+                                       End Sub
+
+            Dim result As Stream = New BufferedStream(input, TapeUtils.GlobalBlockLimit)
+            LogInformation("FTP file read stream opened. FileName={FileName}.", fileInfo.name)
             Return Task.FromResult(result)
         End Function
 
-        Public Function MoveAsync(parent As IUnixDirectoryEntry, source As IUnixFileSystemEntry, target As IUnixDirectoryEntry, fileName As String, cancellationToken As CancellationToken) As Task(Of IUnixFileSystemEntry) Implements IUnixFileSystem.MoveAsync
-            LogUnsupportedOperation("Move", fileName)
-            Throw New NotImplementedException()
+        Public Function OpenFileForWriteAsync(path As String) As Task(Of Stream) Implements IFileProvider.OpenFileForWriteAsync
+            Throw ReadOnlyOperation("OpenFileForWrite", path)
         End Function
 
-        Public Function UnlinkAsync(entry As IUnixFileSystemEntry, cancellationToken As CancellationToken) As Task Implements IUnixFileSystem.UnlinkAsync
-            LogUnsupportedOperation("Unlink", If(entry Is Nothing, String.Empty, entry.Name))
-            Throw New NotImplementedException()
+        Public Function CreateFileForWriteAsync(path As String) As Task(Of Stream) Implements IFileProvider.CreateFileForWriteAsync
+            Throw ReadOnlyOperation("CreateFileForWrite", path)
         End Function
 
-        Public Function CreateDirectoryAsync(targetDirectory As IUnixDirectoryEntry, directoryName As String, cancellationToken As CancellationToken) As Task(Of IUnixDirectoryEntry) Implements IUnixFileSystem.CreateDirectoryAsync
-            LogUnsupportedOperation("CreateDirectory", directoryName)
-            Throw New NotImplementedException()
+        Public Function GetNameListingAsync(path As String) As Task(Of IEnumerable(Of String)) Implements IFileProvider.GetNameListingAsync
+            Dim resolved As ResolvedPath = RequirePath(path)
+            Dim result As New List(Of String)
+
+            If resolved.File IsNot Nothing Then
+                result.Add(resolved.File.name)
+            Else
+                AddChildNames(resolved.Directory, result)
+            End If
+
+            LogDebug("FTP name listing completed. Path={Path} EntryCount={EntryCount}.", path, result.Count)
+            Return Task.FromResult(Of IEnumerable(Of String))(result)
         End Function
 
-        Public Function OpenReadAsync(fileEntry As IUnixFileEntry, startPosition As Long, cancellationToken As CancellationToken) As Task(Of Stream) Implements IUnixFileSystem.OpenReadAsync
-            Dim fileInfo As ltfsindex.file = CType(fileEntry, LTFSFileEntry).FileInfo
-            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSFileSystem))
+        Public Function GetListingAsync(path As String) As Task(Of IEnumerable(Of FileSystemEntry)) Implements IFileProvider.GetListingAsync
+            Dim resolved As ResolvedPath = RequirePath(path)
+            Dim result As New List(Of FileSystemEntry)
+
+            If resolved.File IsNot Nothing Then
+                result.Add(ToFileSystemEntry(resolved.File))
+            Else
+                AddChildEntries(resolved.Directory, result)
+            End If
+
+            LogDebug("FTP directory listing completed. Path={Path} EntryCount={EntryCount}.", path, result.Count)
+            Return Task.FromResult(Of IEnumerable(Of FileSystemEntry))(result)
+        End Function
+
+        Public Function GetItemAsync(path As String) As Task(Of FileSystemEntry) Implements IMLstFileProvider.GetItemAsync
+            Dim resolved As ResolvedPath = RequirePath(path)
+            If resolved.File IsNot Nothing Then
+                Return Task.FromResult(ToFileSystemEntry(resolved.File))
+            End If
+
+            Return Task.FromResult(ToFileSystemEntry(resolved.Directory,
+                                                     resolved.Directory Is _root))
+        End Function
+
+        Public Function GetChildItems(path As String) As Task(Of IEnumerable(Of FileSystemEntry)) Implements IMLstFileProvider.GetChildItems
+            Dim resolved As ResolvedPath = RequirePath(path)
+            If resolved.File IsNot Nothing Then
+                Throw New ArgumentException($"Path '{path}' is not a directory.")
+            End If
+
+            Dim result As New List(Of FileSystemEntry)
+            AddChildEntries(resolved.Directory, result)
+            Return Task.FromResult(Of IEnumerable(Of FileSystemEntry))(result)
+        End Function
+
+        Private Function ResolvePath(path As String) As ResolvedPath
+            Dim normalized As String = If(path, String.Empty).Trim().Replace(ChrW(92), "/"c)
+            Dim isAbsolute As Boolean = normalized.StartsWith("/", StringComparison.Ordinal)
+            Dim segments() As String = normalized.Split(New Char() {"/"c}, StringSplitOptions.RemoveEmptyEntries)
+            Dim stack As New List(Of ltfsindex.directory)
+
+            If isAbsolute Then
+                stack.Add(_root)
+            Else
+                stack.AddRange(_workingStack)
+            End If
+
+            Dim fileResult As ltfsindex.file = Nothing
+            For i As Integer = 0 To segments.Length - 1
+                Dim segment As String = segments(i).Trim()
+                If segment.Length = 0 OrElse segment = "." Then Continue For
+
+                If segment = ".." Then
+                    If stack.Count > 1 Then stack.RemoveAt(stack.Count - 1)
+                    Continue For
+                End If
+
+                Dim current As ltfsindex.directory = stack(stack.Count - 1)
+                Dim childDirectory As ltfsindex.directory = FindDirectory(current, segment)
+                If childDirectory IsNot Nothing Then
+                    stack.Add(childDirectory)
+                    Continue For
+                End If
+
+                fileResult = FindFile(current, segment)
+                If fileResult Is Nothing OrElse i <> segments.Length - 1 Then Return Nothing
+                Exit For
+            Next
+
+            If fileResult IsNot Nothing Then
+                Return New ResolvedPath With {
+                    .File = fileResult,
+                    .DirectoryStack = stack
+                }
+            End If
+
+            Return New ResolvedPath With {
+                .Directory = stack(stack.Count - 1),
+                .DirectoryStack = stack
+            }
+        End Function
+
+        Private Function RequirePath(path As String) As ResolvedPath
+            Dim resolved As ResolvedPath = ResolvePath(path)
+            If resolved Is Nothing Then Throw New FileNoAccessException($"Path '{path}' does not exist.")
+            Return resolved
+        End Function
+
+        Private Shared Function FindDirectory(parent As ltfsindex.directory, name As String) As ltfsindex.directory
+            If parent Is Nothing OrElse parent.contents Is Nothing OrElse parent.contents._directory Is Nothing Then Return Nothing
+
+            For Each child As ltfsindex.directory In parent.contents._directory
+                If String.Equals(child.name, name, StringComparison.OrdinalIgnoreCase) Then Return child
+            Next
+            Return Nothing
+        End Function
+
+        Private Shared Function FindFile(parent As ltfsindex.directory, name As String) As ltfsindex.file
+            If parent Is Nothing OrElse parent.contents Is Nothing OrElse parent.contents._file Is Nothing Then Return Nothing
+
+            For Each child As ltfsindex.file In parent.contents._file
+                If String.Equals(child.name, name, StringComparison.OrdinalIgnoreCase) Then Return child
+            Next
+            Return Nothing
+        End Function
+
+        Private Shared Sub AddChildNames(parent As ltfsindex.directory, result As List(Of String))
+            If parent Is Nothing OrElse parent.contents Is Nothing Then Return
+            If parent.contents._directory IsNot Nothing Then
+                For Each child As ltfsindex.directory In parent.contents._directory
+                    result.Add(child.name)
+                Next
+            End If
+            If parent.contents._file IsNot Nothing Then
+                For Each child As ltfsindex.file In parent.contents._file
+                    result.Add(child.name)
+                Next
+            End If
+        End Sub
+
+        Private Shared Sub AddChildEntries(parent As ltfsindex.directory, result As List(Of FileSystemEntry))
+            If parent Is Nothing OrElse parent.contents Is Nothing Then Return
+            If parent.contents._directory IsNot Nothing Then
+                For Each child As ltfsindex.directory In parent.contents._directory
+                    result.Add(ToFileSystemEntry(child, False))
+                Next
+            End If
+            If parent.contents._file IsNot Nothing Then
+                For Each child As ltfsindex.file In parent.contents._file
+                    result.Add(ToFileSystemEntry(child))
+                Next
+            End If
+        End Sub
+
+        Private Shared Function ToFileSystemEntry(fileInfo As ltfsindex.file) As FileSystemEntry
+            Return New FileSystemEntry With {
+                .Name = fileInfo.name,
+                .LastWriteTime = GetEntryTime(fileInfo.modifytime, fileInfo.changetime, fileInfo.creationtime),
+                .Length = fileInfo.length,
+                .IsDirectory = False,
+                .IsReadOnly = fileInfo.[readonly]
+            }
+        End Function
+
+        Private Shared Function ToFileSystemEntry(directoryInfo As ltfsindex.directory, isRoot As Boolean) As FileSystemEntry
+            Return New FileSystemEntry With {
+                .Name = If(isRoot, "/", directoryInfo.name),
+                .LastWriteTime = GetEntryTime(directoryInfo.modifytime, directoryInfo.changetime, directoryInfo.creationtime),
+                .Length = 0,
+                .IsDirectory = True,
+                .IsReadOnly = directoryInfo.[readonly]
+            }
+        End Function
+
+        Private Shared Function GetEntryTime(ParamArray values() As String) As Date
+            For Each value As String In values
+                If Not String.IsNullOrWhiteSpace(value) Then
+                    Return FTPService.ParseTimeStamp(value).ToUniversalTime()
+                End If
+            Next
+            Return Date.UtcNow
+        End Function
+
+        Private Function ReadOnlyOperation(operation As String, path As String) As FileNoAccessException
+            LogWarning("FTP read-only operation rejected. Operation={Operation} Path={Path}.", operation, path)
+            Return New FileNoAccessException("The LTFS FTP service is read-only.")
+        End Function
+
+        Private Sub RaiseLog(message As String)
+            If _logHandler IsNot Nothing Then _logHandler(message)
+        End Sub
+
+        Private Sub LogInformation(messageTemplate As String, ParamArray values() As Object)
+            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSFileProvider))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
                     Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                        Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "FileRead")
-                            Log.Information("FTP file read started. FileName={FileName} StartPosition={StartPosition} FileLength={FileLength}.", fileInfo.name, startPosition, fileInfo.length)
-                        End Using
+                        Log.Information(messageTemplate, values)
                     End Using
                 End Using
             End Using
-            RaiseEvent LogPrint($"OpenReadAsync file={fileInfo.name} position={startPosition}")
-            Dim input As New IOManager.LTFSFileStream(fileInfo, TapeDrive, BlockSize, ExtraPartitionCount)
-            AddHandler input.LogPrint, Sub(s As String)
-                                           RaiseEvent LogPrint(s)
-                                       End Sub
-            Dim rstream As New BufferedStream(input, TapeUtils.GlobalBlockLimit)
-            rstream.Seek(startPosition, SeekOrigin.Begin)
-            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSFileSystem))
+        End Sub
+
+        Private Sub LogDebug(messageTemplate As String, ParamArray values() As Object)
+            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSFileProvider))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
                     Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                        Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "FileRead")
-                            Log.Information("FTP file read stream opened. FileName={FileName} StartPosition={StartPosition}.", fileInfo.name, startPosition)
-                        End Using
+                        Log.Debug(messageTemplate, values)
                     End Using
                 End Using
             End Using
-            Return Task.FromResult(Of Stream)(rstream)
+        End Sub
 
-            'Dim sstream As New IOManager.SmartStream(input, BlockSize, BlockSize * 128, BlockSize * 1024, BlockSize * 4096)
-            'AddHandler sstream.DebugLog, Sub(msg As String)
-            '                                 RaiseEvent LogPrint(msg)
-            '                             End Sub
-            'sstream.Seek(startPosition, SeekOrigin.Begin)
-            'Return Task.FromResult(Of Stream)(sstream)
-        End Function
-
-        Public Function AppendAsync(fileEntry As IUnixFileEntry, startPosition As Long?, data As Stream, cancellationToken As CancellationToken) As Task(Of IBackgroundTransfer) Implements IUnixFileSystem.AppendAsync
-            LogUnsupportedOperation("Append", If(fileEntry Is Nothing, String.Empty, fileEntry.Name))
-            Throw New NotImplementedException()
-        End Function
-
-        Public Function CreateAsync(targetDirectory As IUnixDirectoryEntry, fileName As String, data As Stream, cancellationToken As CancellationToken) As Task(Of IBackgroundTransfer) Implements IUnixFileSystem.CreateAsync
-            LogUnsupportedOperation("Create", fileName)
-            Throw New NotImplementedException()
-        End Function
-
-        Public Function ReplaceAsync(fileEntry As IUnixFileEntry, data As Stream, cancellationToken As CancellationToken) As Task(Of IBackgroundTransfer) Implements IUnixFileSystem.ReplaceAsync
-            LogUnsupportedOperation("Replace", If(fileEntry Is Nothing, String.Empty, fileEntry.Name))
-            Throw New NotImplementedException()
-        End Function
-
-        Public Function SetMacTimeAsync(entry As IUnixFileSystemEntry, modify As DateTimeOffset?, access As DateTimeOffset?, create As DateTimeOffset?, cancellationToken As CancellationToken) As Task(Of IUnixFileSystemEntry) Implements IUnixFileSystem.SetMacTimeAsync
-            LogUnsupportedOperation("SetMacTime", If(entry Is Nothing, String.Empty, entry.Name))
-            Throw New NotImplementedException()
-        End Function
-
-        Private Sub LogUnsupportedOperation(operation As String, entryName As String)
-            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSFileSystem))
+        Private Sub LogWarning(messageTemplate As String, ParamArray values() As Object)
+            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSFileProvider))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
                     Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                        Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "UnsupportedOperation")
-                            Log.Warning("FTP file system operation is not supported. Operation={Operation} EntryName={EntryName}.", operation, entryName)
-                        End Using
+                        Log.Warning(messageTemplate, values)
                     End Using
                 End Using
             End Using
         End Sub
     End Class
-    Public Class LTFSFileSystemProvider
-        Implements IFileSystemClassFactory
-        Private ReadOnly Property _root As ltfsindex.directory
-        Private ReadOnly Property _drive As String
-        Private ReadOnly Property _blocksize As Integer
-        Private ReadOnly Property _extraPartitionCount As Integer
-        Public ReadOnly Property LogHandler As Action(Of String)
-        Public Sub New(options As Microsoft.Extensions.Options.IOptions(Of LTFSFileSystemOptions))
-            _root = options.Value.Root
-            _drive = options.Value.TapeDrive
-            _blocksize = options.Value.BlockSize
-            _extraPartitionCount = options.Value.ExtraPartitionCount
-            LogHandler = options.Value.LogHandler
-        End Sub
-        Public Function Create(accountInformation As IAccountInformation) As Task(Of IUnixFileSystem) Implements IFileSystemClassFactory.Create
-            Return Task.FromResult(Of IUnixFileSystem)(New LTFSFileSystem(_root, _drive, _blocksize, _extraPartitionCount, LogHandler))
-        End Function
-    End Class
-    Public Class LTFSFileSystemOptions
-        Public Property Root As ltfsindex.directory
-        Public Property TapeDrive As String
-        Public Property BlockSize As Integer
-        Public Property ExtraPartitionCount As Integer
-        Public Property LogHandler As Action(Of String)
-    End Class
-    Public Shared Function UseLTFSFileSystem(builder As IFtpServerBuilder) As IFtpServerBuilder
-        builder.Services.AddSingleton(Of IFileSystemClassFactory, LTFSFileSystemProvider)()
-        Return builder
-    End Function
-    Public Class NoPasswdMembershipProvider
-        Inherits AnonymousMembershipProvider
-        Implements IMembershipProviderAsync
-        Public Overloads Shared Function CreateAnonymousPrincipal(email As String) As ClaimsPrincipal
-            Dim anonymousClaims As List(Of Claim) =
-               {New Claim(ClaimsIdentity.DefaultNameClaimType, "anonymous"),
-                New Claim(ClaimTypes.Anonymous, String.Empty),
-                New Claim(ClaimsIdentity.DefaultRoleClaimType, "anonymous"),
-                New Claim(ClaimsIdentity.DefaultRoleClaimType, "guest"),
-                New Claim(ClaimTypes.AuthenticationMethod, "anonymous")}.ToList()
-            If (Not String.IsNullOrWhiteSpace(email)) Then anonymousClaims.Add(New Claim(ClaimTypes.Email, email, ClaimValueTypes.Email))
-            Dim identity As New ClaimsIdentity(anonymousClaims, "anonymous")
-            Dim principal As New ClaimsPrincipal(identity)
-            Return principal
-        End Function
-        Public Shadows Function ValidateUserAsync(username As String, password As String, Optional cancellationToken As CancellationToken = Nothing) As Task(Of MemberValidationResult) Implements IMembershipProviderAsync.ValidateUserAsync
-            Return Task.FromResult(New MemberValidationResult(MemberValidationStatus.Anonymous, CreateAnonymousPrincipal(password)))
-        End Function
 
-        Public Shadows Function LogOutAsync(principal As ClaimsPrincipal, Optional cancellationToken As CancellationToken = Nothing) As Task Implements IMembershipProviderAsync.LogOutAsync
-            Return Task.CompletedTask
-        End Function
-    End Class
     Public Sub StartService()
-        If schema Is Nothing Then
-            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FTPService))
-                Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
-                    Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                        Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "ServiceLifecycle")
-                            Log.Warning("FTP service start was skipped because no schema is loaded.")
-                        End Using
-                    End Using
-                End Using
-            End Using
+        If schema Is Nothing OrElse schema._directory Is Nothing OrElse schema._directory.Count = 0 Then
+            LogWarning("FTP service start was skipped because no schema is loaded.")
             Exit Sub
         End If
-        Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FTPService))
-            Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
-                Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                    Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "ServiceLifecycle")
-                        Log.Information("FTP service start requested. TapeDrive={TapeDrive} Port={Port} BlockSize={BlockSize} ExtraPartitionCount={ExtraPartitionCount}.", TapeDrive, port, BlockSize, ExtraPartitionCount)
-                    End Using
-                End Using
-            End Using
-        End Using
-        Services = New ServiceCollection()
-        Services.Configure(
-        Sub(opt As LTFSFileSystemOptions)
-            opt.Root = schema._directory(0)
-            opt.TapeDrive = TapeDrive
-            opt.BlockSize = BlockSize
-            opt.ExtraPartitionCount = ExtraPartitionCount
-            opt.LogHandler = Sub(s As String)
-                                 RaiseEvent LogPrint(s)
-                             End Sub
-        End Sub)
+        If port < 1 OrElse port > 65535 Then Throw New ArgumentOutOfRangeException(NameOf(port))
 
-        Services.AddFtpServer(
-        Sub(builder As IFtpServerBuilder)
-            UseLTFSFileSystem(builder)
-            builder.Services.AddSingleton(Of IMembershipProviderAsync, NoPasswdMembershipProvider)()
-        End Sub)
+        SyncLock _lifecycleSync
+            If _serverTask IsNot Nothing Then Throw New InvalidOperationException("The FTP service is already running.")
 
+            LogInformation("FTP service start requested. TapeDrive={TapeDrive} Port={Port} BlockSize={BlockSize} ExtraPartitionCount={ExtraPartitionCount}.",
+                           TapeDrive, port, BlockSize, ExtraPartitionCount)
 
-        Services.Configure(
-            Sub(opt As FtpServerOptions)
-                opt.ServerAddress = "0.0.0.0"
-                opt.Port = port
-                opt.ConnectionInactivityCheckInterval = New TimeSpan(1, 0, 0)
-            End Sub)
+            Dim root As ltfsindex.directory = schema._directory(0)
+            Dim fileProviderFactory As New LTFSFileProviderFactory(
+                root,
+                TapeDrive,
+                BlockSize,
+                ExtraPartitionCount,
+                Sub(message As String)
+                    RaiseEvent LogPrint(message)
+                End Sub)
+            Dim stopTokenSource As New CancellationTokenSource
+            Dim server As New Zhaobang.FtpServer.FtpServer(
+                New IPEndPoint(IPAddress.Any, port),
+                fileProviderFactory,
+                New LocalDataConnectionFactory(),
+                New ConfiguredAuthenticator(Username, Password, AllowAnonymous))
 
-        Services.Configure(
-            Sub(opt As FtpConnectionOptions)
-                opt.DefaultEncoding = Text.Encoding.UTF8
-                opt.InactivityTimeout = New TimeSpan(6, 0, 0)
-            End Sub)
-
-        With Services.BuildServiceProvider
-            ftpServerHost = .GetRequiredService(Of IFtpServerHost)
             Try
-                ftpServerHost.StartAsync(CancellationToken.None)
+                Dim serverTask As Task = server.RunAsync(stopTokenSource.Token)
+                If serverTask.IsFaulted Then serverTask.GetAwaiter().GetResult()
+
+                _server = server
+                _serverTask = serverTask
+                _stopTokenSource = stopTokenSource
+                LogInformation("FTP service started. Port={Port}.", port)
             Catch ex As Exception
-                Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FTPService))
-                    Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
-                        Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                            Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
-                                Log.Error(ex, "FTP service start failed. Port={Port}.", port)
-                            End Using
-                        End Using
-                    End Using
-                End Using
+                stopTokenSource.Cancel()
+                stopTokenSource.Dispose()
+                LogError(ex, "FTP service start failed. Port={Port}.", port)
                 Throw
             End Try
-        End With
-        Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FTPService))
-            Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
-                Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                    Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "ServiceLifecycle")
-                        Log.Information("FTP service started. Port={Port}.", port)
-                    End Using
-                End Using
-            End Using
-        End Using
+        End SyncLock
     End Sub
 
     Public Sub StopService()
+        StopServiceAsync().GetAwaiter().GetResult()
+    End Sub
+
+    Public Async Function StopServiceAsync() As Task
+        Dim stopTokenSource As CancellationTokenSource
+        Dim serverTask As Task
+
+        SyncLock _lifecycleSync
+            stopTokenSource = _stopTokenSource
+            serverTask = _serverTask
+        End SyncLock
+
+        If stopTokenSource Is Nothing OrElse serverTask Is Nothing Then Return
+
+        LogInformation("FTP service stop requested.")
+        Try
+            stopTokenSource.Cancel()
+            Await serverTask.ConfigureAwait(False)
+            LogInformation("FTP service stopped.")
+        Catch ex As Exception
+            LogError(ex, "FTP service stop failed.")
+            Throw
+        Finally
+            SyncLock _lifecycleSync
+                If Object.ReferenceEquals(_stopTokenSource, stopTokenSource) Then
+                    _stopTokenSource = Nothing
+                    _serverTask = Nothing
+                    _server = Nothing
+                End If
+            End SyncLock
+            stopTokenSource.Dispose()
+        End Try
+    End Function
+
+    Private Sub LogInformation(messageTemplate As String, ParamArray values() As Object)
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FTPService))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                    Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "ServiceLifecycle")
-                        Log.Information("FTP service stop requested.")
-                    End Using
+                    Log.Information(messageTemplate, values)
                 End Using
             End Using
         End Using
-        Try
-            ftpServerHost.StopAsync(CancellationToken.None).Wait()
-            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FTPService))
-                Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
-                    Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                        Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "ServiceLifecycle")
-                            Log.Information("FTP service stopped.")
-                        End Using
-                    End Using
-                End Using
-            End Using
-        Catch ex As Exception
-            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FTPService))
-                Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
-                    Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                        Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
-                            Log.Error(ex, "FTP service stop failed.")
-                        End Using
-                    End Using
-                End Using
-            End Using
-            Throw
-        End Try
     End Sub
+
+    Private Sub LogWarning(messageTemplate As String, ParamArray values() As Object)
+        Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FTPService))
+            Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
+                Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
+                    Log.Warning(messageTemplate, values)
+                End Using
+            End Using
+        End Using
+    End Sub
+
+    Private Sub LogError(exception As Exception, messageTemplate As String, ParamArray values() As Object)
+        Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FTPService))
+            Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FTP")
+                Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
+                    Log.Error(exception, messageTemplate, values)
+                End Using
+            End Using
+        End Using
+    End Sub
+
     Public Shared Function ParseTimeStamp(t As String) As Date
         'yyyy-MM-ddTHH:mm:ss.fffffff00Z
         Try
@@ -474,5 +519,4 @@ Public Class FTPService
             Return New Date()
         End Try
     End Function
-
 End Class
