@@ -44,6 +44,44 @@ Public Module ApplicationNavigation
         If Not EnsureAdministrator("tapecopy") Then Return
         ShowAndActivate(TapeCopy)
     End Sub
+    Public Sub ShowWriterIntraProcess(tapeDrive As String, Optional offlineMode As Boolean = False)
+        If String.IsNullOrWhiteSpace(tapeDrive) Then
+            Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(ApplicationNavigation))
+                Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Navigation")
+                    Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
+                        Log.Warning("Writer navigation was ignored because no tape drive was supplied.")
+                    End Using
+                End Using
+            End Using
+            Return
+        End If
+        Dim normalizedTapeDrive = NormalizeTapeDrive(tapeDrive)
+        Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(ApplicationNavigation))
+            Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Navigation")
+                Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "WindowOpen")
+                    Log.Information("Writer window navigation requested. TapeDrive={TapeDrive} NormalizedTapeDrive={NormalizedTapeDrive} OfflineMode={OfflineMode}.",
+                                    tapeDrive,
+                                    normalizedTapeDrive,
+                                    offlineMode)
+                End Using
+            End Using
+        End Using
+        If Not EnsureAdministrator("writer", normalizedTapeDrive, If(offlineMode, "offline", String.Empty)) Then Return
+
+        Dim writer As New LTFSWriter With {
+            .TapeDrive = normalizedTapeDrive,
+            .OfflineMode = offlineMode
+        }
+        writer.Show()
+        writer.BringToFront()
+        Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(ApplicationNavigation))
+            Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Navigation")
+                Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "WindowOpen")
+                    Log.Information("Writer window opened. TapeDrive={TapeDrive} OfflineMode={OfflineMode}.", normalizedTapeDrive, offlineMode)
+                End Using
+            End Using
+        End Using
+    End Sub
 
     Public Sub ShowWriter(tapeDrive As String, Optional offlineMode As Boolean = False)
         If String.IsNullOrWhiteSpace(tapeDrive) Then

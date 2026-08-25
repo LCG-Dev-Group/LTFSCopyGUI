@@ -2148,7 +2148,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
     End Sub
 
     Private Sub 在当前进程运行ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 在当前进程运行ToolStripMenuItem.Click
-        ApplicationNavigation.ShowWriter(ConfTapeDrive)
+        ApplicationNavigation.ShowWriterIntraProcess(ConfTapeDrive)
     End Sub
 
     Private Sub 不读取索引ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 不读取索引ToolStripMenuItem.Click
