@@ -11345,15 +11345,32 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub LTFSWriter_Closed(sender As Object, e As EventArgs) Handles Me.Closed
+        Dim handleToClose As IntPtr = driveHandle
+        Dim leaseToDispose As SCSIDeviceLockManager.WriterLease = _deviceLease
+        _deviceLease = Nothing
+        Dim closed As Boolean = False
+
         Try
-            TapeUtils.CloseTapeDrive(driveHandle)
+            ' Do not let a close event wait behind an in-flight SCSI command.
+            closed = TapeUtils.CloseTapeDrive(handleToClose, 0)
         Catch
         Finally
-            If _deviceLease IsNot Nothing Then
-                _deviceLease.Dispose()
-                _deviceLease = Nothing
+            If leaseToDispose IsNot Nothing Then
+                leaseToDispose.Dispose()
             End If
         End Try
+
+        If Not closed Then
+            ' The command still owns the device lock.  Finish the close after
+            ' it releases, without keeping the form close handler blocked.
+            Threading.ThreadPool.QueueUserWorkItem(
+                Sub(state As Object)
+                    Try
+                        TapeUtils.CloseTapeDrive(handleToClose)
+                    Catch
+                    End Try
+                End Sub)
+        End If
     End Sub
 
     Private Sub ToolTipChanErrLog_Popup(sender As Object, e As PopupEventArgs) Handles ToolTipChanErrLog.Popup

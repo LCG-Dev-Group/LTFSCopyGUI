@@ -76,6 +76,17 @@ Public NotInheritable Class SCSIDeviceLockManager
         Return TryEnterOperation(GetHandleState(handle), timeoutMilliseconds)
     End Function
 
+    ' SCSI commands must wait for another operation in this process to finish.
+    ' The process gate is still probed without waiting so a different process
+    ' owning the device can be reported as busy instead of blocking forever.
+    Public Function EnterOperation(devicePath As String) As IDisposable
+        Return TryEnterOperation(GetPathState(devicePath), 0, True)
+    End Function
+
+    Public Function EnterOperation(handle As IntPtr) As IDisposable
+        Return TryEnterOperation(GetHandleState(handle), 0, True)
+    End Function
+
     Public Function AcquireWriterLease(devicePath As String,
                                        sessionId As String,
                                        Optional timeoutMilliseconds As Integer = 10000) As WriterLease
@@ -98,12 +109,16 @@ Public NotInheritable Class SCSIDeviceLockManager
     End Function
 
     Private Function TryEnterOperation(state As DeviceLockState,
-                                       timeoutMilliseconds As Integer) As IDisposable
+                                       timeoutMilliseconds As Integer,
+                                       Optional waitForLocalLock As Boolean = False) As IDisposable
         Dim localLockTaken As Boolean = False
         Dim processGateTaken As Boolean = False
 
         Try
-            If timeoutMilliseconds <= 0 Then
+            If waitForLocalLock Then
+                Monitor.Enter(state.LocalLock)
+                localLockTaken = True
+            ElseIf timeoutMilliseconds <= 0 Then
                 localLockTaken = Monitor.TryEnter(state.LocalLock)
             Else
                 localLockTaken = Monitor.TryEnter(state.LocalLock, timeoutMilliseconds)
@@ -112,15 +127,22 @@ Public NotInheritable Class SCSIDeviceLockManager
             If Not localLockTaken Then Return Nothing
 
             If state.CrossProcessEnabled AndAlso Not HasLocalWriter(state) Then
-                If Not WaitForMutex(state.ProcessGate, timeoutMilliseconds, Nothing) Then
+                ' Do not turn a local wait into an unbounded cross-process
+                ' wait.  The caller has already serialized local operations;
+                ' a foreign owner should be reported as busy immediately.
+                Dim processGateTimeout As Integer = If(waitForLocalLock, 0, timeoutMilliseconds)
+                If Not WaitForMutex(state.ProcessGate, processGateTimeout, Nothing) Then
                     Monitor.Exit(state.LocalLock)
+                    localLockTaken = False
                     Return Nothing
                 End If
                 processGateTaken = True
 
                 If Not IsWriterGateAvailable(state) Then
                     state.ProcessGate.ReleaseMutex()
+                    processGateTaken = False
                     Monitor.Exit(state.LocalLock)
+                    localLockTaken = False
                     Return Nothing
                 End If
             End If
@@ -323,6 +345,9 @@ Public NotInheritable Class SCSIDeviceLockManager
         Private _leaseThread As Thread
         Private _acquiredValue As Integer
         Private _disposed As Integer
+        Private _eventsDisposed As Integer
+
+        Private Const DisposeJoinTimeoutMilliseconds As Integer = 1000
 
         Friend Sub New(manager As SCSIDeviceLockManager,
                         state As DeviceLockState,
@@ -351,14 +376,14 @@ Public NotInheritable Class SCSIDeviceLockManager
         End Property
 
         Friend Function Start(timeoutMilliseconds As Integer) As Boolean
-            Dim waitTimeout As Integer = If(timeoutMilliseconds < 0, Threading.Timeout.Infinite, timeoutMilliseconds)
+            Dim waitTimeout As Integer = If(timeoutMilliseconds < 0, Timeout.Infinite, timeoutMilliseconds)
             _leaseThread = New Thread(AddressOf LeaseThreadMain) With {
                 .IsBackground = True,
                 .Name = $"SCSI writer lease - {_state.Key}"
             }
             _leaseThread.Start(waitTimeout)
 
-            If waitTimeout = Threading.Timeout.Infinite Then
+            If waitTimeout = Timeout.Infinite Then
                 _ready.WaitOne()
             Else
                 Dim readyTimeout As Integer = CInt(Math.Min(CLng(Integer.MaxValue), CLng(waitTimeout) + 1000L))
@@ -368,77 +393,93 @@ Public NotInheritable Class SCSIDeviceLockManager
         End Function
 
         Private Sub LeaseThreadMain(argument As Object)
-            Dim timeoutMilliseconds As Integer = CInt(argument)
-            Dim processGateTaken As Boolean = False
-            Dim writerGateTaken As Boolean = False
-
             Try
-                If _releaseRequested.WaitOne(0) Then Return
-                If Not _manager.WaitForMutex(_state.ProcessGate, timeoutMilliseconds, _releaseRequested) Then Return
-                processGateTaken = True
-                If Not _manager.WaitForMutex(_state.WriterGate, timeoutMilliseconds, _releaseRequested) Then Return
-                writerGateTaken = True
+                Dim timeoutMilliseconds As Integer = CInt(argument)
+                Dim processGateTaken As Boolean = False
+                Dim writerGateTaken As Boolean = False
 
-                SyncLock _manager._registryLock
-                    If _state.ActiveWriter IsNot Nothing Then Return
-                    _state.ActiveWriter = Me
-                    Volatile.Write(_acquiredValue, 1)
-                End SyncLock
-            Catch
-            Finally
-                If processGateTaken Then
-                    Try
-                        _state.ProcessGate.ReleaseMutex()
-                    Catch
-                    End Try
-                End If
-                _ready.Set()
-            End Try
+                Try
+                    If _releaseRequested.WaitOne(0) Then Return
+                    If Not _manager.WaitForMutex(_state.ProcessGate, timeoutMilliseconds, _releaseRequested) Then Return
+                    processGateTaken = True
+                    If Not _manager.WaitForMutex(_state.WriterGate, timeoutMilliseconds, _releaseRequested) Then Return
+                    writerGateTaken = True
 
-            If Not IsAcquired Then
-                If writerGateTaken Then
-                    Try
-                        _state.WriterGate.ReleaseMutex()
-                    Catch
-                    End Try
-                End If
-                Return
-            End If
-
-            _releaseRequested.WaitOne()
-
-            Dim localLockTaken As Boolean = False
-            Dim releaseGateTaken As Boolean = False
-            Try
-                Monitor.Enter(_state.LocalLock)
-                localLockTaken = True
-                If _manager.WaitForMutex(_state.ProcessGate, Timeout.Infinite, Nothing) Then
-                    releaseGateTaken = True
-                End If
-
-                SyncLock _manager._registryLock
-                    If Object.ReferenceEquals(_state.ActiveWriter, Me) Then
-                        _state.ActiveWriter = Nothing
-                        Volatile.Write(_acquiredValue, 0)
+                    SyncLock _manager._registryLock
+                        If _state.ActiveWriter IsNot Nothing Then Return
+                        _state.ActiveWriter = Me
+                        Volatile.Write(_acquiredValue, 1)
+                    End SyncLock
+                Catch
+                Finally
+                    If processGateTaken Then
+                        Try
+                            _state.ProcessGate.ReleaseMutex()
+                        Catch
+                        End Try
                     End If
-                End SyncLock
+                    _ready.Set()
+                End Try
 
-                If writerGateTaken Then
-                    Try
-                        _state.WriterGate.ReleaseMutex()
-                    Catch
-                    End Try
+                If Not IsAcquired Then
+                    If writerGateTaken Then
+                        Try
+                            _state.WriterGate.ReleaseMutex()
+                        Catch
+                        End Try
+                    End If
+                    Return
                 End If
+
+                _releaseRequested.WaitOne()
+
+                Dim localLockTaken As Boolean = False
+                Dim releaseGateTaken As Boolean = False
+                Try
+                    Monitor.Enter(_state.LocalLock)
+                    localLockTaken = True
+                    If _manager.WaitForMutex(_state.ProcessGate, Timeout.Infinite, Nothing) Then
+                        releaseGateTaken = True
+                    End If
+
+                    SyncLock _manager._registryLock
+                        If ReferenceEquals(_state.ActiveWriter, Me) Then
+                            _state.ActiveWriter = Nothing
+                            Volatile.Write(_acquiredValue, 0)
+                        End If
+                    End SyncLock
+
+                    If writerGateTaken Then
+                        Try
+                            _state.WriterGate.ReleaseMutex()
+                        Catch
+                        End Try
+                    End If
+                Finally
+                    If releaseGateTaken Then
+                        Try
+                            _state.ProcessGate.ReleaseMutex()
+                        Catch
+                        End Try
+                    End If
+                    If localLockTaken Then
+                        Monitor.Exit(_state.LocalLock)
+                    End If
+                End Try
             Finally
-                If releaseGateTaken Then
-                    Try
-                        _state.ProcessGate.ReleaseMutex()
-                    Catch
-                    End Try
+                If Volatile.Read(_disposed) <> 0 Then
+                    DisposeEvents()
                 End If
-                If localLockTaken Then
-                    Monitor.Exit(_state.LocalLock)
-                End If
+            End Try
+        End Sub
+
+        Private Sub DisposeEvents()
+            If Interlocked.Exchange(_eventsDisposed, 1) <> 0 Then Return
+
+            Try
+                _ready.Dispose()
+            Finally
+                _releaseRequested.Dispose()
             End Try
         End Sub
 
@@ -446,13 +487,19 @@ Public NotInheritable Class SCSIDeviceLockManager
             If Interlocked.Exchange(_disposed, 1) <> 0 Then Return
 
             _releaseRequested.Set()
-            If _leaseThread IsNot Nothing AndAlso
-               Not Object.ReferenceEquals(Thread.CurrentThread, _leaseThread) Then
-                _leaseThread.Join()
+            Dim leaseThread As Thread = _leaseThread
+            If leaseThread Is Nothing Then
+                DisposeEvents()
+                Return
             End If
 
-            _ready.Dispose()
-            _releaseRequested.Dispose()
+            If ReferenceEquals(Thread.CurrentThread, leaseThread) Then Return
+
+            ' The lease thread may be waiting for a SCSI operation to release
+            ' the device lock.  Never make window shutdown wait for that command.
+            If Not leaseThread.Join(DisposeJoinTimeoutMilliseconds) Then Return
+
+            DisposeEvents()
         End Sub
     End Class
 End Class

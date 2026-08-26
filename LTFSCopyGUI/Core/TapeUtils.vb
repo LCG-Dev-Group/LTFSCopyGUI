@@ -98,7 +98,7 @@ Public Class TapeUtils
                 Return False
             End If
 
-            Dim operationScope As IDisposable = SCSIDeviceLockManager.Instance.TryEnterOperation(handle)
+            Dim operationScope As IDisposable = SCSIDeviceLockManager.Instance.EnterOperation(handle)
             If operationScope Is Nothing Then
                 SetLastNativeError(170)
                 Return False
@@ -116,7 +116,9 @@ Public Class TapeUtils
                     LUN)
                 BytesReturned = nativeResult.BytesReturned
                 sense = nativeResult.Sense
-                SetLastNativeError(nativeResult.Win32Error)
+                Dim nativeError As Integer = nativeResult.Win32Error
+                If Not nativeResult.Succeeded AndAlso nativeError = 0 Then nativeError = 31
+                SetLastNativeError(nativeError)
                 Return nativeResult.Succeeded
             End Using
         End Function
@@ -250,9 +252,10 @@ Public Class TapeUtils
     Public Shared Property DriveHandle As New SerializableDictionary(Of String, IntPtr)
     Public Shared Function OpenTapeDrive(TapeDrive As String, ByRef handle As IntPtr) As Boolean
         handle = IntPtr.Zero
-        Dim operationScope As IDisposable = SCSILockManager.TryEnterOperation(TapeDrive)
+        Dim operationScope As IDisposable = SCSILockManager.EnterOperation(TapeDrive)
         If operationScope Is Nothing Then
             handle = IntPtr.Zero
+            SetLastNativeError(170)
             Return False
         End If
 
@@ -304,8 +307,23 @@ Public Class TapeUtils
             End SyncLock
         End Using
     End Function
-    Public Shared Function CloseTapeDrive(handle As IntPtr) As Boolean
-        SyncLock SCSILockManager.GetLock(handle)
+    Public Shared Function CloseTapeDrive(handle As IntPtr,
+                                          Optional lockTimeoutMilliseconds As Integer = -1) As Boolean
+        Dim deviceLock As Object = SCSILockManager.GetLock(handle)
+        Dim lockTaken As Boolean = False
+        Try
+            If lockTimeoutMilliseconds < 0 Then
+                Threading.Monitor.Enter(deviceLock)
+                lockTaken = True
+            Else
+                lockTaken = Threading.Monitor.TryEnter(deviceLock, lockTimeoutMilliseconds)
+            End If
+
+            If Not lockTaken Then
+                SetLastNativeError(170)
+                Return False
+            End If
+
             SyncLock DriveHandle
                 If DriveHandle.ContainsValue(handle) Then
                     For Each key As String In DriveHandle.Keys
@@ -346,7 +364,9 @@ Public Class TapeUtils
                 SCSILockManager.UnregisterHandle(handle)
                 Return result
             End SyncLock
-        End SyncLock
+        Finally
+            If lockTaken Then Threading.Monitor.Exit(deviceLock)
+        End Try
     End Function
     Public Shared Function IsOpened(TapeDrive As String) As Boolean
         SyncLock DriveHandle
