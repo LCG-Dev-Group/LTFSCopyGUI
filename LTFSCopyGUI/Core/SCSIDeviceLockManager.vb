@@ -1,5 +1,7 @@
 Imports System
+Imports System.Collections.Concurrent
 Imports System.Collections.Generic
+Imports System.Runtime.ExceptionServices
 Imports System.Security.Cryptography
 Imports System.Text
 Imports System.Threading
@@ -8,6 +10,7 @@ Public NotInheritable Class SCSIDeviceLockManager
     Private Shared ReadOnly _instance As New SCSIDeviceLockManager()
 
     Private Const MutexNamespace As String = "Local\LTFSCopyGUI.SCSI."
+    Private Const CommandQueueCapacity As Integer = 16
 
     Private ReadOnly _registryLock As New Object()
     Private ReadOnly _pathStates As New Dictionary(Of String, DeviceLockState)(StringComparer.OrdinalIgnoreCase)
@@ -40,6 +43,8 @@ Public NotInheritable Class SCSIDeviceLockManager
     Public Function RegisterHandle(devicePath As String, handle As IntPtr) As Object
         Dim result As DeviceLockState = GetPathState(devicePath)
         If IsInvalidHandle(handle) Then Return result.LocalLock
+
+        result.ActivateQueue()
 
         SyncLock _registryLock
             _handleStates(handle.ToInt64()) = result
@@ -86,6 +91,73 @@ Public NotInheritable Class SCSIDeviceLockManager
     Public Function EnterOperation(handle As IntPtr) As IDisposable
         Return TryEnterOperation(GetHandleState(handle), 0, True)
     End Function
+
+    ''' <summary>
+    ''' Queues one device operation and waits synchronously for its result.
+    ''' The queue is FIFO and is shared by all handles registered for the same
+    ''' device path.  A false result means that the cross-process device gate
+    ''' was not available; exceptions from the operation are propagated to the
+    ''' caller.
+    ''' </summary>
+    Public Function ExecuteQueuedOperation(devicePath As String,
+                                            operation As Action,
+                                            Optional cancellationToken As CancellationToken = Nothing) As Boolean
+        If operation Is Nothing Then Throw New ArgumentNullException(NameOf(operation))
+        Return ExecuteQueuedOperation(GetPathState(devicePath), operation, cancellationToken)
+    End Function
+
+    ''' <summary>
+    ''' Queues one device operation for the device associated with a handle.
+    ''' </summary>
+    Public Function ExecuteQueuedOperation(handle As IntPtr,
+                                            operation As Action,
+                                            Optional cancellationToken As CancellationToken = Nothing) As Boolean
+        If operation Is Nothing Then Throw New ArgumentNullException(NameOf(operation))
+        Return ExecuteQueuedOperation(GetHandleState(handle), operation, cancellationToken)
+    End Function
+
+    ''' <summary>
+    ''' Adds a FIFO barrier after all currently queued operations.  This is
+    ''' used by handle teardown so a native handle is not closed while a
+    ''' queued SCSI command still owns a buffer or is using the handle.
+    ''' </summary>
+    Public Function WaitForQueuedOperations(devicePath As String,
+                                            Optional cancellationToken As CancellationToken = Nothing) As Boolean
+        Return ExecuteQueuedOperation(GetPathState(devicePath), Sub()
+                                                                   ' The queue order is the barrier.
+                                                               End Sub,
+                                                               cancellationToken)
+    End Function
+
+    Public Function WaitForQueuedOperations(handle As IntPtr,
+                                            Optional cancellationToken As CancellationToken = Nothing) As Boolean
+        Return ExecuteQueuedOperation(GetHandleState(handle), Sub()
+                                                                   ' The queue order is the barrier.
+                                                               End Sub,
+                                                               cancellationToken)
+    End Function
+
+    ''' <summary>
+    ''' Cancels commands that are waiting in this device queue.  A command
+    ''' that has already started is allowed to finish because the native SCSI
+    ''' call cannot be safely interrupted while its unmanaged buffer is live.
+    ''' </summary>
+    Public Sub CancelQueuedOperations(devicePath As String)
+        CancelQueuedOperations(GetPathState(devicePath))
+    End Sub
+
+    Public Sub CancelQueuedOperations(handle As IntPtr)
+        CancelQueuedOperations(GetHandleState(handle))
+    End Sub
+
+    ''' <summary>
+    ''' Prevents new commands from using a handle that is about to be closed
+    ''' and cancels commands that have not started yet.  A later open of the
+    ''' same device reactivates the path queue.
+    ''' </summary>
+    Public Sub CloseQueuedOperations(handle As IntPtr)
+        CloseQueuedOperations(GetHandleState(handle))
+    End Sub
 
     Public Function AcquireWriterLease(devicePath As String,
                                        sessionId As String,
@@ -164,6 +236,223 @@ Public NotInheritable Class SCSIDeviceLockManager
             Throw
         End Try
     End Function
+
+    Private Function TryEnterQueuedOperation(state As DeviceLockState,
+                                              cancellationToken As CancellationToken,
+                                              takeLocalLock As Boolean) As IDisposable
+        Dim localLockTaken As Boolean = False
+        Dim processGateTaken As Boolean = False
+
+        Try
+            If takeLocalLock Then
+                ' Legacy callers still use SyncLock(GetLock(...)) for
+                ' multi-command sequences.  The queue worker must honor that
+                ' lock, but its wait must remain cancellable.
+                Do While Not Monitor.TryEnter(state.LocalLock, 100)
+                    If cancellationToken.IsCancellationRequested Then
+                        Throw New OperationCanceledException(cancellationToken)
+                    End If
+                Loop
+                localLockTaken = True
+                If cancellationToken.IsCancellationRequested Then
+                    Monitor.Exit(state.LocalLock)
+                    localLockTaken = False
+                    Throw New OperationCanceledException(cancellationToken)
+                End If
+            End If
+
+            cancellationToken.ThrowIfCancellationRequested()
+
+            If state.CrossProcessEnabled AndAlso Not HasLocalWriter(state) Then
+                ' The per-device queue already serializes callers in this
+                ' process.  Probe the cross-process gate without blocking so
+                ' an external owner remains a normal "busy" result.
+                If Not WaitForMutex(state.ProcessGate, 0, Nothing) Then
+                    If localLockTaken Then
+                        Monitor.Exit(state.LocalLock)
+                        localLockTaken = False
+                    End If
+                    Return Nothing
+                End If
+                processGateTaken = True
+
+                If Not IsWriterGateAvailable(state) Then
+                    state.ProcessGate.ReleaseMutex()
+                    processGateTaken = False
+                    If localLockTaken Then
+                        Monitor.Exit(state.LocalLock)
+                        localLockTaken = False
+                    End If
+                    Return Nothing
+                End If
+            End If
+
+            Return New OperationScope(state, processGateTaken, localLockTaken)
+        Catch
+            If processGateTaken Then
+                Try
+                    state.ProcessGate.ReleaseMutex()
+                Catch
+                End Try
+            End If
+            If localLockTaken Then
+                Try
+                    Monitor.Exit(state.LocalLock)
+                Catch
+                End Try
+            End If
+            Throw
+        End Try
+    End Function
+
+    Private Function ExecuteQueuedOperation(state As DeviceLockState,
+                                            operation As Action,
+                                            cancellationToken As CancellationToken) As Boolean
+        Dim cancellationVersion As Integer
+        Dim enqueueToken As CancellationToken
+        Dim queueClosed As Boolean
+        Dim linkedCancellationSource As CancellationTokenSource = Nothing
+        SyncLock state.QueueControlLock
+            queueClosed = state.QueueClosed
+            cancellationVersion = state.QueueCancellationVersion
+            Dim queueCancellationToken As CancellationToken = state.QueueCancellationSource.Token
+            If cancellationToken.CanBeCanceled Then
+                ' A caller cancellation and a device close/cancel must both
+                ' wake a producer blocked on a full queue.  The version check
+                ' below also protects the small race between this snapshot
+                ' and command start.
+                linkedCancellationSource = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    queueCancellationToken)
+                enqueueToken = linkedCancellationSource.Token
+            Else
+                enqueueToken = queueCancellationToken
+            End If
+        End SyncLock
+
+        Try
+            cancellationToken.ThrowIfCancellationRequested()
+            If queueClosed Then Return False
+
+            ' A legacy SyncLock is a transaction boundary.  Execute commands
+            ' inline while that lock is held so the queue worker cannot deadlock
+            ' trying to acquire a monitor owned by the submitting thread.  The
+            ' worker still acquires the same monitor for normal queued callers,
+            ' so it cannot interleave with the transaction.
+            If Monitor.IsEntered(state.LocalLock) Then
+                enqueueToken.ThrowIfCancellationRequested()
+                If cancellationVersion <> Volatile.Read(state.QueueCancellationVersion) Then
+                    Throw New OperationCanceledException(enqueueToken)
+                End If
+
+                Dim operationScope As IDisposable = TryEnterQueuedOperation(state,
+                                                                              enqueueToken,
+                                                                              False)
+                If operationScope Is Nothing Then Return False
+
+                Using operationScope
+                    operation()
+                End Using
+                Return True
+            End If
+
+            Dim command As New QueuedCommand(
+                Function() As Boolean
+                    Dim operationScope As IDisposable = TryEnterQueuedOperation(state,
+                                                                                  enqueueToken,
+                                                                                  True)
+                    If operationScope Is Nothing Then Return False
+
+                    Using operationScope
+                        operation()
+                    End Using
+                    Return True
+                End Function,
+                enqueueToken,
+                cancellationVersion)
+
+            EnsureQueueWorker(state)
+            Try
+                ' BlockingCollection's default ConcurrentQueue is FIFO.  A
+                ' cancellation token also makes a full queue cancellable while a
+                ' producer is waiting for one of the 16 slots.
+                state.CommandQueue.Add(command, enqueueToken)
+            Catch
+                command.Dispose()
+                Throw
+            End Try
+
+            Try
+                command.WaitForCompletion()
+                Return command.WasExecuted
+            Finally
+                command.Dispose()
+            End Try
+
+        Finally
+            If linkedCancellationSource IsNot Nothing Then
+                linkedCancellationSource.Dispose()
+            End If
+        End Try
+    End Function
+
+    Private Sub CancelQueuedOperations(state As DeviceLockState)
+        Dim sourceToCancel As CancellationTokenSource
+        SyncLock state.QueueControlLock
+            sourceToCancel = state.QueueCancellationSource
+            state.QueueCancellationSource = New CancellationTokenSource()
+            Interlocked.Increment(state.QueueCancellationVersion)
+        End SyncLock
+
+        Try
+            ' Do this outside QueueControlLock; cancellation callbacks are
+            ' allowed to run synchronously.
+            sourceToCancel.Cancel()
+        Catch
+        End Try
+    End Sub
+
+    Private Sub CloseQueuedOperations(state As DeviceLockState)
+        Dim sourceToCancel As CancellationTokenSource
+        SyncLock state.QueueControlLock
+            state.QueueClosed = True
+            sourceToCancel = state.QueueCancellationSource
+            state.QueueCancellationSource = New CancellationTokenSource()
+            Interlocked.Increment(state.QueueCancellationVersion)
+        End SyncLock
+
+        Try
+            sourceToCancel.Cancel()
+        Catch
+        End Try
+    End Sub
+
+    Private Shared Sub EnsureQueueWorker(state As DeviceLockState)
+        SyncLock state.QueueStartLock
+            If state.QueueWorker IsNot Nothing Then Return
+
+            state.QueueWorker = New Thread(Sub() QueueWorkerMain(state)) With {
+                .IsBackground = True,
+                .Name = $"SCSI command queue - {If(String.IsNullOrEmpty(state.Key), "fallback", state.Key)}"
+            }
+            state.QueueWorker.Start()
+        End SyncLock
+    End Sub
+
+    Private Shared Sub QueueWorkerMain(state As DeviceLockState)
+        Try
+            For Each command As QueuedCommand In state.CommandQueue.GetConsumingEnumerable()
+                command.Run(Volatile.Read(state.QueueCancellationVersion))
+            Next
+        Catch ex As Exception
+            ' The queue is intentionally process-lifetime, but do not leave
+            ' callers blocked if its consumer ever fails unexpectedly.
+            Dim command As QueuedCommand = Nothing
+            While state.CommandQueue.TryTake(command)
+                command.Fail(ex)
+            End While
+        End Try
+    End Sub
 
     Private Function GetPathState(devicePath As String) As DeviceLockState
         If String.IsNullOrWhiteSpace(devicePath) Then Return _fallbackState
@@ -297,6 +586,13 @@ Public NotInheritable Class SCSIDeviceLockManager
         Public ReadOnly ProcessGate As Mutex
         Public ReadOnly WriterGate As Mutex
         Public ActiveWriter As WriterLease
+        Friend ReadOnly CommandQueue As New BlockingCollection(Of QueuedCommand)(CommandQueueCapacity)
+        Friend ReadOnly QueueControlLock As New Object()
+        Friend ReadOnly QueueStartLock As New Object()
+        Friend QueueCancellationSource As CancellationTokenSource = New CancellationTokenSource()
+        Friend QueueCancellationVersion As Integer
+        Friend QueueClosed As Boolean
+        Friend QueueWorker As Thread
 
         Public Sub New(key As String, crossProcessEnabled As Boolean)
             Me.Key = key
@@ -306,6 +602,16 @@ Public NotInheritable Class SCSIDeviceLockManager
                 WriterGate = New Mutex(False, BuildMutexName("writer", key))
             End If
         End Sub
+
+        Friend Sub ActivateQueue()
+            SyncLock QueueControlLock
+                If Not QueueClosed Then Return
+
+                QueueCancellationSource = New CancellationTokenSource()
+                Interlocked.Increment(QueueCancellationVersion)
+                QueueClosed = False
+            End SyncLock
+        End Sub
     End Class
 
     Private NotInheritable Class OperationScope
@@ -313,12 +619,15 @@ Public NotInheritable Class SCSIDeviceLockManager
 
         Private ReadOnly _state As DeviceLockState
         Private ReadOnly _processGateTaken As Boolean
+        Private ReadOnly _localLockTaken As Boolean
         Private _disposed As Integer
 
         Public Sub New(state As DeviceLockState,
-                       processGateTaken As Boolean)
+                       processGateTaken As Boolean,
+                       Optional localLockTaken As Boolean = True)
             _state = state
             _processGateTaken = processGateTaken
+            _localLockTaken = localLockTaken
         End Sub
 
         Public Sub Dispose() Implements IDisposable.Dispose
@@ -329,8 +638,93 @@ Public NotInheritable Class SCSIDeviceLockManager
                     _state.ProcessGate.ReleaseMutex()
                 End If
             Finally
-                Monitor.Exit(_state.LocalLock)
+                If _localLockTaken Then Monitor.Exit(_state.LocalLock)
             End Try
+        End Sub
+    End Class
+
+    Friend NotInheritable Class QueuedCommand
+        Implements IDisposable
+
+        Private ReadOnly _operation As Func(Of Boolean)
+        Private ReadOnly _cancellationToken As CancellationToken
+        Private ReadOnly _cancellationVersion As Integer
+        Private ReadOnly _completed As New ManualResetEventSlim(False)
+        Private ReadOnly _stateLock As New Object()
+        Private _failure As Exception
+        Private _wasExecuted As Boolean
+        Private _disposed As Integer
+
+        Public Sub New(operation As Func(Of Boolean),
+                       cancellationToken As CancellationToken,
+                       cancellationVersion As Integer)
+            _operation = operation
+            _cancellationToken = cancellationToken
+            _cancellationVersion = cancellationVersion
+        End Sub
+
+        Public ReadOnly Property WasExecuted As Boolean
+            Get
+                SyncLock _stateLock
+                    Return _wasExecuted
+                End SyncLock
+            End Get
+        End Property
+
+        Public Function TryStart(currentCancellationVersion As Integer) As Boolean
+            SyncLock _stateLock
+                If _cancellationToken.IsCancellationRequested OrElse
+                   _cancellationVersion <> currentCancellationVersion Then
+                    _failure = New OperationCanceledException(_cancellationToken)
+                    Return False
+                End If
+                Return True
+            End SyncLock
+        End Function
+
+        Public Sub Run(currentCancellationVersion As Integer)
+            If Not TryStart(currentCancellationVersion) Then
+                _completed.Set()
+                Return
+            End If
+
+            Try
+                Dim executed As Boolean = _operation()
+                SyncLock _stateLock
+                    _wasExecuted = executed
+                End SyncLock
+            Catch ex As Exception
+                SyncLock _stateLock
+                    _failure = ex
+                End SyncLock
+            Finally
+                _completed.Set()
+            End Try
+        End Sub
+
+        Public Sub Fail(exception As Exception)
+            SyncLock _stateLock
+                _failure = exception
+            End SyncLock
+            _completed.Set()
+        End Sub
+
+        Public Sub WaitForCompletion()
+            _completed.Wait()
+
+            Dim failure As Exception
+            SyncLock _stateLock
+                failure = _failure
+            End SyncLock
+
+            If failure IsNot Nothing Then
+                ExceptionDispatchInfo.Capture(failure).Throw()
+            End If
+        End Sub
+
+        Public Sub Dispose() Implements IDisposable.Dispose
+            If Interlocked.Exchange(_disposed, 1) <> 0 Then Return
+            _completed.Dispose()
         End Sub
     End Class
 

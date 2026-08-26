@@ -35,6 +35,12 @@ Public Class LTFSWriter
         Return selectedPath
     End Function
 
+    Private Shared Sub EnsureSCSISucceeded(operation As String, succeeded As Boolean)
+        If Not succeeded Then
+            Throw New SCSIFailureException(operation, TapeUtils.LastWin32Error, Nothing)
+        End If
+    End Sub
+
     <Category("LTFSWriter")>
     Public Property TapeDrive As String = ""
     <Category("LTFSWriter")>
@@ -213,6 +219,17 @@ Public Class LTFSWriter
             End If
         End Set
     End Property
+
+    Private Sub CancelPendingSCSICommands()
+        Dim handleSnapshot As IntPtr = driveHandle
+        If handleSnapshot = IntPtr.Zero OrElse handleSnapshot = New IntPtr(-1) Then Return
+
+        Try
+            TapeUtils.SCSILockManager.CancelQueuedOperations(handleSnapshot)
+        Catch
+        End Try
+    End Sub
+
     <Category("LTFSWriter")>
     Public Property Pause As Boolean = False
     <Category("LTFSWriter")>
@@ -3131,7 +3148,8 @@ Public Class LTFSWriter
             PrintMsg(My.Resources.ResText_WIF)
             PrintMsg($"Position = {GetPos.ToString()}", LogOnly:=True)
         End If
-        TapeUtils.WriteVCI(driveHandle, schema.generationnumber, block0, block1, schema.volumeuuid.ToString(), ExtraPartitionCount)
+        EnsureSCSISucceeded("SCSI write VCI",
+                            TapeUtils.WriteVCI(driveHandle, schema.generationnumber, block0, block1, schema.volumeuuid.ToString(), ExtraPartitionCount))
         Modified = False
         SetStatusLight(LWStatus.Succ)
     End Sub
@@ -3181,6 +3199,8 @@ Public Class LTFSWriter
                 If RetainPosisiton Then TapeUtils.Locate(driveHandle, pPrevious.BlockNumber, pPrevious.PartitionNumber)
             End If
             Return pStartBlock
+        Catch ex As OperationCanceledException When StopFlag
+            Throw
         Catch ex As Exception
             MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString()}{vbCrLf}{ex.StackTrace}")
         End Try
@@ -3228,7 +3248,7 @@ Public Class LTFSWriter
         If schema IsNot Nothing AndAlso schema.location.partition = ltfsindex.PartitionLabel.a Then Me.Invoke(Sub() 更新数据区索引ToolStripMenuItem.Enabled = False)
         If SilentMode Then
             If SilentAutoEject Then
-                TapeUtils.LoadEject(driveHandle, TapeUtils.LoadOption.Eject)
+                EnsureSCSISucceeded("SCSI eject tape", TapeUtils.LoadEject(driveHandle, TapeUtils.LoadOption.Eject))
                 RaiseEvent TapeEjected()
             End If
         Else
@@ -3237,7 +3257,7 @@ Public Class LTFSWriter
                        DoEject = WA3ToolStripMenuItem.Checked OrElse MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_PEj, My.Resources.ResText_Hint, MessageBoxButtons.OKCancel) = DialogResult.OK
                    End Sub)
             If DoEject Then
-                TapeUtils.LoadEject(driveHandle, TapeUtils.LoadOption.Eject)
+                EnsureSCSISucceeded("SCSI eject tape", TapeUtils.LoadEject(driveHandle, TapeUtils.LoadOption.Eject))
                 PrintMsg(My.Resources.ResText_Ejd)
                 RaiseEvent TapeEjected()
             End If
@@ -4347,6 +4367,10 @@ Public Class LTFSWriter
                                     Try
                                         Data = TapeUtils.ReadBlock(driveHandle, sense, CurrentBlockLen, True)
 
+                                    Catch ex As OperationCanceledException When StopFlag
+                                        readsucc = True
+                                        Data = Array.Empty(Of Byte)()
+                                        Exit While
                                     Catch ex As Exception
                                         Dim dResult As DialogResult
                                         Invoke(Sub() dResult = MessageBox.Show(Me, $"{My.Resources.ResText_RErrSCSI}{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
@@ -4362,6 +4386,7 @@ Public Class LTFSWriter
                                         End Select
                                         Continue While
                                     End Try
+                                    If StopFlag Then Exit While
                                     If ((sense(2) >> 6) And &H1) = 1 Then
                                         If (sense(2) And &HF) = 13 Then
                                             readsucc = True
@@ -4700,9 +4725,9 @@ Public Class LTFSWriter
                     StopFlag = False
                     SetStatusLight(LWStatus.Busy)
                     PrintMsg(My.Resources.ResText_Restoring)
-                    TapeUtils.ReserveUnit(driveHandle)
+                    EnsureSCSISucceeded("SCSI reserve unit", TapeUtils.ReserveUnit(driveHandle))
                     reserved = True
-                    TapeUtils.PreventMediaRemoval(driveHandle)
+                    EnsureSCSISucceeded("SCSI prevent media removal", TapeUtils.PreventMediaRemoval(driveHandle))
                     RestorePosition = New TapeUtils.PositionData(driveHandle)
 
                     Dim sources As New List(Of ltfsindex.file)
@@ -4820,8 +4845,8 @@ Public Class LTFSWriter
                         SetStatusLight(LWStatus.Busy)
                         PrintMsg(My.Resources.ResText_Restoring)
                         StopFlag = False
-                        TapeUtils.ReserveUnit(driveHandle)
-                        TapeUtils.PreventMediaRemoval(driveHandle)
+                        EnsureSCSISucceeded("SCSI reserve unit", TapeUtils.ReserveUnit(driveHandle))
+                        EnsureSCSISucceeded("SCSI prevent media removal", TapeUtils.PreventMediaRemoval(driveHandle))
                         RestorePosition = New TapeUtils.PositionData(driveHandle)
                         For Each FileIndex As ltfsindex.file In flist
                             Dim FileName As String = IO.Path.Combine(BasePath, FileIndex.name)
@@ -4928,8 +4953,8 @@ Public Class LTFSWriter
                         Next
                         PrintMsg(My.Resources.ResText_RestFile)
                         Dim c As Integer = 0
-                        TapeUtils.ReserveUnit(driveHandle)
-                        TapeUtils.PreventMediaRemoval(driveHandle)
+                        EnsureSCSISucceeded("SCSI reserve unit", TapeUtils.ReserveUnit(driveHandle))
+                        EnsureSCSISucceeded("SCSI prevent media removal", TapeUtils.PreventMediaRemoval(driveHandle))
                         RestorePosition = New TapeUtils.PositionData(driveHandle)
                         For Each fr As FileRecord In FileList
                             c += 1
@@ -5761,6 +5786,8 @@ Public Class LTFSWriter
                         SyncLock p
                             p.BlockNumber = CULng(p.BlockNumber + 1)
                         End SyncLock
+                    Catch ex As OperationCanceledException When StopFlag
+                        Throw
                     Catch ex As Exception
                         tapeWriteTimer.Stop()
                         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSWriter))
@@ -5975,8 +6002,8 @@ Public Class LTFSWriter
                     PrintMsg("", True)
                     PrintMsg($"Position = {GetPos.ToString()}", LogOnly:=True)
                     PrintMsg(My.Resources.ResText_PrepW)
-                    TapeUtils.ReserveUnit(driveHandle)
-                    TapeUtils.PreventMediaRemoval(driveHandle)
+                    EnsureSCSISucceeded("SCSI reserve unit", TapeUtils.ReserveUnit(driveHandle))
+                    EnsureSCSISucceeded("SCSI prevent media removal", TapeUtils.PreventMediaRemoval(driveHandle))
                     Dim locateResult As Boolean = False
                     Dim LTE As New AutoResetEvent(False)
                     Dim locateTask As Task = Task.Run(Sub()
@@ -6312,6 +6339,8 @@ Public Class LTFSWriter
                                                     End If
                                                     If IsIndexPartition Then succ = True
                                                     Exit While
+                                                Catch ex As OperationCanceledException When StopFlag
+                                                    Throw
                                                 Catch ex As Exception
                                                     Dim dResult As DialogResult
                                                     Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr }{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
@@ -6560,6 +6589,8 @@ Public Class LTFSWriter
                                                                 SyncLock p
                                                                     p.BlockNumber = CULng(p.BlockNumber + 1)
                                                                 End SyncLock
+                                                            Catch ex As OperationCanceledException When StopFlag
+                                                                Throw
                                                             Catch ex As Exception
                                                                 Dim dResult As DialogResult
                                                                 Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErrSCSI}{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
@@ -7044,7 +7075,10 @@ Public Class LTFSWriter
                     PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
                     CurrentHeight = CLng(p.BlockNumber)
                     If ExtraPartitionCount = 0 Then
-                        TapeUtils.SendSCSICommand(driveHandle, {19, 0, 0, 0, 0, 0})
+                        Dim rewindResult As Boolean = TapeUtils.SendSCSICommand(driveHandle, {19, 0, 0, 0, 0, 0})
+                        If Not rewindResult Then
+                            Throw New SCSIFailureException("SCSI rewind", TapeUtils.LastWin32Error, Nothing)
+                        End If
                         TapeUtils.Flush(driveHandle)
                         PrintMsg($"Byte written", LogOnly:=True)
                         PrintMsg($"Position = {GetPos.ToString()}", LogOnly:=True)
@@ -7198,7 +7232,7 @@ Public Class LTFSWriter
                                 EncryptionKey = newkey
                             End If
                         End If
-                        TapeUtils.SetEncryption(driveHandle, EncryptionKey)
+                        EnsureSCSISucceeded("SCSI set encryption", TapeUtils.SetEncryption(driveHandle, EncryptionKey))
                     End If
                     TapeUtils.Locate(driveHandle, 0UL, Math.Min(ExtraPartitionCount, IndexPartition), TapeUtils.LocateDestType.Block)
                     PrintMsg($"Position = {GetPos.ToString()}", LogOnly:=True)
@@ -8056,8 +8090,10 @@ Public Class LTFSWriter
     End Sub
     Private Sub ToolStripDropDownButton1_Click(sender As Object, e As EventArgs) Handles ToolStripDropDownButton1.Click
         Pause = True
-        If MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_CancelConfirm, My.Resources.ResText_Warning, MessageBoxButtons.OKCancel) = DialogResult.OK Then
+        Dim immediateStop As Boolean = MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_CancelConfirm, My.Resources.ResText_Warning, MessageBoxButtons.OKCancel) = DialogResult.OK
+        If immediateStop Then
             StopFlag = True
+            CancelPendingSCSICommands()
         End If
         Pause = False
     End Sub
@@ -9254,7 +9290,7 @@ Public Class LTFSWriter
                         PrintMsg(My.Resources.ResText_IUd)
                         If schema IsNot Nothing AndAlso schema.location.partition = ltfsindex.PartitionLabel.a Then Invoke(Sub() 更新数据区索引ToolStripMenuItem.Enabled = False)
                         SetStatusLight(LWStatus.Busy)
-                        TapeUtils.LoadEject(driveHandle, TapeUtils.LoadOption.Eject)
+                        EnsureSCSISucceeded("SCSI eject tape", TapeUtils.LoadEject(driveHandle, TapeUtils.LoadOption.Eject))
                         PrintMsg(My.Resources.ResText_Ejd)
                         Invoke(Sub()
                                    SetStatusLight(LWStatus.Succ)
@@ -10138,8 +10174,8 @@ Public Class LTFSWriter
                          Dim tmpf As String = $"{Application.StartupPath}\LDS_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
                          d.SaveFile(tmpf)
                          Dim ms As New IO.FileStream(tmpf, IO.FileMode.Open)
-                         TapeUtils.ReserveUnit(driveHandle)
-                         TapeUtils.PreventMediaRemoval(driveHandle)
+                         EnsureSCSISucceeded("SCSI reserve unit", TapeUtils.ReserveUnit(driveHandle))
+                         EnsureSCSISucceeded("SCSI prevent media removal", TapeUtils.PreventMediaRemoval(driveHandle))
                          If Not LocateToWritePosition() Then Exit Sub
                          Dim pos As New TapeUtils.PositionData(driveHandle)
                          Dim fadd As New ltfsindex.file With {.name = d.name,
@@ -10189,6 +10225,8 @@ Public Class LTFSWriter
                                          SyncLock pos
                                              pos.BlockNumber = CULng(pos.BlockNumber + 1)
                                          End SyncLock
+                                     Catch ex As OperationCanceledException When StopFlag
+                                         Throw
                                      Catch ex As Exception
                                          Dim dResult As DialogResult
                                          Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{ My.Resources.ResText_WErrSCSI}{vbCrLf}{ex.StackTrace}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
@@ -10354,8 +10392,8 @@ Public Class LTFSWriter
                             Next
                             PrintMsg(My.Resources.ResText_Writing)
                             StopFlag = False
-                            TapeUtils.ReserveUnit(driveHandle)
-                            TapeUtils.PreventMediaRemoval(driveHandle)
+                            EnsureSCSISucceeded("SCSI reserve unit", TapeUtils.ReserveUnit(driveHandle))
+                            EnsureSCSISucceeded("SCSI prevent media removal", TapeUtils.PreventMediaRemoval(driveHandle))
                             RestorePosition = New TapeUtils.PositionData(driveHandle)
 
                             For Each FileIndex As ltfsindex.file In flist
@@ -10428,7 +10466,7 @@ Public Class LTFSWriter
                 EncryptionKey = newkey
             End If
         End If
-        TapeUtils.SetEncryption(driveHandle, EncryptionKey)
+        EnsureSCSISucceeded("SCSI set encryption", TapeUtils.SetEncryption(driveHandle, EncryptionKey))
     End Sub
 
     Private Sub 设置密码ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 设置密码ToolStripMenuItem.Click
@@ -10445,7 +10483,7 @@ Public Class LTFSWriter
             newkey = sha256.Hash()
             EncryptionKey = newkey
         End If
-        TapeUtils.SetEncryption(driveHandle, EncryptionKey)
+        EnsureSCSISucceeded("SCSI set encryption", TapeUtils.SetEncryption(driveHandle, EncryptionKey))
     End Sub
 
     Private Sub 剪切文件ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 剪切文件ToolStripMenuItem.Click
@@ -10660,8 +10698,8 @@ Public Class LTFSWriter
                     PrintMsg("", True)
                     PrintMsg($"Position = {GetPos.ToString()}", LogOnly:=True)
                     PrintMsg(My.Resources.ResText_PrepW)
-                    TapeUtils.ReserveUnit(driveHandle)
-                    TapeUtils.PreventMediaRemoval(driveHandle)
+                    EnsureSCSISucceeded("SCSI reserve unit", TapeUtils.ReserveUnit(driveHandle))
+                    EnsureSCSISucceeded("SCSI prevent media removal", TapeUtils.PreventMediaRemoval(driveHandle))
                     If Not LocateToWritePosition() Then Exit Sub
                     Invoke(Sub() 更新数据区索引ToolStripMenuItem.Enabled = True)
                     UFReadCount.Inc()
@@ -10761,6 +10799,8 @@ Public Class LTFSWriter
                                                 SyncLock p
                                                     p.BlockNumber = CULng(p.BlockNumber + 1)
                                                 End SyncLock
+                                            Catch ex As OperationCanceledException When StopFlag
+                                                Throw
                                             Catch ex As Exception
                                                 Dim dResult As DialogResult
                                                 Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErrSCSI}{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
@@ -11351,6 +11391,7 @@ Public Class LTFSWriter
         Dim closed As Boolean = False
 
         Try
+            StopFlag = True
             ' Do not let a close event wait behind an in-flight SCSI command.
             closed = TapeUtils.CloseTapeDrive(handleToClose, 0)
         Catch
@@ -12144,8 +12185,8 @@ Public Class LTFSWriter
                         Next
                         PrintMsg(My.Resources.ResText_RestFile)
                         Dim c As Integer = 0
-                        TapeUtils.ReserveUnit(driveHandle)
-                        TapeUtils.PreventMediaRemoval(driveHandle)
+                        EnsureSCSISucceeded("SCSI reserve unit", TapeUtils.ReserveUnit(driveHandle))
+                        EnsureSCSISucceeded("SCSI prevent media removal", TapeUtils.PreventMediaRemoval(driveHandle))
                         RestorePosition = New TapeUtils.PositionData(driveHandle)
                         For Each fr As FileRecord In FileList
                             c += 1
@@ -12231,8 +12272,8 @@ Public Class LTFSWriter
                         Next
                         PrintMsg(My.Resources.ResText_Deleting)
                         Dim c As Integer = 0
-                        TapeUtils.ReserveUnit(driveHandle)
-                        TapeUtils.PreventMediaRemoval(driveHandle)
+                        EnsureSCSISucceeded("SCSI reserve unit", TapeUtils.ReserveUnit(driveHandle))
+                        EnsureSCSISucceeded("SCSI prevent media removal", TapeUtils.PreventMediaRemoval(driveHandle))
                         RestorePosition = New TapeUtils.PositionData(driveHandle)
                         For Each fr As FileRecord In FileList
                             c += 1
@@ -12282,7 +12323,7 @@ Public Class LTFSWriter
                      SetStatusLight(LWStatus.Busy)
                      TapeUtils.ReleaseUnit(driveHandle)
                      TapeUtils.AllowMediumRemoval(driveHandle)
-                     TapeUtils.LoadEject(driveHandle, TapeUtils.LoadOption.Eject)
+                     EnsureSCSISucceeded("SCSI eject tape", TapeUtils.LoadEject(driveHandle, TapeUtils.LoadOption.Eject))
                      PrintMsg(My.Resources.ResText_Ejd)
                      Invoke(Sub()
                                 SetStatusLight(LWStatus.Succ)
@@ -12307,8 +12348,8 @@ Public Class LTFSWriter
                      PipePause = False
                      PrintMsg($"Position = {GetPos.ToString()}", LogOnly:=True)
                      PrintMsg(My.Resources.ResText_PrepW)
-                     TapeUtils.ReserveUnit(driveHandle)
-                     TapeUtils.PreventMediaRemoval(driveHandle)
+                     EnsureSCSISucceeded("SCSI reserve unit", TapeUtils.ReserveUnit(driveHandle))
+                     EnsureSCSISucceeded("SCSI prevent media removal", TapeUtils.PreventMediaRemoval(driveHandle))
                      Dim locateResult As Boolean = False
                      Dim LTE As New AutoResetEvent(False)
                      Dim locateTask As Task = Task.Run(Sub()
@@ -12498,6 +12539,8 @@ Public Class LTFSWriter
                                                  SyncLock p
                                                      p.BlockNumber = CULng(p.BlockNumber + 1)
                                                  End SyncLock
+                                             Catch ex As OperationCanceledException When StopFlag
+                                                 Throw
                                              Catch ex As Exception
                                                  Dim dResult As DialogResult
                                                  Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErrSCSI}{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))

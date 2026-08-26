@@ -1143,7 +1143,8 @@ Public Class LTFSConfigurator
                          Dim handle As IntPtr
                          SyncLock TapeUtils.GetSCSIOperationLock(ConfTapeDrive)
                              TapeUtils.OpenTapeDrive(ConfTapeDrive, handle)
-                             TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 60000, senseData)
+                             Dim scsiSucceeded As Boolean = TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 60000, senseData)
+                             If Not scsiSucceeded Then senseData = TapeUtils.NormalizeSCSISense(senseData, True)
                              TapeUtils.CloseTapeDrive(handle)
                          End SyncLock
                          Marshal.FreeHGlobal(data)
@@ -1850,11 +1851,15 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                                                           CByte(zbcstartblk And &HFF), &H0,
                                                           CByte(zbcLBAWritten >> 8 And &HFF),
                                                           CByte(zbcLBAWritten And &HFF), &H0}
-                                TapeUtils.SendSCSICommand(handle, cdb,
+                                Dim zbcWriteSucceeded As Boolean = TapeUtils.SendSCSICommand(handle, cdb,
                                                           blist(CInt(i Mod 1000)), 0, Function(sensedata As Byte())
                                                                                           sense = sensedata
                                                                                           Return True
                                                                                       End Function)
+                                If Not zbcWriteSucceeded Then
+                                    sense = TapeUtils.NormalizeSCSISense(sense, True)
+                                    Exit For
+                                End If
                             Case Else
                                 sense = TapeUtils.Write(handle, blist(CInt(i Mod 1000)), blkLen)
                         End Select
@@ -2340,7 +2345,8 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                      Dim handle As IntPtr
                      SyncLock TapeUtils.GetSCSIOperationLock(ConfTapeDrive)
                          TapeUtils.OpenTapeDrive(ConfTapeDrive, handle)
-                         TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdbData, data, 0, 1, 60000, senseData)
+                         Dim scsiSucceeded As Boolean = TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdbData, data, 0, 1, 60000, senseData)
+                         If Not scsiSucceeded Then senseData = TapeUtils.NormalizeSCSISense(senseData, True)
                          TapeUtils.CloseTapeDrive(handle)
                      End SyncLock
                      Marshal.FreeHGlobal(data)
@@ -2360,7 +2366,8 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                      Dim handle As IntPtr
                      SyncLock TapeUtils.GetSCSIOperationLock(ConfTapeDrive)
                          TapeUtils.OpenTapeDrive(ConfTapeDrive, handle)
-                         TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdbData, data, 0, 1, 60000, senseData)
+                         Dim scsiSucceeded As Boolean = TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdbData, data, 0, 1, 60000, senseData)
+                         If Not scsiSucceeded Then senseData = TapeUtils.NormalizeSCSISense(senseData, True)
                          TapeUtils.CloseTapeDrive(handle)
                      End SyncLock
                      Marshal.FreeHGlobal(data)
@@ -2826,7 +2833,8 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                      Dim handle As IntPtr
                      SyncLock TapeUtils.GetSCSIOperationLock(ConfTapeDrive)
                          TapeUtils.OpenTapeDrive(ConfTapeDrive, handle)
-                         TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 30, senseData)
+                         Dim scsiSucceeded As Boolean = TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 30, senseData)
+                         If Not scsiSucceeded Then senseData = TapeUtils.NormalizeSCSISense(senseData, True)
                          TapeUtils.CloseTapeDrive(handle)
                      End SyncLock
                      Marshal.FreeHGlobal(data)
@@ -2932,7 +2940,8 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                      Dim handle As IntPtr
                      SyncLock TapeUtils.GetSCSIOperationLock(ConfTapeDrive)
                          TapeUtils.OpenTapeDrive(ConfTapeDrive, handle)
-                         TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 30, senseData)
+                         Dim scsiSucceeded As Boolean = TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 30, senseData)
+                         If Not scsiSucceeded Then senseData = TapeUtils.NormalizeSCSISense(senseData, True)
                          TapeUtils.CloseTapeDrive(handle)
                      End SyncLock
                      Marshal.FreeHGlobal(data)
@@ -2961,7 +2970,8 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                      Dim handle As IntPtr
                      SyncLock TapeUtils.GetSCSIOperationLock(ConfTapeDrive)
                          TapeUtils.OpenTapeDrive(ConfTapeDrive, handle)
-                         TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 30, senseData)
+                         Dim scsiSucceeded As Boolean = TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 30, senseData)
+                         If Not scsiSucceeded Then senseData = TapeUtils.NormalizeSCSISense(senseData, True)
                          TapeUtils.CloseTapeDrive(handle)
                      End SyncLock
                      Marshal.FreeHGlobal(data)
@@ -2990,7 +3000,8 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                      Dim handle As IntPtr
                      SyncLock TapeUtils.GetSCSIOperationLock(ConfTapeDrive)
                          TapeUtils.OpenTapeDrive(ConfTapeDrive, handle)
-                         TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 30, senseData)
+                         Dim scsiSucceeded As Boolean = TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 30, senseData)
+                         If Not scsiSucceeded Then senseData = TapeUtils.NormalizeSCSISense(senseData, True)
                          TapeUtils.CloseTapeDrive(handle)
                      End SyncLock
                      Marshal.FreeHGlobal(data)
@@ -3019,7 +3030,8 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                      Dim handle As IntPtr
                      SyncLock TapeUtils.GetSCSIOperationLock(ConfTapeDrive)
                          TapeUtils.OpenTapeDrive(ConfTapeDrive, handle)
-                         TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 30, senseData)
+                         Dim scsiSucceeded As Boolean = TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 30, senseData)
+                         If Not scsiSucceeded Then senseData = TapeUtils.NormalizeSCSISense(senseData, True)
                          TapeUtils.CloseTapeDrive(handle)
                      End SyncLock
                      Marshal.FreeHGlobal(data)
@@ -3050,10 +3062,14 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                                           CByte((CLng((LBA + i - 1)) >> 0) And &HFF),
                                           0, 0, 1, 0}
 
-                         TapeUtils.SendSCSICommand(drvhandle, cdb, toSend, 0, Function(s As Byte()) As Boolean
+                         Dim scsiSucceeded As Boolean = TapeUtils.SendSCSICommand(drvhandle, cdb, toSend, 0, Function(s As Byte()) As Boolean
                                                                                   senseData = s
                                                                                   Return True
                                                                               End Function)
+                         If Not scsiSucceeded Then
+                             senseData = TapeUtils.NormalizeSCSISense(senseData, True)
+                             Exit For
+                         End If
                      Next
                      TapeUtils.CloseTapeDrive(drvhandle)
 
@@ -3319,9 +3335,17 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
             Dim selectedBufferPage As String = Convert.ToString(ComboBoxBufferPage.SelectedItem)
             Dim BufferID As Byte = Convert.ToByte(selectedBufferPage.Substring(0, 2), 16)
             Dim Mode As Byte = CByte(NumericUpDownRBMode.Value)
-            Task.Run(Sub()
+                     Task.Run(Sub()
                          Dim BufferData As Byte() = File.ReadAllBytes(OpenFileDialog1.FileName)
-                         TapeUtils.WriteBuffer(ConfTapeDrive, BufferID, Mode, BufferData)
+                         Dim writeResult As Boolean = TapeUtils.WriteBuffer(ConfTapeDrive, BufferID, Mode, BufferData)
+                         If Not writeResult Then
+                             Dim errorCode As Integer = TapeUtils.LastWin32Error
+                             Invoke(Sub()
+                                        MessageBox.Show(New Form With {.TopMost = True}, $"SCSI write buffer failed. Win32 error: 0x{errorCode.ToString("X8")}h", My.Resources.ResText_Warning)
+                                        Enabled = True
+                                    End Sub)
+                             Return
+                         End If
                          Invoke(Sub()
                                     TextBoxDebugOutput.Text = "Buffer len=" & BufferData.Length & vbCrLf
                                     TextBoxDebugOutput.Text &= IOManager.Byte2Hex(BufferData, True)

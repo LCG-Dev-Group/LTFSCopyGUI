@@ -1814,7 +1814,9 @@ Public Class ZBCDeviceHelper
     Public Property ZoneList As New List(Of Zone)
     Private ZoneLBAMap As New Dictionary(Of ULong, Zone)
     Public Sub InitDevice()
-        TapeUtils.LoadEject(handle, TapeUtils.LoadOption.LoadThreaded)
+        If Not TapeUtils.LoadEject(handle, TapeUtils.LoadOption.LoadThreaded) Then
+            Throw New SCSIFailureException("SCSI load tape", TapeUtils.LastWin32Error, Nothing)
+        End If
         Dim MP03 As Byte() = TapeUtils.ModeSense(handle, 3)
         SectorLength = CUShort(BigEndianConverter.ToUInt16(MP03, 12))
         ReportZones()
@@ -2146,7 +2148,7 @@ Public Class ZBCDeviceHelper
             Next
             Dim toSend(currentsendsectorcount * SectorLength - 1) As Byte
             Array.Copy(source, source.Length - remain, toSend, 0, sendlen)
-            TapeUtils.SendSCSICommand(handle, {
+            Dim writeResult As Boolean = TapeUtils.SendSCSICommand(handle, {
                 &H2A, 0,
                 CByte(CLng((currentLBA >> 24)) And &HFF),
                 CByte(CLng((currentLBA >> 16)) And &HFF),
@@ -2156,6 +2158,7 @@ Public Class ZBCDeviceHelper
                 CByte((currentsendsectorcount >> 8) And &HFF),
                 CByte((currentsendsectorcount >> 0) And &HFF),
                  0}, toSend, 0)
+            If Not writeResult Then Return False
 
             remain -= sendlen
             currentLBA = CULng(currentLBA + currentsendsectorcount)

@@ -324,14 +324,16 @@ Public Class iSCSIService
                                   ReDim Preserve commandBytes(cdblen - 1)
                                   Dim sense(63) As Byte
                                   Dim responsedata(datalen - 1) As Byte
+                                  Dim scsiSucceeded As Boolean = True
                                   SyncLock TapeUtils.GetSCSIOperationLock(driveHandle)
                                       Select Case My.Settings.TapeUtils_DriverType
                                           Case TapeUtils.DriverType.TapeStream
                                               Dim vt As TapeImage = Nothing
                                               TapeStreamMapping.MappingTable.TryGetValue(driveHandle, vt)
                                               If vt IsNot Nothing Then
-                                                  vt.HandleSCSICommand(commandBytes, data, cmddir, datalen, responsedata, sense)
+                                                  scsiSucceeded = vt.HandleSCSICommand(commandBytes, data, cmddir, datalen, responsedata, sense)
                                               Else
+                                                  scsiSucceeded = False
                                                   sense = TapeImage.SenseData.NotPresent
                                                   responsedata = {}
                                               End If
@@ -343,14 +345,17 @@ Public Class iSCSIService
                                                   Else
                                                       Marshal.Copy(responsedata, 0, databuffer, datalen)
                                                   End If
-                                                  TapeUtils.TapeSCSIIOCtlUnmanaged(driveHandle, commandBytes, databuffer, CUInt(datalen), cmddir, 24 * 3600, sense)
-                                                  If cmddir <> 0 Then Marshal.Copy(databuffer, responsedata, 0, datalen)
+                                                  scsiSucceeded = TapeUtils.TapeSCSIIOCtlUnmanaged(driveHandle, commandBytes, databuffer, CUInt(datalen), cmddir, 24 * 3600, sense)
+                                                  If scsiSucceeded AndAlso cmddir <> 0 Then Marshal.Copy(databuffer, responsedata, 0, datalen)
                                               Finally
                                                   Marshal.FreeHGlobal(databuffer)
                                               End Try
                                       End Select
                                   End SyncLock
 
+                                  If Not scsiSucceeded Then
+                                      sense = TapeUtils.NormalizeSCSISense(sense, True)
+                                  End If
 
                                   Dim response As Byte()
                                   Dim status As SCSIStatusCodeName
