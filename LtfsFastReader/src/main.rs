@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256, Sha512};
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::io::{self, Write};
+use std::mem::ManuallyDrop;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +15,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_IO_PENDING, ERROR_NOT_FOUND, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_BAD_NET_NAME, ERROR_BAD_PATHNAME, ERROR_DIRECTORY,
+    ERROR_FILE_NOT_FOUND, ERROR_FILENAME_EXCED_RANGE, ERROR_HANDLE_EOF, ERROR_INVALID_HANDLE,
+    ERROR_INVALID_NAME, ERROR_INVALID_PARAMETER, ERROR_IO_PENDING, ERROR_LOCK_VIOLATION,
+    ERROR_NETWORK_ACCESS_DENIED, ERROR_NOT_FOUND, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND,
+    ERROR_SHARING_VIOLATION, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
@@ -25,20 +30,30 @@ use windows_sys::Win32::System::IO::{
     CancelIoEx, CreateIoCompletionPort, GetOverlappedResult, GetQueuedCompletionStatusEx,
     OVERLAPPED, OVERLAPPED_ENTRY, PostQueuedCompletionStatus,
 };
-use windows_sys::Win32::System::Threading::{
-    CreateEventW, INFINITE, SetEvent, WaitForSingleObject,
-};
+use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 
 const FLAG_EOF: u32 = 1;
 const IO_QUEUE_DEPTH: usize = 16;
 const HASH_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const CANCEL_POLL_MS: u32 = 100;
+const DEFAULT_READ_STALL_TIMEOUT_MS: u32 = 30_000;
+const DEFAULT_IO_CANCEL_GRACE_MS: u32 = 5_000;
+const DEFAULT_MAX_CONSECUTIVE_FILE_RETRIES: u32 = 3;
+const DEFAULT_FILE_RETRY_BASE_DELAY_MS: u32 = 1_000;
+const MIN_READ_STALL_TIMEOUT_MS: u32 = 1_000;
+const MAX_READ_STALL_TIMEOUT_MS: u32 = 3_600_000;
+const MIN_IO_CANCEL_GRACE_MS: u32 = 100;
+const MAX_IO_CANCEL_GRACE_MS: u32 = 60_000;
+const MAX_FILE_RETRIES: u32 = 10;
+const MIN_FILE_RETRY_BASE_DELAY_MS: u32 = 100;
+const MAX_FILE_RETRY_BASE_DELAY_MS: u32 = 60_000;
 
 // C-FFI
-pub const LFR_ABI_VERSION: u32 = 2;
+pub const LFR_ABI_VERSION: u32 = 3;
 pub const LFR_OK: i32 = 0;
 pub const LFR_TIMEOUT: i32 = 1;
 pub const LFR_DONE: i32 = 2;
+pub const LFR_BUFFER_TOO_SMALL: i32 = 3;
 pub const LFR_INVALID: i32 = -1;
 pub const LFR_ERROR: i32 = -2;
 pub const LFR_CANCELLED: i32 = -3;
@@ -50,6 +65,14 @@ pub const LFR_HASH_CRC32: u32 = 1 << 4;
 pub const LFR_HASH_BLAKE3: u32 = 1 << 5;
 pub const LFR_HASH_XXH3: u32 = 1 << 6;
 pub const LFR_HASH_XXH128: u32 = 1 << 7;
+const LFR_HASH_ALL: u32 = LFR_HASH_SHA1
+    | LFR_HASH_SHA256
+    | LFR_HASH_SHA512
+    | LFR_HASH_MD5
+    | LFR_HASH_CRC32
+    | LFR_HASH_BLAKE3
+    | LFR_HASH_XXH3
+    | LFR_HASH_XXH128;
 
 #[repr(C)]
 pub struct LfrConfig {
@@ -65,6 +88,10 @@ pub struct LfrConfig {
     pub small_threshold: u64,
     pub hash_mask: u32,
     pub next_file_prime_depth: u32,
+    pub read_stall_timeout_ms: u32,
+    pub io_cancel_grace_ms: u32,
+    pub max_consecutive_file_retries: u32,
+    pub file_retry_base_delay_ms: u32,
 }
 
 #[repr(C)]
@@ -150,6 +177,26 @@ struct NativeConfig {
     small_threshold: u64,
     hash_mask: u32,
     next_file_prime_depth: usize,
+    io_policy: ReaderIoPolicy,
+}
+
+#[derive(Clone, Copy)]
+struct ReaderIoPolicy {
+    read_stall_timeout: Duration,
+    cancel_grace: Duration,
+    max_consecutive_file_retries: u8,
+    retry_base_delay_ms: u64,
+}
+
+impl Default for ReaderIoPolicy {
+    fn default() -> Self {
+        Self {
+            read_stall_timeout: Duration::from_millis(DEFAULT_READ_STALL_TIMEOUT_MS as u64),
+            cancel_grace: Duration::from_millis(DEFAULT_IO_CANCEL_GRACE_MS as u64),
+            max_consecutive_file_retries: DEFAULT_MAX_CONSECUTIVE_FILE_RETRIES as u8,
+            retry_base_delay_ms: DEFAULT_FILE_RETRY_BASE_DELAY_MS as u64,
+        }
+    }
 }
 
 pub struct LfrContext {
@@ -165,6 +212,34 @@ fn cancelled_error() -> io::Error {
 
 fn is_cancelled(cancel_event: HANDLE) -> bool {
     !cancel_event.is_null() && unsafe { WaitForSingleObject(cancel_event, 0) == WAIT_OBJECT_0 }
+}
+
+fn file_retry_delay(policy: ReaderIoPolicy, retry_number: u8) -> Duration {
+    debug_assert!(retry_number > 0);
+    let shift = u32::from(retry_number.saturating_sub(1)).min(31);
+    Duration::from_millis(policy.retry_base_delay_ms.saturating_mul(1u64 << shift))
+}
+
+fn wait_for_file_retry(
+    cancel_event: HANDLE,
+    policy: ReaderIoPolicy,
+    retry_number: u8,
+) -> io::Result<()> {
+    let delay = file_retry_delay(policy, retry_number);
+    if cancel_event.is_null() {
+        thread::sleep(delay);
+        return Ok(());
+    }
+
+    let timeout_ms = delay.as_millis().min(u32::MAX as u128) as u32;
+    match unsafe { WaitForSingleObject(cancel_event, timeout_ms) } {
+        WAIT_OBJECT_0 => Err(cancelled_error()),
+        WAIT_TIMEOUT => Ok(()),
+        WAIT_FAILED => Err(io::Error::last_os_error()),
+        result => Err(io::Error::other(format!(
+            "unexpected retry wait result: {result}"
+        ))),
+    }
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -230,9 +305,11 @@ struct HashSet {
 }
 
 fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
     let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{:02X}", b));
+    for &byte in bytes {
+        s.push(DIGITS[(byte >> 4) as usize] as char);
+        s.push(DIGITS[(byte & 0x0F) as usize] as char);
     }
     s
 }
@@ -372,8 +449,8 @@ impl ReadRequest {
 }
 
 struct AsyncSequentialReader {
-    file: Handle,
-    completion_port: Handle,
+    file: ManuallyDrop<Handle>,
+    completion_port: ManuallyDrop<Handle>,
     requests: Vec<ReadRequest>,
     file_len: u64,
     chunk_size: usize,
@@ -381,7 +458,14 @@ struct AsyncSequentialReader {
     next_consume: u64,
     outstanding: usize,
     cancel_event: HANDLE,
+    io_policy: ReaderIoPolicy,
     read_wait_counter: Option<Arc<AtomicU64>>,
+    last_completion_progress: Instant,
+}
+
+enum AsyncReaderRunError {
+    Io(io::Error),
+    Consumer(io::Error),
 }
 
 fn completed_request_at(requests: &[ReadRequest], offset: u64) -> Option<usize> {
@@ -391,21 +475,14 @@ fn completed_request_at(requests: &[ReadRequest], offset: u64) -> Option<usize> 
 }
 
 impl AsyncSequentialReader {
-    fn open(
+    fn open_from_with_depth(
         path: &str,
         expected_len: u64,
-        chunk_size: usize,
-        cancel_event: HANDLE,
-    ) -> io::Result<Self> {
-        Self::open_with_depth(path, expected_len, chunk_size, cancel_event, IO_QUEUE_DEPTH)
-    }
-
-    fn open_with_depth(
-        path: &str,
-        expected_len: u64,
+        start_offset: u64,
         chunk_size: usize,
         cancel_event: HANDLE,
         queue_depth: usize,
+        io_policy: ReaderIoPolicy,
     ) -> io::Result<Self> {
         if is_cancelled(cancel_event) {
             return Err(cancelled_error());
@@ -414,6 +491,20 @@ impl AsyncSequentialReader {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid asynchronous read chunk size",
+            ));
+        }
+        if !(1..=128).contains(&queue_depth) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid asynchronous read queue depth",
+            ));
+        }
+        if start_offset > expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid asynchronous read start offset: offset={start_offset} length={expected_len}"
+                ),
             ));
         }
 
@@ -450,29 +541,32 @@ impl AsyncSequentialReader {
             return Err(io::Error::last_os_error());
         }
         let completion_port = Handle(completion_port);
-        let request_count = if expected_len == 0 {
+        let remaining_len = expected_len - start_offset;
+        let request_count = if remaining_len == 0 {
             0
         } else {
-            expected_len
+            remaining_len
                 .div_ceil(chunk_size as u64)
-                .min(queue_depth.clamp(1, 128) as u64) as usize
+                .min(queue_depth as u64) as usize
         };
-        let request_buffer_size = expected_len.min(chunk_size as u64) as usize;
+        let request_buffer_size = remaining_len.min(chunk_size as u64) as usize;
         let requests = (0..request_count)
             .map(|_| ReadRequest::new(request_buffer_size))
             .collect();
 
         Ok(Self {
-            file,
-            completion_port,
+            file: ManuallyDrop::new(file),
+            completion_port: ManuallyDrop::new(completion_port),
             requests,
             file_len: expected_len,
             chunk_size,
-            next_submit: 0,
-            next_consume: 0,
+            next_submit: start_offset,
+            next_consume: start_offset,
             outstanding: 0,
             cancel_event,
+            io_policy,
             read_wait_counter: None,
+            last_completion_progress: Instant::now(),
         })
     }
 
@@ -555,11 +649,27 @@ impl AsyncSequentialReader {
                 if is_cancelled(self.cancel_event) {
                     return Err(cancelled_error());
                 }
+                if self.outstanding > 0
+                    && self.last_completion_progress.elapsed() >= self.io_policy.read_stall_timeout
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "asynchronous read made no I/O completion progress for {} ms at offset {} with {} requests outstanding",
+                            self.io_policy.read_stall_timeout.as_millis(),
+                            self.next_consume,
+                            self.outstanding
+                        ),
+                    ));
+                }
                 return Ok(());
             }
             return Err(error);
         }
         self.record_read_wait(wait_started.elapsed());
+        if removed > 0 {
+            self.last_completion_progress = Instant::now();
+        }
 
         for entry in &entries[..removed as usize] {
             let Some(request) = self
@@ -606,20 +716,21 @@ impl AsyncSequentialReader {
         }
     }
 
-    fn run<F>(&mut self, mut consume: F) -> io::Result<()>
+    fn run<F>(&mut self, mut consume: F) -> Result<(), AsyncReaderRunError>
     where
         F: FnMut(u64, &[u8]) -> io::Result<()>,
     {
         // A reader may already contain a few requests submitted while the
         // preceding file is being consumed. Fill the rest of the queue here.
-        self.prime()?;
+        self.prime().map_err(AsyncReaderRunError::Io)?;
         while self.next_consume < self.file_len {
             if is_cancelled(self.cancel_event) {
-                return Err(cancelled_error());
+                return Err(AsyncReaderRunError::Io(cancelled_error()));
             }
             let next_ready = completed_request_at(&self.requests, self.next_consume);
             let Some(index) = next_ready else {
-                self.receive_completions()?;
+                self.receive_completions()
+                    .map_err(AsyncReaderRunError::Io)?;
                 continue;
             };
 
@@ -627,31 +738,44 @@ impl AsyncSequentialReader {
                 RequestState::Completed(result) => result,
                 _ => unreachable!(),
             };
-            let transferred = result.map_err(|code| io::Error::from_raw_os_error(code as i32))?;
+            let transferred = result.map_err(|code| {
+                AsyncReaderRunError::Io(io::Error::from_raw_os_error(code as i32))
+            })?;
             let requested = self.requests[index].requested;
             if transferred != requested {
-                return Err(io::Error::new(
+                return Err(AsyncReaderRunError::Io(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     format!(
                         "short asynchronous read at offset {}: expected={} actual={}",
                         self.next_consume, requested, transferred
                     ),
-                ));
+                )));
             }
             consume(
                 self.requests[index].offset,
                 &self.requests[index].buffer[..transferred as usize],
-            )?;
+            )
+            .map_err(AsyncReaderRunError::Consumer)?;
             self.next_consume += transferred as u64;
             self.requests[index].state = RequestState::Idle;
-            self.submit(index)?;
+            self.submit(index).map_err(AsyncReaderRunError::Io)?;
         }
         Ok(())
     }
 
-    fn cancel_and_drain(&mut self) {
+    fn abandon_pending_io(&mut self) -> bool {
+        // Windows may still dereference the request buffers and OVERLAPPED
+        // values, and CloseHandle may block on a wedged remote redirector.
+        // Leak both memory and handles as one ownership unit.
+        let leaked = std::mem::take(&mut self.requests);
+        std::mem::forget(leaked);
+        self.outstanding = 0;
+        true
+    }
+
+    fn cancel_and_drain(&mut self) -> bool {
         if self.outstanding == 0 {
-            return;
+            return false;
         }
         if unsafe { CancelIoEx(self.file.0, null()) } == 0 {
             let code = io::Error::last_os_error().raw_os_error();
@@ -660,7 +784,11 @@ impl AsyncSequentialReader {
             }
         }
         let mut entries = [OVERLAPPED_ENTRY::default(); IO_QUEUE_DEPTH];
+        let drain_started = Instant::now();
         while self.outstanding > 0 {
+            if drain_started.elapsed() >= self.io_policy.cancel_grace {
+                return self.abandon_pending_io();
+            }
             let mut removed = 0u32;
             if unsafe {
                 GetQueuedCompletionStatusEx(
@@ -668,25 +796,288 @@ impl AsyncSequentialReader {
                     entries.as_mut_ptr(),
                     entries.len() as u32,
                     &mut removed,
-                    INFINITE,
+                    CANCEL_POLL_MS,
                     0,
                 )
             } == 0
             {
-                // Preserve the request storage if Windows cannot confirm cancellation.
-                let leaked = std::mem::take(&mut self.requests);
-                std::mem::forget(leaked);
-                return;
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(WAIT_TIMEOUT as i32) {
+                    return self.abandon_pending_io();
+                }
+                continue;
             }
             self.outstanding = self.outstanding.saturating_sub(removed as usize);
         }
+        false
     }
 }
 
 impl Drop for AsyncSequentialReader {
     fn drop(&mut self) {
-        self.cancel_and_drain();
+        if self.cancel_and_drain() {
+            return;
+        }
+        unsafe {
+            ManuallyDrop::drop(&mut self.file);
+            ManuallyDrop::drop(&mut self.completion_port);
+        }
     }
+}
+
+fn next_file_retry(
+    policy: ReaderIoPolicy,
+    consecutive_retries: &mut u8,
+    made_progress: bool,
+) -> Option<u8> {
+    if made_progress {
+        *consecutive_retries = 0;
+    }
+    if *consecutive_retries >= policy.max_consecutive_file_retries {
+        return None;
+    }
+    *consecutive_retries += 1;
+    Some(*consecutive_retries)
+}
+
+fn retryable_file_read_error(error: &io::Error) -> bool {
+    if let Some(code) = error.raw_os_error() {
+        return !matches!(
+            code as u32,
+            ERROR_FILE_NOT_FOUND
+                | ERROR_PATH_NOT_FOUND
+                | ERROR_ACCESS_DENIED
+                | ERROR_INVALID_HANDLE
+                | ERROR_SHARING_VIOLATION
+                | ERROR_LOCK_VIOLATION
+                | ERROR_HANDLE_EOF
+                | ERROR_NOT_SUPPORTED
+                | ERROR_NETWORK_ACCESS_DENIED
+                | ERROR_BAD_NET_NAME
+                | ERROR_INVALID_PARAMETER
+                | ERROR_INVALID_NAME
+                | ERROR_BAD_PATHNAME
+                | ERROR_FILENAME_EXCED_RANGE
+                | ERROR_DIRECTORY
+        );
+    }
+    !matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted
+            | io::ErrorKind::NotFound
+            | io::ErrorKind::InvalidInput
+            | io::ErrorKind::InvalidData
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::Unsupported
+    )
+}
+
+fn exhausted_file_read_error(
+    policy: ReaderIoPolicy,
+    path: &str,
+    offset: u64,
+    error: io::Error,
+) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "read failed for {path} at offset {offset} after {} consecutive retries: {error}",
+            policy.max_consecutive_file_retries
+        ),
+    )
+}
+
+struct ReaderPreparationPlan {
+    chunk_size: usize,
+    queue_depth: usize,
+    prime_depth: usize,
+    cancel_event: HANDLE,
+    read_wait_counter: Option<Arc<AtomicU64>>,
+    io_policy: ReaderIoPolicy,
+}
+
+fn prepare_reader_once(
+    path: &str,
+    expected_len: u64,
+    plan: ReaderPreparationPlan,
+) -> io::Result<AsyncSequentialReader> {
+    let ReaderPreparationPlan {
+        chunk_size,
+        queue_depth,
+        prime_depth,
+        cancel_event,
+        read_wait_counter,
+        io_policy,
+    } = plan;
+    let mut reader = AsyncSequentialReader::open_from_with_depth(
+        path,
+        expected_len,
+        0,
+        chunk_size,
+        cancel_event,
+        queue_depth,
+        io_policy,
+    )?;
+    if let Some(counter) = read_wait_counter {
+        reader.set_read_wait_counter(counter);
+    }
+    reader.prime_limit(prime_depth)?;
+    Ok(reader)
+}
+
+struct OverlappedReadPlan {
+    chunk_size: usize,
+    queue_depth: usize,
+    cancel_event: HANDLE,
+    io_policy: ReaderIoPolicy,
+    read_wait_counter: Option<Arc<AtomicU64>>,
+    prepared_reader: Option<AsyncSequentialReader>,
+    initial_error: Option<io::Error>,
+}
+
+fn read_file_overlapped_with_depth<F, D>(
+    path: &str,
+    expected_len: u64,
+    plan: OverlappedReadPlan,
+    mut discard_later_reads: D,
+    mut consume: F,
+) -> io::Result<()>
+where
+    F: FnMut(u64, &[u8]) -> io::Result<()>,
+    D: FnMut(),
+{
+    let OverlappedReadPlan {
+        chunk_size,
+        queue_depth,
+        cancel_event,
+        io_policy,
+        read_wait_counter,
+        mut prepared_reader,
+        initial_error,
+    } = plan;
+    let mut next_offset = 0u64;
+    let mut consecutive_retries = 0u8;
+
+    if let Some(error) = initial_error {
+        discard_later_reads();
+        if !retryable_file_read_error(&error) {
+            return Err(error);
+        }
+        let Some(retry_number) = next_file_retry(io_policy, &mut consecutive_retries, false) else {
+            return Err(exhausted_file_read_error(
+                io_policy,
+                path,
+                next_offset,
+                error,
+            ));
+        };
+        wait_for_file_retry(cancel_event, io_policy, retry_number)?;
+    }
+
+    if expected_len == 0 {
+        let _reader = match prepared_reader.take() {
+            Some(reader) => reader,
+            None => AsyncSequentialReader::open_from_with_depth(
+                path,
+                expected_len,
+                0,
+                chunk_size,
+                cancel_event,
+                queue_depth,
+                io_policy,
+            )?,
+        };
+        return Ok(());
+    }
+
+    while next_offset < expected_len {
+        if is_cancelled(cancel_event) {
+            return Err(cancelled_error());
+        }
+
+        let attempt_offset = next_offset;
+        let open_result = match prepared_reader.take() {
+            Some(reader) => Ok(reader),
+            None => AsyncSequentialReader::open_from_with_depth(
+                path,
+                expected_len,
+                next_offset,
+                chunk_size,
+                cancel_event,
+                queue_depth,
+                io_policy,
+            ),
+        };
+        let mut reader = match open_result {
+            Ok(mut reader) => {
+                if let Some(counter) = read_wait_counter.as_ref() {
+                    reader.set_read_wait_counter(Arc::clone(counter));
+                }
+                reader
+            }
+            Err(error) => {
+                discard_later_reads();
+                if !retryable_file_read_error(&error) {
+                    return Err(error);
+                }
+                let Some(retry_number) =
+                    next_file_retry(io_policy, &mut consecutive_retries, false)
+                else {
+                    return Err(exhausted_file_read_error(
+                        io_policy,
+                        path,
+                        next_offset,
+                        error,
+                    ));
+                };
+                wait_for_file_retry(cancel_event, io_policy, retry_number)?;
+                continue;
+            }
+        };
+
+        let run_result = reader.run(|offset, slice| {
+            if offset != next_offset {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "asynchronous read order mismatch: expected={next_offset} actual={offset}"
+                    ),
+                ));
+            }
+            consume(offset, slice)?;
+            next_offset = next_offset.saturating_add(slice.len() as u64);
+            Ok(())
+        });
+
+        match run_result {
+            Ok(()) => return Ok(()),
+            Err(AsyncReaderRunError::Consumer(error)) => {
+                drop(reader);
+                discard_later_reads();
+                return Err(error);
+            }
+            Err(AsyncReaderRunError::Io(error)) => {
+                let made_progress = next_offset > attempt_offset;
+                drop(reader);
+                discard_later_reads();
+                if !retryable_file_read_error(&error) {
+                    return Err(error);
+                }
+                let Some(retry_number) =
+                    next_file_retry(io_policy, &mut consecutive_retries, made_progress)
+                else {
+                    return Err(exhausted_file_read_error(
+                        io_policy,
+                        path,
+                        next_offset,
+                        error,
+                    ));
+                };
+                wait_for_file_retry(cancel_event, io_policy, retry_number)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn read_file_overlapped<F>(
@@ -694,13 +1085,27 @@ fn read_file_overlapped<F>(
     expected_len: u64,
     chunk_size: usize,
     cancel_event: HANDLE,
+    io_policy: ReaderIoPolicy,
     consume: F,
 ) -> io::Result<()>
 where
     F: FnMut(u64, &[u8]) -> io::Result<()>,
 {
-    let mut reader = AsyncSequentialReader::open(path, expected_len, chunk_size, cancel_event)?;
-    reader.run(consume)
+    read_file_overlapped_with_depth(
+        path,
+        expected_len,
+        OverlappedReadPlan {
+            chunk_size,
+            queue_depth: IO_QUEUE_DEPTH,
+            cancel_event,
+            io_policy,
+            read_wait_counter: None,
+            prepared_reader: None,
+            initial_error: None,
+        },
+        || {},
+        consume,
+    )
 }
 
 const SMALL_BUFFER_CLASSES: [usize; 7] = [
@@ -726,7 +1131,7 @@ enum SmallFileStatus {
     Opening,
     InFlight,
     Ready { data: Vec<u8>, reserved: usize },
-    Failed(String),
+    Failed { message: String, retryable: bool },
     Borrowed,
 }
 
@@ -877,6 +1282,9 @@ struct SmallOperation {
     index: u64,
     expected: u32,
     reserved: usize,
+    started_at: Instant,
+    cancel_requested_at: Option<Instant>,
+    timed_out: bool,
 }
 
 unsafe impl Send for SmallOperation {}
@@ -890,6 +1298,7 @@ struct SmallShared {
     inflight_byte_limit: usize,
     completion_batch: usize,
     cancel_event: SharedHandle,
+    io_policy: ReaderIoPolicy,
 }
 
 struct CachedSmallFile {
@@ -953,14 +1362,17 @@ fn small_failure(
     index: u64,
     buffer: Vec<u8>,
     reserved: usize,
-    message: String,
+    error: io::Error,
 ) {
     let mut state = shared.state.lock().unwrap();
     state.active_files = state.active_files.saturating_sub(1);
     state.reserved_bytes = state.reserved_bytes.saturating_sub(reserved);
     state.return_buffer(buffer, reserved);
     if let Some(entry) = state.entries.get_mut(&index) {
-        entry.status = SmallFileStatus::Failed(message);
+        entry.status = SmallFileStatus::Failed {
+            message: error.to_string(),
+            retryable: retryable_file_read_error(&error),
+        };
     }
     shared.changed.notify_all();
 }
@@ -1016,7 +1428,7 @@ fn small_open_worker(shared: Arc<SmallShared>) {
                 task.index,
                 buffer,
                 reserved,
-                io::Error::last_os_error().to_string(),
+                io::Error::last_os_error(),
             );
             continue;
         }
@@ -1028,7 +1440,7 @@ fn small_open_worker(shared: Arc<SmallShared>) {
                 task.index,
                 buffer,
                 reserved,
-                "reader shutting down".into(),
+                io::Error::new(io::ErrorKind::Interrupted, "reader shutting down"),
             );
             drop(file);
             continue;
@@ -1056,7 +1468,7 @@ fn small_open_worker(shared: Arc<SmallShared>) {
                 task.index,
                 buffer,
                 reserved,
-                io::Error::last_os_error().to_string(),
+                io::Error::last_os_error(),
             );
             continue;
         }
@@ -1068,6 +1480,9 @@ fn small_open_worker(shared: Arc<SmallShared>) {
             index: task.index,
             expected: task.len as u32,
             reserved,
+            started_at: Instant::now(),
+            cancel_requested_at: None,
+            timed_out: false,
         });
         let operation_key = (&mut operation.overlapped as *mut OVERLAPPED) as usize;
         {
@@ -1093,16 +1508,67 @@ fn small_open_worker(shared: Arc<SmallShared>) {
             if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
                 let operation = operations.remove(&operation_key).unwrap();
                 drop(operations);
-                small_failure(
-                    &shared,
-                    task.index,
-                    operation.buffer,
-                    reserved,
-                    error.to_string(),
-                );
+                small_failure(&shared, task.index, operation.buffer, reserved, error);
             }
         }
     }
+}
+
+fn small_operation_watchdog(shared: &SmallShared) -> bool {
+    let shutdown = shared.state.lock().unwrap().shutdown;
+    let now = Instant::now();
+    let mut fatal_error = None;
+    let mut must_leak_and_exit = false;
+
+    {
+        let mut operations = shared.operations.lock().unwrap();
+        for operation in operations.values_mut() {
+            if let Some(cancel_requested_at) = operation.cancel_requested_at {
+                if now.duration_since(cancel_requested_at) >= shared.io_policy.cancel_grace {
+                    if operation.timed_out && !shutdown {
+                        fatal_error = Some(format!(
+                            "small-file read cancellation did not complete within {} ms: file={} offset=0 length={}",
+                            shared.io_policy.cancel_grace.as_millis(),
+                            operation.index,
+                            operation.expected
+                        ));
+                    }
+                    must_leak_and_exit = true;
+                    break;
+                }
+                continue;
+            }
+
+            let timed_out = operation.started_at.elapsed() >= shared.io_policy.read_stall_timeout;
+            if !shutdown && !timed_out {
+                continue;
+            }
+
+            operation.cancel_requested_at = Some(now);
+            operation.timed_out = timed_out;
+            unsafe {
+                CancelIoEx(operation.file.0, &operation.overlapped);
+            }
+        }
+
+        if must_leak_and_exit {
+            for (_, operation) in operations.drain() {
+                // A remote redirector may still own this OVERLAPPED and buffer.
+                // Keep their addresses alive if cancellation itself is wedged.
+                std::mem::forget(operation);
+            }
+        }
+    }
+
+    if let Some(message) = fatal_error {
+        let mut state = shared.state.lock().unwrap();
+        if state.fatal_error.is_none() {
+            state.fatal_error = Some(message);
+        }
+        shared.changed.notify_all();
+    }
+
+    must_leak_and_exit
 }
 
 fn small_completion_worker(shared: Arc<SmallShared>) {
@@ -1115,12 +1581,23 @@ fn small_completion_worker(shared: Arc<SmallShared>) {
                 entries.as_mut_ptr(),
                 entries.len() as u32,
                 &mut removed,
-                INFINITE,
+                CANCEL_POLL_MS,
                 0,
             )
         };
         if ok == 0 {
             let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(WAIT_TIMEOUT as i32) {
+                if small_operation_watchdog(&shared) {
+                    return;
+                }
+                if shared.state.lock().unwrap().shutdown
+                    && shared.operations.lock().unwrap().is_empty()
+                {
+                    return;
+                }
+                continue;
+            }
             let mut report_error = false;
             {
                 let mut state = shared.state.lock().unwrap();
@@ -1133,12 +1610,17 @@ fn small_completion_worker(shared: Arc<SmallShared>) {
             if report_error {
                 eprintln!("IOCP_ERROR\t{error}");
                 io::stderr().flush().ok();
-                let operations = shared.operations.lock().unwrap();
-                for operation in operations.values() {
+                let now = Instant::now();
+                let mut operations = shared.operations.lock().unwrap();
+                for operation in operations.values_mut() {
+                    operation.cancel_requested_at.get_or_insert(now);
                     unsafe {
-                        CancelIoEx(operation.file.0, null());
+                        CancelIoEx(operation.file.0, &operation.overlapped);
                     }
                 }
+            }
+            if small_operation_watchdog(&shared) {
+                return;
             }
             if shared.state.lock().unwrap().shutdown && shared.operations.lock().unwrap().is_empty()
             {
@@ -1161,20 +1643,34 @@ fn small_completion_worker(shared: Arc<SmallShared>) {
                 operation
             };
             let mut transferred = 0u32;
-            let result = if unsafe {
+            let result: io::Result<()> = if unsafe {
                 GetOverlappedResult(operation.file.0, &operation.overlapped, &mut transferred, 0)
             } != 0
             {
                 if transferred == operation.expected {
                     Ok(())
                 } else {
-                    Err(format!(
-                        "short asynchronous read: expected={} actual={transferred}",
-                        operation.expected
+                    Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "short asynchronous read: expected={} actual={transferred}",
+                            operation.expected
+                        ),
                     ))
                 }
             } else {
-                Err(io::Error::last_os_error().to_string())
+                let error = io::Error::last_os_error();
+                if operation.timed_out {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "asynchronous read timed out after {} ms: {error}",
+                            shared.io_policy.read_stall_timeout.as_millis()
+                        ),
+                    ))
+                } else {
+                    Err(error)
+                }
             };
             operation.buffer.truncate(transferred as usize);
 
@@ -1194,17 +1690,24 @@ fn small_completion_worker(shared: Arc<SmallShared>) {
                             };
                         }
                     }
-                    Err(message) => {
+                    Err(error) => {
                         state.reserved_bytes =
                             state.reserved_bytes.saturating_sub(operation.reserved);
                         state.return_buffer(operation.buffer, operation.reserved);
                         if let Some(entry) = state.entries.get_mut(&operation.index) {
-                            entry.status = SmallFileStatus::Failed(message);
+                            entry.status = SmallFileStatus::Failed {
+                                message: error.to_string(),
+                                retryable: retryable_file_read_error(&error),
+                            };
                         }
                     }
                 }
             }
             shared.changed.notify_all();
+        }
+
+        if small_operation_watchdog(&shared) {
+            return;
         }
 
         if shared.state.lock().unwrap().shutdown && shared.operations.lock().unwrap().is_empty() {
@@ -1220,7 +1723,18 @@ impl SmallFilePool {
         inflight_byte_limit: usize,
         completion_batch: usize,
         cancel_event: HANDLE,
+        io_policy: ReaderIoPolicy,
     ) -> io::Result<Self> {
+        if open_concurrency == 0
+            || active_limit == 0
+            || inflight_byte_limit < 64 * 1024
+            || !(1..=128).contains(&completion_batch)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid small-file pool configuration",
+            ));
+        }
         let raw_port = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 0) };
         if raw_port.is_null() {
             return Err(io::Error::last_os_error());
@@ -1231,12 +1745,13 @@ impl SmallFilePool {
             changed: Condvar::new(),
             operations: Mutex::new(FxHashMap::default()),
             completion_port: SharedHandle(raw_port),
-            active_limit: active_limit.max(1),
-            inflight_byte_limit: inflight_byte_limit.max(64 * 1024),
-            completion_batch: completion_batch.clamp(1, 128),
+            active_limit,
+            inflight_byte_limit,
+            completion_batch,
             cancel_event: SharedHandle(cancel_event),
+            io_policy,
         });
-        let workers = (0..open_concurrency.max(1))
+        let workers = (0..open_concurrency)
             .map(|_| {
                 let shared = Arc::clone(&shared);
                 thread::spawn(move || small_open_worker(shared))
@@ -1280,15 +1795,38 @@ impl SmallFilePool {
                         return Ok(CachedSmallFile { data, reserved });
                     }
                 }
-                SmallFileStatus::Failed(message) if entry.attempts >= 2 => {
-                    return Err(io::Error::other(message.clone()));
-                }
-                SmallFileStatus::Failed(_) => {
+                SmallFileStatus::Failed { message, retryable } => {
+                    let attempts = entry.attempts;
+                    if !retryable {
+                        return Err(io::Error::other(format!(
+                            "non-retryable read failure for {}: {message}",
+                            task.path
+                        )));
+                    }
+                    if attempts > self.shared.io_policy.max_consecutive_file_retries {
+                        return Err(io::Error::other(format!(
+                            "read failed for {} after {} consecutive retries: {message}",
+                            task.path, self.shared.io_policy.max_consecutive_file_retries
+                        )));
+                    }
+
+                    drop(state);
+                    wait_for_file_retry(
+                        self.shared.cancel_event.0,
+                        self.shared.io_policy,
+                        attempts,
+                    )?;
+                    state = self.shared.state.lock().unwrap();
+                    let Some(entry) = state.entries.get_mut(&task.index) else {
+                        continue;
+                    };
+                    if entry.attempts == attempts
+                        && matches!(entry.status, SmallFileStatus::Failed { .. })
                     {
                         entry.status = SmallFileStatus::Pending;
+                        state.enqueue_index(task.index, queue_class, true);
+                        self.shared.changed.notify_all();
                     }
-                    state.enqueue_index(task.index, queue_class, true);
-                    self.shared.changed.notify_all();
                 }
                 _ => {
                     state = self
@@ -1332,10 +1870,12 @@ impl SmallFilePool {
             let _ = worker.join();
         }
         {
-            let operations = self.shared.operations.lock().unwrap();
-            for operation in operations.values() {
+            let now = Instant::now();
+            let mut operations = self.shared.operations.lock().unwrap();
+            for operation in operations.values_mut() {
+                operation.cancel_requested_at.get_or_insert(now);
                 unsafe {
-                    CancelIoEx(operation.file.0, null());
+                    CancelIoEx(operation.file.0, &operation.overlapped);
                 }
             }
         }
@@ -1344,11 +1884,15 @@ impl SmallFilePool {
         }
         if let Some(completion_thread) = self.completion_thread.take() {
             let join_result = completion_thread.join();
-            let mut operations = self
-                .shared
-                .operations
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut operations = match self.shared.operations.lock() {
+                Ok(operations) => operations,
+                Err(poisoned) => {
+                    eprintln!("STATE_POISON\tsmall-file operation mutex poisoned during shutdown");
+                    io::stderr().flush().ok();
+                    self.shared.operations.clear_poison();
+                    poisoned.into_inner()
+                }
+            };
             if join_result.is_err() || !operations.is_empty() {
                 for (_, operation) in operations.drain() {
                     std::mem::forget(operation);
@@ -1365,10 +1909,64 @@ impl Drop for SmallFilePool {
 }
 
 fn native_lock(shared: &NativeShared) -> std::sync::MutexGuard<'_, NativeState> {
-    shared
-        .state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    match shared.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => {
+            let mut state = poisoned.into_inner();
+            record_native_poison(&mut state, "mutex lock");
+            shared.state.clear_poison();
+            shared.changed.notify_all();
+            state
+        }
+    }
+}
+
+fn record_native_poison(state: &mut NativeState, operation: &str) {
+    let message = format!("native fast-reader state mutex poisoned during {operation}");
+    if state.error.is_empty() {
+        state.error = message.clone();
+    }
+    state.done = true;
+    eprintln!("STATE_POISON\t{message}");
+    io::stderr().flush().ok();
+}
+
+fn native_wait<'a>(
+    shared: &NativeShared,
+    state: std::sync::MutexGuard<'a, NativeState>,
+    operation: &str,
+) -> std::sync::MutexGuard<'a, NativeState> {
+    match shared.changed.wait(state) {
+        Ok(state) => state,
+        Err(poisoned) => {
+            let mut state = poisoned.into_inner();
+            record_native_poison(&mut state, operation);
+            shared.state.clear_poison();
+            shared.changed.notify_all();
+            state
+        }
+    }
+}
+
+fn native_wait_timeout<'a>(
+    shared: &NativeShared,
+    state: std::sync::MutexGuard<'a, NativeState>,
+    timeout: Duration,
+    operation: &str,
+) -> (
+    std::sync::MutexGuard<'a, NativeState>,
+    std::sync::WaitTimeoutResult,
+) {
+    match shared.changed.wait_timeout(state, timeout) {
+        Ok(result) => result,
+        Err(poisoned) => {
+            let (mut state, wait_result) = poisoned.into_inner();
+            record_native_poison(&mut state, operation);
+            shared.state.clear_poison();
+            shared.changed.notify_all();
+            (state, wait_result)
+        }
+    }
 }
 
 fn native_hash_options(mask: u32) -> FxHashMap<String, bool> {
@@ -1405,6 +2003,9 @@ fn native_publish(
         if state.cancelled {
             return Err(cancelled_error());
         }
+        if !state.error.is_empty() {
+            return Err(io::Error::other(state.error.clone()));
+        }
         let slot_index = state.write_index as usize % state.slots.len();
         if !state.slots[slot_index].full {
             if data.len() > state.slots[slot_index].buffer.len() {
@@ -1437,10 +2038,7 @@ fn native_publish(
             return Ok(());
         }
         let wait_started = Instant::now();
-        state = shared
-            .changed
-            .wait(state)
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state = native_wait(shared, state, "publish wait");
         shared.telemetry.publish_wait_ns.fetch_add(
             wait_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
             Ordering::Relaxed,
@@ -1462,11 +2060,11 @@ fn native_publish_batch(
             if state.cancelled {
                 return Err(cancelled_error());
             }
+            if !state.error.is_empty() {
+                return Err(io::Error::other(state.error.clone()));
+            }
             let wait_started = Instant::now();
-            state = shared
-                .changed
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = native_wait(shared, state, "batch publish wait");
             shared.telemetry.publish_wait_ns.fetch_add(
                 wait_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                 Ordering::Relaxed,
@@ -1474,6 +2072,9 @@ fn native_publish_batch(
         }
         if state.cancelled {
             return Err(cancelled_error());
+        }
+        if !state.error.is_empty() {
+            return Err(io::Error::other(state.error.clone()));
         }
 
         let remaining_slots = data[consumed..].len().div_ceil(slot_size);
@@ -1523,6 +2124,7 @@ fn native_run_worker(
         config.small_inflight_bytes,
         64,
         cancel_event,
+        config.io_policy,
     ) {
         Ok(pool) => pool,
         Err(error) => {
@@ -1545,58 +2147,71 @@ fn native_run_worker(
     }
 
     let run_result = (|| -> io::Result<()> {
-        let mut prepared_large: Option<(u64, AsyncSequentialReader)> = None;
-        for position in 0..files.len() {
-            let file = &files[position];
+        let mut prepared_large: Option<(u64, io::Result<AsyncSequentialReader>)> = None;
+        for (position, file) in files.iter().enumerate() {
             if is_cancelled(cancel_event) {
                 return Err(cancelled_error());
             }
 
-            let mut current_reader = if file.len > config.small_threshold {
-                match prepared_large.take() {
-                    Some((index, reader)) if index == file.index => Some(reader),
+            let mut current_reader = None;
+            let mut current_initial_error = None;
+            if file.len > config.small_threshold {
+                let current_result = match prepared_large.take() {
+                    Some((index, result)) if index == file.index => result,
                     Some(_) => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "native next-file reader order mismatch",
                         ));
                     }
-                    None => {
-                        let mut reader = AsyncSequentialReader::open_with_depth(
-                            &file.path,
-                            file.len,
-                            config.read_chunk_size,
+                    None => prepare_reader_once(
+                        &file.path,
+                        file.len,
+                        ReaderPreparationPlan {
+                            chunk_size: config.read_chunk_size,
+                            queue_depth: config.queue_depth,
+                            prime_depth: config.queue_depth,
                             cancel_event,
-                            config.queue_depth,
-                        )?;
-                        reader.set_read_wait_counter(Arc::clone(&shared.telemetry.read_wait_ns));
-                        Some(reader)
-                    }
+                            read_wait_counter: Some(Arc::clone(&shared.telemetry.read_wait_ns)),
+                            io_policy: config.io_policy,
+                        },
+                    ),
                 }
-            } else {
-                None
-            };
+                .and_then(|mut reader| {
+                    // A look-ahead reader starts shallow. Fill the current
+                    // file's complete IOCP queue before doing other work.
+                    reader.prime()?;
+                    Ok(reader)
+                });
 
-            // Give the current file the full IOCP depth first, then submit a
-            // small head start for the next large file. Its I/O can complete
-            // while the current file is being hashed/published to tape.
-            if let Some(reader) = current_reader.as_mut() {
-                reader.prime()?;
+                match current_result {
+                    Ok(reader) => current_reader = Some(reader),
+                    Err(error) => current_initial_error = Some(error),
+                }
             }
-            let mut next_prepared = None;
-            if let Some(next) = files.get(position + 1)
+
+            // Keep one request for the next large file in flight while the
+            // current file is consumed. It is discarded together with all
+            // later current-file requests if the current read fails.
+            if (file.len <= config.small_threshold || current_reader.is_some())
+                && let Some(next) = files.get(position + 1)
                 && next.len > config.small_threshold
             {
-                let mut reader = AsyncSequentialReader::open_with_depth(
-                    &next.path,
-                    next.len,
-                    config.read_chunk_size,
-                    cancel_event,
-                    config.queue_depth,
-                )?;
-                reader.set_read_wait_counter(Arc::clone(&shared.telemetry.read_wait_ns));
-                reader.prime_limit(config.next_file_prime_depth)?;
-                next_prepared = Some((next.index, reader));
+                prepared_large = Some((
+                    next.index,
+                    prepare_reader_once(
+                        &next.path,
+                        next.len,
+                        ReaderPreparationPlan {
+                            chunk_size: config.read_chunk_size,
+                            queue_depth: config.queue_depth,
+                            prime_depth: config.next_file_prime_depth,
+                            cancel_event,
+                            read_wait_counter: Some(Arc::clone(&shared.telemetry.read_wait_ns)),
+                            io_policy: config.io_policy,
+                        },
+                    ),
+                ));
             }
 
             let mut hashes = HashSet::new(&enabled)?;
@@ -1606,7 +2221,15 @@ fn native_run_worker(
                     len: file.len,
                     path: file.path.clone(),
                 };
-                let cached = small_pool.wait_take(task)?;
+                let cached = small_pool.wait_take(task).map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "small-file read failed: file={} path={}: {error}",
+                            file.index, file.path
+                        ),
+                    )
+                })?;
                 let hash_started = Instant::now();
                 hashes.update(&cached.data)?;
                 shared.telemetry.hash_ns.fetch_add(
@@ -1620,19 +2243,43 @@ fn native_run_worker(
                 native_publish_batch(&shared, file.index, 0, &cached.data, config.slot_size)?;
                 small_pool.release(file.index, cached);
             } else {
-                let reader = current_reader.as_mut().unwrap();
-                reader.run(|offset, slice| {
-                    shared
-                        .telemetry
-                        .bytes_read
-                        .fetch_add(slice.len() as u64, Ordering::Relaxed);
-                    let hash_started = Instant::now();
-                    hashes.update(slice)?;
-                    shared.telemetry.hash_ns.fetch_add(
-                        hash_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                        Ordering::Relaxed,
-                    );
-                    native_publish_batch(&shared, file.index, offset, slice, config.slot_size)
+                read_file_overlapped_with_depth(
+                    &file.path,
+                    file.len,
+                    OverlappedReadPlan {
+                        chunk_size: config.read_chunk_size,
+                        queue_depth: config.queue_depth,
+                        cancel_event,
+                        io_policy: config.io_policy,
+                        read_wait_counter: Some(Arc::clone(&shared.telemetry.read_wait_ns)),
+                        prepared_reader: current_reader,
+                        initial_error: current_initial_error,
+                    },
+                    || {
+                        prepared_large.take();
+                    },
+                    |offset, slice| {
+                        shared
+                            .telemetry
+                            .bytes_read
+                            .fetch_add(slice.len() as u64, Ordering::Relaxed);
+                        let hash_started = Instant::now();
+                        hashes.update(slice)?;
+                        shared.telemetry.hash_ns.fetch_add(
+                            hash_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                            Ordering::Relaxed,
+                        );
+                        native_publish_batch(&shared, file.index, offset, slice, config.slot_size)
+                    },
+                )
+                .map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "large-file read failed: file={} path={}: {error}",
+                            file.index, file.path
+                        ),
+                    )
                 })?;
             }
             let result = hashes.finish()?;
@@ -1642,7 +2289,6 @@ fn native_run_worker(
                 shared.changed.notify_all();
             }
             native_publish(&shared, file.index, file.len, &[], FLAG_EOF)?;
-            prepared_large = next_prepared;
         }
         Ok(())
     })();
@@ -1675,7 +2321,7 @@ fn native_copy_text(text: &str, buffer: *mut u8, capacity: u32, written: *mut u3
         }
         *written = text.len() as u32;
         if buffer.is_null() || capacity < text.len() as u32 + 1 {
-            return LFR_INVALID;
+            return LFR_BUFFER_TOO_SMALL;
         }
         std::ptr::copy_nonoverlapping(text.as_ptr(), buffer, text.len());
         *buffer.add(text.len()) = 0;
@@ -1707,11 +2353,34 @@ pub unsafe extern "system" fn lfr_create(
         || config.read_chunk_size < config.slot_size
         || config.read_chunk_size > 64 * 1024 * 1024
         || !config.read_chunk_size.is_multiple_of(config.slot_size)
+        || !(1..=128).contains(&config.queue_depth)
+        || config.capacity_bytes < config.slot_size as u64 * 2
+        || config.capacity_bytes > usize::MAX as u64
+        || !config
+            .capacity_bytes
+            .is_multiple_of(config.slot_size as u64)
+        || !(1..=128).contains(&config.small_open_concurrency)
+        || !(1..=1024).contains(&config.small_active_files)
+        || config.small_inflight_bytes < 64 * 1024
+        || config.small_inflight_bytes < config.slot_size as u64
+        || config.small_inflight_bytes > usize::MAX as u64
+        || !(64 * 1024..=4 * 1024 * 1024).contains(&config.small_threshold)
+        || small_buffer_class(config.small_threshold)
+            .is_none_or(|(_, capacity)| config.small_inflight_bytes < capacity as u64)
+        || config.hash_mask & !LFR_HASH_ALL != 0
+        || !(1..=16).contains(&config.next_file_prime_depth)
+        || config.next_file_prime_depth > config.queue_depth
+        || !(MIN_READ_STALL_TIMEOUT_MS..=MAX_READ_STALL_TIMEOUT_MS)
+            .contains(&config.read_stall_timeout_ms)
+        || !(MIN_IO_CANCEL_GRACE_MS..=MAX_IO_CANCEL_GRACE_MS).contains(&config.io_cancel_grace_ms)
+        || config.max_consecutive_file_retries > MAX_FILE_RETRIES
+        || !(MIN_FILE_RETRY_BASE_DELAY_MS..=MAX_FILE_RETRY_BASE_DELAY_MS)
+            .contains(&config.file_retry_base_delay_ms)
     {
         return LFR_INVALID;
     }
     let slot_size = config.slot_size as usize;
-    let slot_count = (config.capacity_bytes / config.slot_size as u64).max(2) as usize;
+    let slot_count = (config.capacity_bytes / config.slot_size as u64) as usize;
     let slots = (0..slot_count)
         .map(|_| NativeSlot {
             buffer: vec![0u8; slot_size].into_boxed_slice(),
@@ -1750,14 +2419,20 @@ pub unsafe extern "system" fn lfr_create(
         config: NativeConfig {
             slot_size,
             read_chunk_size: config.read_chunk_size as usize,
-            queue_depth: (config.queue_depth as usize).clamp(1, 128),
-            capacity_bytes: slot_count as u64 * slot_size as u64,
-            small_open_concurrency: (config.small_open_concurrency as usize).clamp(1, 128),
-            small_active_files: (config.small_active_files as usize).clamp(1, 1024),
-            small_inflight_bytes: config.small_inflight_bytes.max(config.slot_size as u64) as usize,
-            small_threshold: config.small_threshold.clamp(64 * 1024, 4 * 1024 * 1024),
+            queue_depth: config.queue_depth as usize,
+            capacity_bytes: config.capacity_bytes,
+            small_open_concurrency: config.small_open_concurrency as usize,
+            small_active_files: config.small_active_files as usize,
+            small_inflight_bytes: config.small_inflight_bytes as usize,
+            small_threshold: config.small_threshold,
             hash_mask: config.hash_mask,
-            next_file_prime_depth: (config.next_file_prime_depth as usize).clamp(1, 16),
+            next_file_prime_depth: config.next_file_prime_depth as usize,
+            io_policy: ReaderIoPolicy {
+                read_stall_timeout: Duration::from_millis(config.read_stall_timeout_ms as u64),
+                cancel_grace: Duration::from_millis(config.io_cancel_grace_ms as u64),
+                max_consecutive_file_retries: config.max_consecutive_file_retries as u8,
+                retry_base_delay_ms: config.file_retry_base_delay_ms as u64,
+            },
         },
         cancel_event: Handle(cancel_event),
         worker: Mutex::new(None),
@@ -1876,13 +2551,28 @@ pub unsafe extern "system" fn lfr_start(context: *mut LfrContext) -> i32 {
         small_threshold: context.config.small_threshold,
         hash_mask: context.config.hash_mask,
         next_file_prime_depth: context.config.next_file_prime_depth,
+        io_policy: context.config.io_policy,
     };
     let cancel_event = context.cancel_event.0 as usize;
     let worker =
         thread::spawn(move || native_run_worker(shared, config, cancel_event as HANDLE, files));
-    let mut worker_slot = context.worker.lock().unwrap_or_else(|p| p.into_inner());
+    let (mut worker_slot, worker_mutex_poisoned) = match context.worker.lock() {
+        Ok(worker_slot) => (worker_slot, false),
+        Err(poisoned) => {
+            native_set_error(
+                &context.shared,
+                "native fast-reader worker mutex poisoned during start",
+            );
+            context.worker.clear_poison();
+            (poisoned.into_inner(), true)
+        }
+    };
     *worker_slot = Some(worker);
-    LFR_OK
+    if worker_mutex_poisoned {
+        LFR_ERROR
+    } else {
+        LFR_OK
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -2014,11 +2704,7 @@ pub unsafe extern "system" fn lfr_wait_until_buffered(
             return LFR_TIMEOUT;
         }
         if timeout_ms == u32::MAX {
-            state = context
-                .shared
-                .changed
-                .wait(state)
-                .unwrap_or_else(|p| p.into_inner());
+            state = native_wait(&context.shared, state, "buffer wait");
         } else {
             if state.buffered_bytes != last_buffered_bytes
                 || state.occupied_slots != last_occupied_slots
@@ -2037,11 +2723,8 @@ pub unsafe extern "system" fn lfr_wait_until_buffered(
                     LFR_TIMEOUT
                 };
             }
-            let (next, result) = context
-                .shared
-                .changed
-                .wait_timeout(state, timeout)
-                .unwrap_or_else(|p| p.into_inner());
+            let (next, result) =
+                native_wait_timeout(&context.shared, state, timeout, "timed buffer wait");
             state = next;
             if result.timed_out() {
                 if state.buffered_bytes != last_buffered_bytes
@@ -2116,21 +2799,18 @@ pub unsafe extern "system" fn lfr_acquire_slot(
             return LFR_TIMEOUT;
         }
         if timeout_ms == u32::MAX {
-            state = context
-                .shared
-                .changed
-                .wait(state)
-                .unwrap_or_else(|p| p.into_inner());
+            state = native_wait(&context.shared, state, "slot acquisition wait");
         } else {
             let timeout = Duration::from_millis(timeout_ms as u64).saturating_sub(start.elapsed());
             if timeout.is_zero() {
                 return LFR_TIMEOUT;
             }
-            let (next, result) = context
-                .shared
-                .changed
-                .wait_timeout(state, timeout)
-                .unwrap_or_else(|p| p.into_inner());
+            let (next, result) = native_wait_timeout(
+                &context.shared,
+                state,
+                timeout,
+                "timed slot acquisition wait",
+            );
             state = next;
             if result.timed_out() {
                 return LFR_TIMEOUT;
@@ -2206,6 +2886,7 @@ pub unsafe extern "system" fn lfr_hash_file(
         file.len,
         HASH_CHUNK_SIZE,
         context.cancel_event.0,
+        context.config.io_policy,
         |_offset, slice| hashes.update(slice),
     )
     .and_then(|_| hashes.finish());
@@ -2302,11 +2983,16 @@ pub unsafe extern "system" fn lfr_destroy(context: *mut LfrContext) {
     unsafe {
         SetEvent(context.cancel_event.0);
     }
-    let worker = context
-        .worker
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .take();
+    let worker = match context.worker.lock() {
+        Ok(worker) => worker,
+        Err(poisoned) => {
+            eprintln!("STATE_POISON\tnative fast-reader worker mutex poisoned during destroy");
+            io::stderr().flush().ok();
+            context.worker.clear_poison();
+            poisoned.into_inner()
+        }
+    }
+    .take();
     if let Some(worker) = worker {
         let _ = worker.join();
     }
@@ -2357,6 +3043,10 @@ mod tests {
             small_threshold: 64 * 1024,
             hash_mask: LFR_HASH_CRC32,
             next_file_prime_depth: 1,
+            read_stall_timeout_ms: DEFAULT_READ_STALL_TIMEOUT_MS,
+            io_cancel_grace_ms: DEFAULT_IO_CANCEL_GRACE_MS,
+            max_consecutive_file_retries: DEFAULT_MAX_CONSECUTIVE_FILE_RETRIES,
+            file_retry_base_delay_ms: DEFAULT_FILE_RETRY_BASE_DELAY_MS,
         }
     }
 
@@ -2403,6 +3093,91 @@ mod tests {
     }
 
     #[test]
+    fn native_config_rejects_out_of_contract_values() {
+        unsafe fn assert_invalid(label: &str, config: &LfrConfig) {
+            let mut context = null_mut();
+            assert_eq!(
+                unsafe { lfr_create(config, &mut context) },
+                LFR_INVALID,
+                "accepted invalid config: {label}"
+            );
+            assert!(context.is_null());
+        }
+
+        let mut config = native_test_config(4096, 32 * 1024);
+        config.queue_depth = 0;
+        unsafe { assert_invalid("queue depth", &config) };
+
+        let config = native_test_config(4096, 32 * 1024 + 1);
+        unsafe { assert_invalid("unaligned capacity", &config) };
+
+        let mut config = native_test_config(4096, 32 * 1024);
+        config.hash_mask = 1 << 31;
+        unsafe { assert_invalid("hash mask", &config) };
+
+        let mut config = native_test_config(4096, 32 * 1024);
+        config.read_stall_timeout_ms = MIN_READ_STALL_TIMEOUT_MS - 1;
+        unsafe { assert_invalid("stall timeout", &config) };
+
+        let mut config = native_test_config(4096, 32 * 1024);
+        config.max_consecutive_file_retries = MAX_FILE_RETRIES + 1;
+        unsafe { assert_invalid("retry count", &config) };
+
+        let mut config = native_test_config(4096, 32 * 1024);
+        config.small_threshold = 2 * 1024 * 1024 + 1;
+        config.small_inflight_bytes = 2 * 1024 * 1024 + 1;
+        unsafe { assert_invalid("small inflight class", &config) };
+    }
+
+    #[test]
+    fn native_copy_text_distinguishes_buffer_queries_from_invalid_arguments() {
+        let mut written = 0u32;
+        assert_eq!(
+            native_copy_text("abc", null_mut(), 0, &mut written),
+            LFR_BUFFER_TOO_SMALL
+        );
+        assert_eq!(written, 3);
+
+        let mut too_small = [0u8; 3];
+        assert_eq!(
+            native_copy_text("abc", too_small.as_mut_ptr(), 3, &mut written),
+            LFR_BUFFER_TOO_SMALL
+        );
+
+        let mut enough = [0xFFu8; 4];
+        assert_eq!(
+            native_copy_text("abc", enough.as_mut_ptr(), 4, &mut written),
+            LFR_OK
+        );
+        assert_eq!(&enough, b"abc\0");
+        assert_eq!(
+            native_copy_text("abc", null_mut(), 0, null_mut()),
+            LFR_INVALID
+        );
+    }
+
+    #[test]
+    fn poisoned_native_state_is_reported_and_not_silently_reused() {
+        let config = native_test_config(4096, 32 * 1024);
+        unsafe {
+            let context = create_native_test_context(&config);
+            let shared = Arc::clone(&(*context).shared);
+            let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _state = shared.state.lock().unwrap();
+                panic!("intentional state poison");
+            }));
+            assert!(panic_result.is_err());
+
+            let state = native_lock(&shared);
+            assert!(state.done);
+            assert!(state.error.contains("mutex poisoned"));
+            drop(state);
+            assert!(!shared.state.is_poisoned());
+            lfr_destroy(context);
+        }
+    }
+
+    #[test]
     fn completed_requests_are_selected_by_offset() {
         let mut requests = vec![
             ReadRequest::new(1),
@@ -2417,6 +3192,101 @@ mod tests {
         assert_eq!(completed_request_at(&requests, 0), Some(1));
         assert_eq!(completed_request_at(&requests, 4096), Some(2));
         assert_eq!(completed_request_at(&requests, 12288), None);
+    }
+
+    #[test]
+    fn reader_primes_concurrent_current_and_shallow_lookahead_queues() -> io::Result<()> {
+        const CHUNK: usize = 4096;
+        let expected = vec![0x5Au8; CHUNK * 6];
+        let file = TempFile::create("concurrent-prime", &expected)?;
+        let path = file.0.to_str().unwrap();
+
+        let current = prepare_reader_once(
+            path,
+            expected.len() as u64,
+            ReaderPreparationPlan {
+                chunk_size: CHUNK,
+                queue_depth: 4,
+                prime_depth: 4,
+                cancel_event: null_mut(),
+                read_wait_counter: None,
+                io_policy: ReaderIoPolicy::default(),
+            },
+        )?;
+        assert_eq!(current.outstanding, 4);
+        assert_eq!(current.next_submit, (CHUNK * 4) as u64);
+        drop(current);
+
+        let lookahead = prepare_reader_once(
+            path,
+            expected.len() as u64,
+            ReaderPreparationPlan {
+                chunk_size: CHUNK,
+                queue_depth: 4,
+                prime_depth: 1,
+                cancel_event: null_mut(),
+                read_wait_counter: None,
+                io_policy: ReaderIoPolicy::default(),
+            },
+        )?;
+        assert_eq!(lookahead.outstanding, 1);
+        assert_eq!(lookahead.next_submit, CHUNK as u64);
+        drop(lookahead);
+        Ok(())
+    }
+
+    #[test]
+    fn file_retries_are_limited_and_reset_after_progress() {
+        let policy = ReaderIoPolicy::default();
+        let mut retries = 0;
+        assert_eq!(next_file_retry(policy, &mut retries, false), Some(1));
+        assert_eq!(next_file_retry(policy, &mut retries, false), Some(2));
+        assert_eq!(next_file_retry(policy, &mut retries, false), Some(3));
+        assert_eq!(next_file_retry(policy, &mut retries, false), None);
+
+        assert_eq!(next_file_retry(policy, &mut retries, true), Some(1));
+        assert_eq!(retries, 1);
+    }
+
+    #[test]
+    fn file_retry_backoff_is_exponential() {
+        let policy = ReaderIoPolicy::default();
+        assert_eq!(file_retry_delay(policy, 1), Duration::from_secs(1));
+        assert_eq!(file_retry_delay(policy, 2), Duration::from_secs(2));
+        assert_eq!(file_retry_delay(policy, 3), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn only_recoverable_file_read_errors_are_retried() {
+        assert!(retryable_file_read_error(&io::Error::new(
+            io::ErrorKind::TimedOut,
+            "timeout"
+        )));
+        assert!(retryable_file_read_error(&io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "short read"
+        )));
+        assert!(!retryable_file_read_error(&io::Error::new(
+            io::ErrorKind::InvalidData,
+            "length changed"
+        )));
+        assert!(!retryable_file_read_error(&io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "denied"
+        )));
+        assert!(!retryable_file_read_error(&io::Error::from_raw_os_error(
+            ERROR_FILE_NOT_FOUND as i32
+        )));
+        assert!(!retryable_file_read_error(&io::Error::from_raw_os_error(
+            ERROR_SHARING_VIOLATION as i32
+        )));
+        assert!(retryable_file_read_error(&io::Error::from_raw_os_error(
+            windows_sys::Win32::Foundation::ERROR_NETNAME_DELETED as i32
+        )));
+        assert!(!retryable_file_read_error(&io::Error::new(
+            io::ErrorKind::NotFound,
+            "missing without a Windows status"
+        )));
     }
 
     #[test]
@@ -2438,6 +3308,7 @@ mod tests {
                 len as u64,
                 CHUNK,
                 null_mut(),
+                ReaderIoPolicy::default(),
                 |offset, slice| {
                     assert_eq!(offset, actual.len() as u64);
                     actual.extend_from_slice(slice);
@@ -2457,6 +3328,7 @@ mod tests {
             5,
             4096,
             null_mut(),
+            ReaderIoPolicy::default(),
             |_offset, _slice| Ok(()),
         );
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
@@ -2465,7 +3337,14 @@ mod tests {
 
     #[test]
     fn small_file_pool_prefetches_once_within_limits() -> io::Result<()> {
-        let mut pool = SmallFilePool::new(8, 12, 2 * 1024 * 1024, 16, null_mut())?;
+        let mut pool = SmallFilePool::new(
+            8,
+            12,
+            2 * 1024 * 1024,
+            16,
+            null_mut(),
+            ReaderIoPolicy::default(),
+        )?;
         let mut files = Vec::new();
         let mut tasks = Vec::new();
         let mut expected = Vec::new();
@@ -2871,6 +3750,10 @@ mod tests {
             small_threshold: 64 * 1024,
             hash_mask: LFR_HASH_CRC32,
             next_file_prime_depth: 8,
+            read_stall_timeout_ms: DEFAULT_READ_STALL_TIMEOUT_MS,
+            io_cancel_grace_ms: DEFAULT_IO_CANCEL_GRACE_MS,
+            max_consecutive_file_retries: DEFAULT_MAX_CONSECUTIVE_FILE_RETRIES,
+            file_retry_base_delay_ms: DEFAULT_FILE_RETRY_BASE_DELAY_MS,
         };
 
         unsafe {

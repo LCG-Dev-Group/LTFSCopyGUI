@@ -37,6 +37,10 @@ Public Class RustFastReaderProvider
         Public SmallThreshold As ULong
         Public HashMask As UInteger
         Public NextFilePrimeDepth As UInteger
+        Public ReadStallTimeoutMs As UInteger
+        Public IoCancelGraceMs As UInteger
+        Public MaxConsecutiveFileRetries As UInteger
+        Public FileRetryBaseDelayMs As UInteger
     End Structure
 
     <StructLayout(LayoutKind.Sequential)>
@@ -170,10 +174,11 @@ Public Class RustFastReaderProvider
 
     End Class
 
-    Private Const AbiVersion As UInteger = 2UI
+    Private Const AbiVersion As UInteger = 3UI
     Private Const ResultOk As Integer = 0
     Private Const ResultTimeout As Integer = 1
     Private Const ResultDone As Integer = 2
+    Private Const ResultBufferTooSmall As Integer = 3
     Private Const ResultInvalid As Integer = -1
     Private Const ResultError As Integer = -2
     Private Const ResultCancelled As Integer = -3
@@ -197,6 +202,10 @@ Public Class RustFastReaderProvider
     Private Const NativeWaitSliceMs As UInteger = 50UI
     Private Const RefillNoChangeMs As UInteger = 10000UI
     Private Const StallWarningIntervalMs As Long = 5000L
+    Private Const DefaultReadStallTimeoutMs As UInteger = 30000UI
+    Private Const DefaultIoCancelGraceMs As UInteger = 5000UI
+    Private Const DefaultMaxConsecutiveFileRetries As UInteger = 3UI
+    Private Const DefaultFileRetryBaseDelayMs As UInteger = 1000UI
 
     Private ReadOnly _writeList As List(Of LTFSWriter.FileRecord)
     Private ReadOnly _requestedCapacityBytes As Long
@@ -204,6 +213,10 @@ Public Class RustFastReaderProvider
     Private ReadOnly _readChunkSize As Integer
     Private ReadOnly _smallInflightByteLimit As Long
     Private ReadOnly _smallFileThreshold As Long
+    Private ReadOnly _readStallTimeoutMs As UInteger
+    Private ReadOnly _ioCancelGraceMs As UInteger
+    Private ReadOnly _maxConsecutiveFileRetries As UInteger
+    Private ReadOnly _fileRetryBaseDelayMs As UInteger
     Private ReadOnly _configuredFiles As New HashSet(Of Long)()
     Private _handle As NativeReaderHandle
     Private _moduleHandle As IntPtr
@@ -214,16 +227,35 @@ Public Class RustFastReaderProvider
     Private _disposed As Integer
     Private ReadOnly _logSessionId As String = $"fastreader-{Guid.NewGuid().ToString("N").Substring(0, 8)}"
 
-    Public Sub New(writeList As IEnumerable(Of LTFSWriter.FileRecord), blockSize As Integer, capacityBytes As Long)
+    Public Sub New(writeList As IEnumerable(Of LTFSWriter.FileRecord),
+                   blockSize As Integer,
+                   capacityBytes As Long,
+                   Optional readStallTimeoutMs As UInteger = DefaultReadStallTimeoutMs,
+                   Optional ioCancelGraceMs As UInteger = DefaultIoCancelGraceMs,
+                   Optional maxConsecutiveFileRetries As UInteger = DefaultMaxConsecutiveFileRetries,
+                   Optional fileRetryBaseDelayMs As UInteger = DefaultFileRetryBaseDelayMs)
         If IntPtr.Size <> 8 Then Throw New PlatformNotSupportedException("The native fast reader requires an x64 process")
+        If writeList Is Nothing Then Throw New ArgumentNullException(NameOf(writeList))
+        If blockSize <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(blockSize))
+        If capacityBytes < CLng(blockSize) * 2L OrElse capacityBytes Mod blockSize <> 0 Then
+            Throw New ArgumentOutOfRangeException(NameOf(capacityBytes), "Capacity must contain at least two whole slots.")
+        End If
+        If readStallTimeoutMs < 1000UI OrElse readStallTimeoutMs > 3600000UI Then Throw New ArgumentOutOfRangeException(NameOf(readStallTimeoutMs))
+        If ioCancelGraceMs < 100UI OrElse ioCancelGraceMs > 60000UI Then Throw New ArgumentOutOfRangeException(NameOf(ioCancelGraceMs))
+        If maxConsecutiveFileRetries > 10UI Then Throw New ArgumentOutOfRangeException(NameOf(maxConsecutiveFileRetries))
+        If fileRetryBaseDelayMs < 100UI OrElse fileRetryBaseDelayMs > 60000UI Then Throw New ArgumentOutOfRangeException(NameOf(fileRetryBaseDelayMs))
         _writeList = writeList.ToList()
-        _slotSize = Math.Max(1, blockSize)
+        _slotSize = blockSize
         Dim alignedReadChunk = ((CLng(ReadChunkSize) + _slotSize - 1L) \ _slotSize) * _slotSize
         If alignedReadChunk > 64L * 1024L * 1024L Then Throw New ArgumentOutOfRangeException(NameOf(blockSize))
         _readChunkSize = CInt(alignedReadChunk)
-        _requestedCapacityBytes = Math.Max(CLng(_slotSize) * 2L, capacityBytes)
+        _requestedCapacityBytes = capacityBytes
         _smallInflightByteLimit = Math.Max(SmallMinimumThreshold, Math.Min(SmallMaximumInflightBytes, _requestedCapacityBytes))
         _smallFileThreshold = Math.Max(SmallMinimumThreshold, Math.Min(SmallMaximumThreshold, _smallInflightByteLimit \ CInt(SmallActiveFileLimit)))
+        _readStallTimeoutMs = readStallTimeoutMs
+        _ioCancelGraceMs = ioCancelGraceMs
+        _maxConsecutiveFileRetries = maxConsecutiveFileRetries
+        _fileRetryBaseDelayMs = fileRetryBaseDelayMs
     End Sub
 
     Public ReadOnly Property BufferedBytes As Long
@@ -319,7 +351,11 @@ Public Class RustFastReaderProvider
                 .SmallInflightBytes = CULng(_smallInflightByteLimit),
                 .SmallThreshold = CULng(_smallFileThreshold),
                 .HashMask = BuildHashMask(),
-                .NextFilePrimeDepth = NextFilePrimeDepth
+                .NextFilePrimeDepth = NextFilePrimeDepth,
+                .ReadStallTimeoutMs = _readStallTimeoutMs,
+                .IoCancelGraceMs = _ioCancelGraceMs,
+                .MaxConsecutiveFileRetries = _maxConsecutiveFileRetries,
+                .FileRetryBaseDelayMs = _fileRetryBaseDelayMs
             }
             Dim rawContext = IntPtr.Zero
             Dim result = NativeMethods.lfr_create(config, rawContext)
@@ -345,8 +381,12 @@ Public Class RustFastReaderProvider
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")
                     Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
                         Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Lifecycle")
-                            Log.Information("Fast reader initialization completed. RegisteredFileCount={RegisteredFileCount}.",
-                                            registeredFileCount)
+                            Log.Information("Fast reader initialization completed. RegisteredFileCount={RegisteredFileCount} ReadStallTimeoutMs={ReadStallTimeoutMs} IoCancelGraceMs={IoCancelGraceMs} MaxConsecutiveFileRetries={MaxConsecutiveFileRetries} FileRetryBaseDelayMs={FileRetryBaseDelayMs}.",
+                                            registeredFileCount,
+                                            _readStallTimeoutMs,
+                                            _ioCancelGraceMs,
+                                            _maxConsecutiveFileRetries,
+                                            _fileRetryBaseDelayMs)
                         End Using
                     End Using
                 End Using
@@ -1059,7 +1099,7 @@ Public Class RustFastReaderProvider
         Dim buffer(2047) As Byte
         Dim written As UInteger = 0
         Dim result = callNative(buffer, CUInt(buffer.Length), written)
-        If result = ResultInvalid AndAlso written + 1UI > CUInt(buffer.Length) Then
+        If result = ResultBufferTooSmall Then
             ReDim buffer(CInt(written))
             result = callNative(buffer, CUInt(buffer.Length), written)
         End If
@@ -1163,11 +1203,13 @@ Public Class RustFastReaderProvider
 
     Private Function ReadLastError() As String
         If Not HasContext() Then Return String.Empty
-        Dim buffer(4095) As Byte
-        Dim written As UInteger = 0
-        Dim result = NativeMethods.lfr_last_error(Context, buffer, CUInt(buffer.Length), written)
-        If result <> ResultOk OrElse written = 0 Then Return String.Empty
-        Return Encoding.UTF8.GetString(buffer, 0, CInt(written))
+        Dim text As String = Nothing
+        Dim result = TryGetText(Function(buffer As Byte(), capacity As UInteger, ByRef written As UInteger) As Integer
+                                    Return NativeMethods.lfr_last_error(Context, buffer, capacity, written)
+                                End Function,
+                                text)
+        If result <> ResultOk Then Return String.Empty
+        Return If(text, String.Empty)
     End Function
 
     Private Sub EnsureStarted()

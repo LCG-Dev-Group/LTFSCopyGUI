@@ -71,6 +71,10 @@ fn main() -> std::io::Result<()> {
         small_threshold: 2 * 1024 * 1024,
         hash_mask: LFR_HASH_XXH3 | LFR_HASH_XXH128,
         next_file_prime_depth: 1,
+        read_stall_timeout_ms: 30_000,
+        io_cancel_grace_ms: 5_000,
+        max_consecutive_file_retries: 3,
+        file_retry_base_delay_ms: 1_000,
     };
     let mut context: *mut LfrContext = null_mut();
     unsafe {
