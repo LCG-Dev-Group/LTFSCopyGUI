@@ -502,6 +502,9 @@ Public Class TapeImage
                 Else
                     sense = SenseData.NoSense
                 End If
+            Case &H16, &H17, &H1E
+                Response = {}
+                sense = SenseData.NoSense
             Case &H15, &H55 'MODE SELECT
                 Dim PF As Byte = CByte((commandBytes(1) >> 4) And 1)
                 Dim ParamLen As Integer = 0

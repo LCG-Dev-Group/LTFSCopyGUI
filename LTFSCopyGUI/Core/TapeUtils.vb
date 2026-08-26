@@ -626,6 +626,18 @@ Public Class TapeUtils
     End Function
     Public Shared Function Inquiry(handle As IntPtr) As BlockDevice
         SyncLock SCSILockManager.GetLock(handle)
+            If DriverTypeSetting = DriverType.TapeStream Then
+                Dim tapeImage As TapeImage = Nothing
+                TapeStreamMapping.MappingTable.TryGetValue(handle, tapeImage)
+                If tapeImage Is Nothing Then Return Nothing
+
+                Return New BlockDevice With {
+                    .SerialNumber = If(tapeImage.MediumSN, String.Empty),
+                    .VendorId = "LTFSCopyGUI",
+                    .ProductId = "TapeImage"
+                }
+            End If
+
             Dim PageLen As Byte = CByte(SCSIReadParam(handle:=handle, cdbData:=New Byte() {&H12, 1, &H80, 0, 4, 0}, paramLen:=4, senseReport:=Nothing, timeout:=10)(3) + 4)
             If PageLen <> 4 Then
                 Dim PageData() As Byte = SCSIReadParam(handle:=handle, cdbData:=New Byte() {&H12, 1, &H80, 0, PageLen, 0}, paramLen:=PageLen, senseReport:=Nothing, timeout:=10)
@@ -663,14 +675,44 @@ Public Class TapeUtils
 #Region "SCSIOP_READ"
     Public Shared Function ReadBlock(handle As IntPtr, Optional ByRef sense As Byte() = Nothing, Optional ByVal BlockSizeLimit As UInteger = &H80000, Optional ByVal Truncate As Boolean = False) As Byte()
         If DriverTypeSetting = DriverType.TapeStream Then
-            Dim vt As TapeImage = Nothing
-            TapeStreamMapping.MappingTable.TryGetValue(handle, vt)
-            If vt IsNot Nothing Then
-                Return vt.ReadBlock(sense)
-            Else
-                sense = TapeImage.SenseData.NotPresent
-                Return {}
-            End If
+            SyncLock SCSILockManager.GetLock(handle)
+                Dim vt As TapeImage = Nothing
+                TapeStreamMapping.MappingTable.TryGetValue(handle, vt)
+                If vt Is Nothing Then
+                    sense = TapeImage.SenseData.NotPresent
+                    Return {}
+                End If
+
+                Dim data As Byte() = vt.ReadBlock(sense)
+                If data Is Nothing Then data = Array.Empty(Of Byte)()
+
+                Dim blockLimit As Integer = CInt(Math.Min(CLng(BlockSizeLimit), CLng(Math.Max(0, GlobalBlockLimit))))
+                If Truncate AndAlso data.Length > blockLimit Then
+                    Dim truncated As Byte() = Array.Empty(Of Byte)()
+                    If blockLimit > 0 Then
+                        ReDim truncated(blockLimit - 1)
+                        Array.Copy(data, truncated, blockLimit)
+                    End If
+
+                    ' Match the native READ result for a short requested
+                    ' transfer: ILI is informational (sense key 0), while
+                    ' the caller receives exactly the requested bytes.
+                    Dim iliDiffBytes As Integer = blockLimit - data.Length
+                    Dim iliSense As Byte() = TapeImage.SenseData.NoSense.ToArray()
+                    iliSense(0) = &HF0
+                    iliSense(2) = &H20
+                    iliSense(3) = CByte((iliDiffBytes >> 24) And &HFF)
+                    iliSense(4) = CByte((iliDiffBytes >> 16) And &HFF)
+                    iliSense(5) = CByte((iliDiffBytes >> 8) And &HFF)
+                    iliSense(6) = CByte(iliDiffBytes And &HFF)
+                    iliSense(7) = &H10
+                    iliSense(16) = &H2C
+                    iliSense(17) = If(iliDiffBytes > 0, CByte(&H73), CByte(&H72))
+                    sense = iliSense
+                    Return truncated
+                End If
+                Return data
+            End SyncLock
         End If
         Dim senseRaw(63) As Byte
         BlockSizeLimit = CUInt(Math.Min(BlockSizeLimit, GlobalBlockLimit))
@@ -958,7 +1000,9 @@ Public Class TapeUtils
     End Function
     Public Shared Function ReadToFileMark(handle As IntPtr, outputFileName As String, ByVal BlockSizeLimit As UInteger) As Boolean
         SyncLock SCSILockManager.GetLock(handle)
-            Dim param As Byte() = SCSIReadParam(handle, {&H34, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 20)
+            ' The old implementation issued a READ POSITION probe here, but
+            ' never used its result.  It also made TapeImage index loading
+            ' depend on a native SCSI command against a managed pseudo handle.
             Dim buffer As New FileStream(outputFileName, FileMode.Create, FileAccess.ReadWrite, FileShare.Read)
             BlockSizeLimit = CUInt(Math.Min(BlockSizeLimit, GlobalBlockLimit))
             While True
@@ -7445,7 +7489,75 @@ Public Class TapeUtils
             Return sb.ToString
         End Function
     End Class
+
+    Private Shared Function SendTapeImageCommand(handle As IntPtr,
+                                                 cdbData As Byte(),
+                                                 ByRef Data As Byte(),
+                                                 dataLen As Integer,
+                                                 dataIn As Byte,
+                                                 senseReport As Func(Of Byte(), Boolean),
+                                                 cancellationToken As CancellationToken) As Boolean
+        Dim tapeImage As TapeImage = Nothing
+        TapeStreamMapping.MappingTable.TryGetValue(handle, tapeImage)
+        If tapeImage Is Nothing Then
+            Dim notPresentSense As Byte() = TapeImage.SenseData.NotPresent
+            SetLastNativeError(1167)
+            If senseReport IsNot Nothing Then senseReport(notPresentSense)
+            Return False
+        End If
+
+        SyncLock SCSILockManager.GetLock(handle)
+            cancellationToken.ThrowIfCancellationRequested()
+
+            Dim parameter As Byte() = Array.Empty(Of Byte)()
+            If Data IsNot Nothing AndAlso dataLen > 0 Then
+                If dataLen = Data.Length Then
+                    parameter = Data
+                Else
+                    ReDim parameter(dataLen - 1)
+                    Array.Copy(Data, parameter, Math.Min(dataLen, Data.Length))
+                End If
+            End If
+
+            Dim response As Byte() = Array.Empty(Of Byte)()
+            Dim sense As Byte() = Array.Empty(Of Byte)()
+            Dim commandResult As Boolean = tapeImage.HandleSCSICommand(cdbData,
+                                                                        parameter,
+                                                                        dataIn,
+                                                                        Math.Max(0, dataLen),
+                                                                        response,
+                                                                        sense)
+            sense = NormalizeSCSISense(sense, Not commandResult)
+
+            If commandResult AndAlso Data IsNot Nothing AndAlso dataIn <> 1 Then
+                Dim copySource As Byte() = If(dataIn = 0, parameter, response)
+                If copySource IsNot Nothing AndAlso copySource.Length > 0 Then
+                    Array.Copy(copySource, Data, Math.Min(dataLen, Math.Min(Data.Length, copySource.Length)))
+                End If
+            End If
+
+            If senseReport IsNot Nothing Then senseReport(sense)
+
+            Dim senseKey As Integer = If(sense.Length > 2, sense(2) And &HF, 0)
+            If Not commandResult OrElse senseKey <> 0 Then
+                SetLastNativeError(31)
+                Return False
+            End If
+            Return True
+        End SyncLock
+    End Function
+
     Public Shared Function SendSCSICommand(handle As IntPtr, cdbData As Byte(), Optional ByRef Data As Byte() = Nothing, Optional DataIn As Byte = 2, Optional ByVal senseReport As Func(Of Byte(), Boolean) = Nothing, Optional ByVal TimeOut As Integer = 60000, Optional cancellationToken As CancellationToken = Nothing) As Boolean
+        If DriverTypeSetting = DriverType.TapeStream Then
+            Return SendTapeImageCommand(handle,
+                                         cdbData,
+                                         Data,
+                                         If(Data Is Nothing, 0, Data.Length),
+                                         DataIn,
+                                         senseReport,
+                                         cancellationToken)
+        End If
+
         Dim dataBufferPtr As IntPtr
         Dim dataLen As Integer = 0
         If Data IsNot Nothing Then
@@ -7475,6 +7587,10 @@ Public Class TapeUtils
         End Try
     End Function
     Public Shared Function SendSCSICommand(handle As IntPtr, cdbData As Byte(), ByRef Data As Byte(), ByVal DataLen As Integer, Optional DataIn As Byte = 2, Optional ByVal senseReport As Func(Of Byte(), Boolean) = Nothing, Optional ByVal TimeOut As Integer = 60000, Optional cancellationToken As CancellationToken = Nothing) As Boolean
+        If DriverTypeSetting = DriverType.TapeStream Then
+            Return SendTapeImageCommand(handle, cdbData, Data, DataLen, DataIn, senseReport, cancellationToken)
+        End If
+
         Dim dataBufferPtr As IntPtr
         If Data IsNot Nothing Then
             dataBufferPtr = Marshal.AllocHGlobal(DataLen)
@@ -7520,6 +7636,16 @@ Public Class TapeUtils
         End SyncLock
     End Function
     Public Shared Function SendSCSICommandUnmanaged(handle As IntPtr, cdbData As Byte(), Optional ByRef Data As Byte() = Nothing, Optional DataIn As Byte = 2, Optional ByVal senseReport As Func(Of Byte(), Boolean) = Nothing, Optional ByVal TimeOut As Integer = 60000, Optional cancellationToken As CancellationToken = Nothing) As Boolean
+        If DriverTypeSetting = DriverType.TapeStream Then
+            Return SendTapeImageCommand(handle,
+                                         cdbData,
+                                         Data,
+                                         If(Data Is Nothing, 0, Data.Length),
+                                         DataIn,
+                                         senseReport,
+                                         cancellationToken)
+        End If
+
         Dim dataBufferPtr As IntPtr
         Dim dataLen As Integer = 0
         If Data IsNot Nothing Then

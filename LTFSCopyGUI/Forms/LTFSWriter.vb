@@ -3217,7 +3217,9 @@ Public Class LTFSWriter
                 tmpf = tmpfile
             Else
                 tmpf = $"{Application.StartupPath}\LFT_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
-                RestoreFile(tmpf, f)
+                If Not RestoreFile(tmpf, f) Then
+                    Throw New IO.IOException($"Unable to restore {f.name} before moving it to the index partition")
+                End If
             End If
             Dim fs As New IO.FileStream(tmpf, IO.FileMode.Open)
             Dim len As Long = fs.Length
@@ -4279,8 +4281,9 @@ Public Class LTFSWriter
     End Sub
     <Category("LTFSWriter")>
     Public Property RestorePosition As TapeUtils.PositionData
-    Public Sub RestoreFile(FileName As String, FileIndex As ltfsindex.file)
+    Public Function RestoreFile(FileName As String, FileIndex As ltfsindex.file) As Boolean
         If Not FileName.StartsWith("\\") Then FileName = $"\\?\{FileName}"
+        Dim restoreSucceeded As Boolean = True
         Dim FileExist As Boolean = True
         If Not IO.File.Exists(FileName) Then
             FileExist = False
@@ -4304,7 +4307,7 @@ Public Class LTFSWriter
         If FileExist AndAlso Not (FileIndex.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.Fragment, True).ToLower() = "true") Then
             Threading.Interlocked.Increment(CurrentFilesProcessed)
             Threading.Interlocked.Increment(TotalFilesProcessed)
-            Exit Sub
+            Return True
         End If
         IsWriting = False
         If IO.File.Exists(FileName) Then
@@ -4457,6 +4460,7 @@ Public Class LTFSWriter
                                         End While
                                     End If
                                     If (Not ignored) AndAlso (Not My.Settings.LTFSWriter_IgnoreILI) Then
+                                        restoreSucceeded = False
                                         succ = False
                                         SetStatusLight(LWStatus.Err)
                                         Exit Do
@@ -4490,6 +4494,7 @@ Public Class LTFSWriter
                             If StopFlag Then
                                 fs.Close()
                                 IO.File.Delete(FileName)
+                                restoreSucceeded = False
                                 succ = True
                                 Exit Do
                             End If
@@ -4498,13 +4503,18 @@ Public Class LTFSWriter
                         Loop
 
                         If Not succ Then
+                            restoreSucceeded = False
                             PrintMsg($"{FileIndex.name}{My.Resources.ResText_RestoreErr}", ForceLog:=True)
                             SetStatusLight(LWStatus.Err)
                             Exit For
                         End If
-                        If StopFlag Then Exit Sub
+                        If StopFlag Then
+                            restoreSucceeded = False
+                            Exit For
+                        End If
                     Next
                 Catch ex As Exception
+                    restoreSucceeded = False
                     PrintMsg($"{FileIndex.name}{My.Resources.ResText_RestoreErr}{ex.ToString}", ForceLog:=True)
                     Invoke(Sub() MessageBox.Show($"{FileIndex.name}{My.Resources.ResText_RestoreErr}{ex.ToString}"))
                     SetStatusLight(LWStatus.Err)
@@ -4536,9 +4546,20 @@ Public Class LTFSWriter
 
             End Try
         End If
-        Threading.Interlocked.Increment(CurrentFilesProcessed)
-        Threading.Interlocked.Increment(TotalFilesProcessed)
-    End Sub
+        If restoreSucceeded Then
+            Dim outputInfo As New IO.FileInfo(FileName)
+            If Not outputInfo.Exists OrElse outputInfo.Length <> FileIndex.length Then
+                restoreSucceeded = False
+                PrintMsg($"{FileIndex.name}{My.Resources.ResText_RestoreErr}: output length {If(outputInfo.Exists, outputInfo.Length, -1)} should be {FileIndex.length}", ForceLog:=True)
+                SetStatusLight(LWStatus.Err)
+            End If
+        End If
+        If restoreSucceeded Then
+            Threading.Interlocked.Increment(CurrentFilesProcessed)
+            Threading.Interlocked.Increment(TotalFilesProcessed)
+        End If
+        Return restoreSucceeded
+    End Function
     Private Class TarTapeRangeReader
         Private ReadOnly _writer As LTFSWriter
         Private ReadOnly _source As ltfsindex.file
@@ -4832,6 +4853,8 @@ Public Class LTFSWriter
 
         Dim th As New Threading.Thread(
                 Sub()
+                    Dim extractionSucceeded As Boolean = False
+                    Dim extractionCanceled As Boolean = False
                     Try
                         CurrentFilesProcessed = 0
                         CurrentBytesProcessed = 0
@@ -4850,27 +4873,41 @@ Public Class LTFSWriter
                         RestorePosition = New TapeUtils.PositionData(driveHandle)
                         For Each FileIndex As ltfsindex.file In flist
                             Dim FileName As String = IO.Path.Combine(BasePath, FileIndex.name)
-                            RestoreFile(FileName, FileIndex)
-                            If StopFlag Then
-                                PrintMsg(My.Resources.ResText_OpCancelled)
-                                SetStatusLight(LWStatus.Idle)
-                                LockGUI(False)
-                                Exit Sub
+                            If Not RestoreFile(FileName, FileIndex) Then
+                                If StopFlag Then
+                                    extractionCanceled = True
+                                    Exit Try
+                                End If
+                                Throw New IO.IOException($"Unable to restore {FileIndex.name}")
                             End If
                         Next
+                        extractionSucceeded = True
                     Catch ex As Exception
                         PrintMsg($"{My.Resources.ResText_RestoreErr}{ex.ToString}", ForceLog:=True)
                         SetStatusLight(LWStatus.Err)
                     End Try
-                    TapeUtils.AllowMediumRemoval(driveHandle)
-                    TapeUtils.ReleaseUnit(driveHandle)
+                    Try
+                        TapeUtils.AllowMediumRemoval(driveHandle)
+                    Catch ex As Exception
+                        PrintMsg($"SCSI allow medium removal failed: {ex}", Warning:=True, LogOnly:=True)
+                    End Try
+                    Try
+                        TapeUtils.ReleaseUnit(driveHandle)
+                    Catch ex As Exception
+                        PrintMsg($"SCSI release unit failed: {ex}", Warning:=True, LogOnly:=True)
+                    End Try
                     StopFlag = False
                     UnwrittenSizeOverrideValue = 0
                     UnwrittenCountOverrideValue = 0
                     LockGUI(False)
-                    PrintMsg(My.Resources.ResText_RestFin)
-                    SetStatusLight(LWStatus.Succ)
-                    Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_RestFin))
+                    If extractionSucceeded Then
+                        PrintMsg(My.Resources.ResText_RestFin)
+                        SetStatusLight(LWStatus.Succ)
+                        Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_RestFin))
+                    ElseIf extractionCanceled Then
+                        PrintMsg(My.Resources.ResText_OpCancelled)
+                        SetStatusLight(LWStatus.Idle)
+                    End If
                 End Sub)
         th.Start()
     End Sub
@@ -4890,6 +4927,8 @@ Public Class LTFSWriter
         Dim FileList As New List(Of FileRecord)
         Dim th As New Threading.Thread(
                 Sub()
+                    Dim extractionSucceeded As Boolean = False
+                    Dim extractionCanceled As Boolean = False
                     PrintMsg(My.Resources.ResText_Restoring)
                     SetStatusLight(LWStatus.Busy)
                     Try
@@ -4959,30 +4998,41 @@ Public Class LTFSWriter
                         For Each fr As FileRecord In FileList
                             c += 1
                             PrintMsg($"{My.Resources.ResText_Restoring} [{c}/{FileList.Count}] {fr.File.name}", False, $"{My.Resources.ResText_Restoring} [{c}/{FileList.Count}] {fr.SourcePath}")
-                            RestoreFile(fr.SourcePath, fr.File)
-                            If StopFlag Then
-                                PrintMsg(My.Resources.ResText_OpCancelled)
-                                SetStatusLight(LWStatus.Idle)
-                                Exit Try
+                            If Not RestoreFile(fr.SourcePath, fr.File) Then
+                                If StopFlag Then
+                                    extractionCanceled = True
+                                    Exit Try
+                                End If
+                                Throw New IO.IOException($"Unable to restore {fr.File.name}")
                             End If
                         Next
-                        PrintMsg(My.Resources.ResText_RestFin)
-                        SetStatusLight(LWStatus.Succ)
+                        extractionSucceeded = True
                     Catch ex As Exception
                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString}"))
                         PrintMsg($"{My.Resources.ResText_RestoreErr}{ex.ToString}", ForceLog:=True)
                         SetStatusLight(LWStatus.Err)
                     End Try
-                    SyncLock OperationLock
-                        SyncLock TapeUtils.GetSCSIOperationLock(driveHandle)
-                            TapeUtils.AllowMediumRemoval(driveHandle)
-                            TapeUtils.ReleaseUnit(driveHandle)
+                    Try
+                        SyncLock OperationLock
+                            SyncLock TapeUtils.GetSCSIOperationLock(driveHandle)
+                                TapeUtils.AllowMediumRemoval(driveHandle)
+                                TapeUtils.ReleaseUnit(driveHandle)
+                            End SyncLock
                         End SyncLock
-                    End SyncLock
+                    Catch ex As Exception
+                        PrintMsg($"SCSI cleanup failed: {ex}", Warning:=True, LogOnly:=True)
+                    End Try
 
                     UnwrittenSizeOverrideValue = 0
                     UnwrittenCountOverrideValue = 0
                     LockGUI(False)
+                    If extractionSucceeded Then
+                        PrintMsg(My.Resources.ResText_RestFin)
+                        SetStatusLight(LWStatus.Succ)
+                    ElseIf extractionCanceled Then
+                        PrintMsg(My.Resources.ResText_OpCancelled)
+                        SetStatusLight(LWStatus.Idle)
+                    End If
                 End Sub)
         LockGUI()
         th.Start()
@@ -7198,7 +7248,13 @@ Public Class LTFSWriter
                         TapeStreamMapping.MappingTable(driveHandle).ReOpen()
                     End If
                     SetStatusLight(LWStatus.Busy)
-                    RefreshCapacity()
+                    Try
+                        RefreshCapacity()
+                    Catch ex As Exception
+                        ' Capacity/log pages are display metadata.  They must
+                        ' not prevent the actual TapeImage index from loading.
+                        PrintMsg($"[读取索引] Capacity refresh skipped: {ex.Message}", Warning:=True, LogOnly:=True)
+                    End Try
                     Dim Sense0 As Byte() = {}
                     Dim retrycount As Integer = 5
                     While (retrycount > 0) AndAlso ((Sense0 Is Nothing) OrElse (Sense0.Length < 3) OrElse (Sense0(2) <> 0))
@@ -7215,7 +7271,13 @@ Public Class LTFSWriter
                         ExtraPartitionCount = CByte(TapeStreamMapping.MappingTable(driveHandle).PartitionCount - 1)
                     End If
                     TapeUtils.GlobalBlockLimit = CInt(TapeUtils.ReadBlockLimits(driveHandle).MaximumBlockLength)
-                    TapeUtils.FromFile(My.Settings.driveSettingFile)
+                    Try
+                        TapeUtils.FromFile(My.Settings.driveSettingFile)
+                    Catch ex As Exception
+                        ' Drive settings are optional for reading an existing
+                        ' index; keep the failure in the log and continue.
+                        PrintMsg($"[读取索引] Drive settings skipped: {ex.Message}", Warning:=True, LogOnly:=True)
+                    End Try
                     If IO.File.Exists(My.Settings.encKeyFile) Then
                         Dim key As String = (IO.File.ReadAllText(My.Settings.encKeyFile))
                         Dim newkey As Byte() = IOManager.HexStringToByteArray(key)
@@ -7279,7 +7341,14 @@ Public Class LTFSWriter
                         DataPartition = CByte((IndexPartition + 1) Mod 2)
                     End If
 
-                    Barcode = TapeUtils.ReadBarcode(driveHandle)
+                    Try
+                        Barcode = TapeUtils.ReadBarcode(driveHandle)
+                    Catch ex As Exception
+                        ' Barcode is only a display/backup-name hint.  The
+                        ' VOL1 header below remains a valid fallback.
+                        Barcode = String.Empty
+                        PrintMsg($"[读取索引] Barcode read skipped: {ex.Message}", Warning:=True, LogOnly:=True)
+                    End Try
                     If Barcode Is Nothing OrElse Barcode = "" Then
                         Barcode = header.Substring(4, 6).TrimEnd(" "c) & GenAbbr
                     End If
@@ -7381,7 +7450,11 @@ Public Class LTFSWriter
                                   ToolStripStatusLabel1.ToolTipText = $"{My.Resources.ResText_Barcode}:{ToolStripStatusLabel1.Text}{vbCrLf}{My.Resources.ResText_BlkSize}:{plabel.blocksize}"
                               End Sub)
                     RefreshDisplay()
-                    RefreshCapacity()
+                    Try
+                        RefreshCapacity()
+                    Catch ex As Exception
+                        PrintMsg($"[读取索引] Final capacity refresh skipped: {ex.Message}", Warning:=True, LogOnly:=True)
+                    End Try
 
                     PrintMsg(My.Resources.ResText_IRSucc)
                     SetStatusLight(LWStatus.Succ)
@@ -8091,8 +8164,10 @@ Public Class LTFSWriter
     Private Sub ToolStripDropDownButton1_Click(sender As Object, e As EventArgs) Handles ToolStripDropDownButton1.Click
         Pause = True
         Dim immediateStop As Boolean = MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_CancelConfirm, My.Resources.ResText_Warning, MessageBoxButtons.OKCancel) = DialogResult.OK
+        ' Both choices request a stop.  Without immediate cancellation the
+        ' currently executing SCSI command is allowed to finish first.
+        StopFlag = True
         If immediateStop Then
-            StopFlag = True
             CancelPendingSCSICommands()
         End If
         Pause = False
@@ -10332,7 +10407,9 @@ Public Class LTFSWriter
                              Try
                                  Dim tmpf As String = $"{Application.StartupPath}\LDS_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
                                  RestorePosition = New TapeUtils.PositionData(driveHandle)
-                                 RestoreFile(tmpf, f)
+                                 If Not RestoreFile(tmpf, f) Then
+                                     Throw New IO.IOException($"Unable to restore {f.name} while updating the index")
+                                 End If
                                  Dim dindex As ltfsindex.directory = ltfsindex.directory.FromFile(tmpf)
                                  d.contents._file.Remove(f)
                                  d.contents._directory.Add(dindex)
@@ -10402,7 +10479,9 @@ Public Class LTFSWriter
                                     FileIndex.extentinfo.Clear()
                                     FileIndex.extentinfo.Add(New ltfsindex.file.extent With {.partition = CType(IndexPartition, ltfsindex.PartitionLabel)})
                                 Else
-                                    RestoreFile(tmpf, FileIndex)
+                                    If Not RestoreFile(tmpf, FileIndex) Then
+                                        Throw New IO.IOException($"Unable to restore {FileIndex.name} while updating the index")
+                                    End If
                                     FileIndex.TempObj = tmpf
                                 End If
                             Next
@@ -12191,7 +12270,9 @@ Public Class LTFSWriter
                         For Each fr As FileRecord In FileList
                             c += 1
                             PrintMsg($"{My.Resources.ResText_Restoring} [{c}/{FileList.Count}] {fr.File.name}", False, $"{My.Resources.ResText_Restoring} [{c}/{FileList.Count}] {fr.SourcePath}")
-                            IOManager.CreateSparceFile(fr.SourcePath, fr.File.length)
+                            If Not IOManager.CreateSparceFile(fr.SourcePath, fr.File.length) Then
+                                Throw New IO.IOException($"Unable to create output file {fr.SourcePath}")
+                            End If
                             If StopFlag Then
                                 PrintMsg(My.Resources.ResText_OpCancelled)
                                 SetStatusLight(LWStatus.Idle)
