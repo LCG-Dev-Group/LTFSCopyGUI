@@ -94,7 +94,7 @@ Public Class ModernCommandButton
 
     Protected Overrides Sub OnPaint(e As PaintEventArgs)
         Dim g = e.Graphics
-        MyBase.OnPaintBackground(e)
+        OnPaintBackground(e)
         g.SmoothingMode = SmoothingMode.AntiAlias
         g.PixelOffsetMode = PixelOffsetMode.HighQuality
 

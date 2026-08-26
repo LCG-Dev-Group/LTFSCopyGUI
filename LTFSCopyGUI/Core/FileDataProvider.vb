@@ -476,7 +476,7 @@ Public Class FileDataProvider
                     Dim n As Integer = Await fs.ReadAsync(seg.Array, seg.Offset, seg.Count, ct).ConfigureAwait(False)
                     If n = 0 Then Exit While
                     RingBuffer.AdvanceWrite(CInt(Math.Min(n, fr.SegmentLength - totalReadLen)))
-                    Threading.Interlocked.Add(totalReadLen, n)
+                    Interlocked.Add(totalReadLen, n)
                 End While
             Else
                 Dim minSize As Integer = 64 * 1024
@@ -491,7 +491,7 @@ Public Class FileDataProvider
                     Dim n = Await fs.ReadAsync(seg.Array, seg.Offset, cap, ct).ConfigureAwait(False)
                     If n = 0 Then Exit While
                     _writer.Advance(CInt(Math.Min(n, fr.SegmentLength - totalReadLen)))
-                    Threading.Interlocked.Add(totalReadLen, n)
+                    Interlocked.Add(totalReadLen, n)
                     Dim result = Await _writer.FlushAsync(ct).ConfigureAwait(False)
                     If result.IsCanceled OrElse result.IsCompleted Then Exit While
                 End While

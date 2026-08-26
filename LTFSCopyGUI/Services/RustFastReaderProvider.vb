@@ -285,7 +285,7 @@ Public Class RustFastReaderProvider
             End Using
             Throw New DllNotFoundException($"{NativeMethods.DllName} not found: {dllPath}")
         End If
-        Dim loadResult = Global.LTFSCopyGUI.Native.NativeMethods.LoadNativeLibrary(dllPath)
+        Dim loadResult = Native.NativeMethods.LoadNativeLibrary(dllPath)
         _moduleHandle = loadResult.Handle
         If Not loadResult.Succeeded Then
             Dim nativeError = loadResult.Win32Error
@@ -366,7 +366,7 @@ Public Class RustFastReaderProvider
                 _handle = Nothing
             End If
             If _moduleHandle <> IntPtr.Zero Then
-                Dim freeResult = Global.LTFSCopyGUI.Native.NativeMethods.FreeLibrary(_moduleHandle)
+                Dim freeResult = Native.NativeMethods.FreeLibrary(_moduleHandle)
                 If Not freeResult.Succeeded Then
                     Log.Warning("Fast reader native DLL cleanup failed. NativeDll={NativeDll} NativeError={NativeError}.",
                                 NativeMethods.DllName,
@@ -1026,7 +1026,7 @@ Public Class RustFastReaderProvider
             Throw
         Finally
             If _moduleHandle <> IntPtr.Zero Then
-                Dim freeResult = Global.LTFSCopyGUI.Native.NativeMethods.FreeLibrary(_moduleHandle)
+                Dim freeResult = Native.NativeMethods.FreeLibrary(_moduleHandle)
                 If Not freeResult.Succeeded Then
                     Log.Warning("Fast reader native DLL cleanup failed. NativeDll={NativeDll} NativeError={NativeError}.",
                                 NativeMethods.DllName,

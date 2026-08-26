@@ -194,9 +194,9 @@ Public Class LTFSConfigurator
                                             End If
                                             If Not My.Settings.Application_License.ToLower().Contains("dev") AndAlso My.Settings.TapeUtils_DriverType <> TapeUtils.DriverType.ZBCDevice Then TabControl1.TabPages.Remove(TabPageZBC)
                                             LoadComplete = True
-                                             SelectedIndex = ListBox1.SelectedIndex
-                                         End Sub)
-                                  refreshSucceeded = True
+                                            SelectedIndex = ListBox1.SelectedIndex
+                                        End Sub)
+                                 refreshSucceeded = True
                              Finally
                                  Threading.Monitor.Exit(UILock)
                              End Try
@@ -1508,7 +1508,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
     End Sub
 
     Private Sub Button27_Click(sender As Object, e As EventArgs) Handles ButtonLTFSWriter.Click
-        ApplicationNavigation.ShowWriter(ConfTapeDrive)
+        ShowWriter(ConfTapeDrive)
     End Sub
 
     Private Sub ButtonDebugReleaseUnit_Click(sender As Object, e As EventArgs) Handles ButtonDebugReleaseUnit.Click
@@ -1571,7 +1571,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
     End Sub
 
     Private Sub Button5_Click(sender As Object, e As EventArgs) Handles ButtonChangerTool.Click
-        ApplicationNavigation.ShowChangerTool()
+        ShowChangerTool()
     End Sub
 
     Private Sub Button11_Click(sender As Object, e As EventArgs) Handles ButtonResetLogPage.Click
@@ -2018,7 +2018,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                          Dim RERLHeader As Byte()
                          Dim WERLPage As Byte()
                          Dim RERLPage As Byte()
-                          SyncLock TapeUtils.GetSCSIOperationLock(ConfTapeDrive)
+                         SyncLock TapeUtils.GetSCSIOperationLock(ConfTapeDrive)
                              WERLHeader = TapeUtils.SCSIReadParam(ConfTapeDrive, {&H1C, &H1, &H88, &H0, &H4, &H0}, 4)
                              If WERLHeader.Length <> 4 Then Exit Try
                              RERLHeader = TapeUtils.SCSIReadParam(ConfTapeDrive, {&H1C, &H1, &H87, &H0, &H4, &H0}, 4)
@@ -2148,11 +2148,11 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
     End Sub
 
     Private Sub 在当前进程运行ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 在当前进程运行ToolStripMenuItem.Click
-        ApplicationNavigation.ShowWriterIntraProcess(ConfTapeDrive)
+        ShowWriterIntraProcess(ConfTapeDrive)
     End Sub
 
     Private Sub 不读取索引ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 不读取索引ToolStripMenuItem.Click
-        ApplicationNavigation.ShowWriter(ConfTapeDrive, offlineMode:=True)
+        ShowWriter(ConfTapeDrive, offlineMode:=True)
     End Sub
 
     Private Sub BrowseBinaryFileToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles BrowseBinaryFileToolStripMenuItem.Click

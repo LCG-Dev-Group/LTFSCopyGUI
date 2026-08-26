@@ -39,7 +39,7 @@ Public Class SettingImportExport
     Public Property MySettings As SerializableDictionary(Of String, String)
         Get
             Dim result As New SerializableDictionary(Of String, String)
-            For Each setting As System.Configuration.SettingsPropertyValue In My.Settings.PropertyValues
+            For Each setting As Configuration.SettingsPropertyValue In My.Settings.PropertyValues
                 If setting.PropertyValue IsNot Nothing Then result.Add(setting.Name, SerializationHelper.GetSerializeString(setting.PropertyValue))
             Next
             Return result
@@ -736,17 +736,17 @@ Public Module GlobCollector
 
     Private Function EnumerateNetworkFiles(root As DirectoryInfo, skipSymlink As Boolean) As List(Of FileInfo)
         Const WorkerCount As Integer = 16
-        Dim queue As New Collections.Concurrent.ConcurrentQueue(Of PendingGlobDirectory)
-        Dim files As New Collections.Concurrent.ConcurrentBag(Of FileInfo)
-        Dim failures As New Collections.Concurrent.ConcurrentQueue(Of Exception)
+        Dim queue As New Concurrent.ConcurrentQueue(Of PendingGlobDirectory)
+        Dim files As New Concurrent.ConcurrentBag(Of FileInfo)
+        Dim failures As New Concurrent.ConcurrentQueue(Of Exception)
         Dim pending As Integer = 1
         Dim finished As Integer = 0
         queue.Enqueue(New PendingGlobDirectory(root))
 
         Using wake As New Threading.AutoResetEvent(False)
-            Dim workers(WorkerCount - 1) As Threading.Tasks.Task
+            Dim workers(WorkerCount - 1) As Task
             For i As Integer = 0 To workers.Length - 1
-                workers(i) = Threading.Tasks.Task.Run(
+                workers(i) = Task.Run(
                     Sub()
                         While Threading.Volatile.Read(finished) = 0
                             Dim current As PendingGlobDirectory = Nothing
@@ -787,7 +787,7 @@ Public Module GlobCollector
                         End While
                     End Sub)
             Next
-            Threading.Tasks.Task.WaitAll(workers)
+            Task.WaitAll(workers)
         End Using
 
         If Not failures.IsEmpty Then Throw New AggregateException(failures)
@@ -1193,7 +1193,7 @@ Partial Public Class ApplicationWheels
     End Property
     Public Shared Function TryExecute(ByVal command As Func(Of Byte()), Optional ByVal AutoRetryCount As Integer = 0) As Boolean
         Dim succ As Boolean = False
-        Dim operationId As String = $"scsi-{Global.System.Guid.NewGuid().ToString("N").Substring(0, 8)}"
+        Dim operationId As String = $"scsi-{System.Guid.NewGuid().ToString("N").Substring(0, 8)}"
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(ApplicationWheels))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "SCSI")
                 Using operationScope As IDisposable = LogContext.PushProperty("OperationId", operationId)

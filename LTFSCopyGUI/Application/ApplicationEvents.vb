@@ -32,9 +32,9 @@ Namespace My
             freeResult.ThrowIfFailed("FreeConsole failed.")
         End Sub
         Public Function CheckUAC(e As StartupEventArgs) As Boolean
-            If ApplicationElevation.IsAdministrator Then Return True
+            If IsAdministrator Then Return True
 
-            Dim elevatedProcessStarted = ApplicationElevation.StartElevated(e.CommandLine)
+            Dim elevatedProcessStarted = StartElevated(e.CommandLine)
             e.Cancel = True
 
             If elevatedProcessStarted Then
@@ -42,7 +42,7 @@ Namespace My
             Else
                 Serilog.Log.Information("Startup canceled because the elevated application process was not started.")
             End If
-            ApplicationElevation.ExitCurrentProcess()
+            ExitCurrentProcess()
             Return False
         End Function
 
@@ -90,7 +90,7 @@ Namespace My
                     writerSessionId = e.CommandLine(writerProcessArgumentIndex + 2)
                 End If
             End If
-            AppLogging.Initialize(logDirectory, Settings.LTFSWriter_LogEnabled, writerSessionId)
+            Initialize(logDirectory, Settings.LTFSWriter_LogEnabled, writerSessionId)
             If Not Directory.Exists(Settings.cfgPath) Then Directory.CreateDirectory(Settings.cfgPath)
             '旧设定迁移
             If File.Exists(Path.Combine(Windows.Forms.Application.StartupPath, "lang.ini")) Then
@@ -197,7 +197,7 @@ Namespace My
                             For routeIndex As Integer = i + 2 To param.Count - 1
                                 routeArguments.Add(param(routeIndex))
                             Next
-                            ApplicationNavigation.ScheduleStartupNavigation(param(i + 1), routeArguments)
+                            ScheduleStartupNavigation(param(i + 1), routeArguments)
                             MainForm = Form1
                             Exit For
                         Case "-writer-process"
@@ -223,7 +223,7 @@ Namespace My
                                 Dim TapeDrive As String = NormalizeTapeDrive(param(i + 1))
                                 Dim routeArguments As New List(Of String) From {TapeDrive}
                                 If Not IndexRead Then routeArguments.Add("offline")
-                                ApplicationNavigation.ScheduleStartupNavigation("writer", routeArguments)
+                                ScheduleStartupNavigation("writer", routeArguments)
                                 MainForm = Form1
                                 Exit For
                             End If

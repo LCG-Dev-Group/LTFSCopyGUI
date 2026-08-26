@@ -354,7 +354,7 @@ Public Class FTPService
         Private Shared Function GetEntryTime(ParamArray values() As String) As Date
             For Each value As String In values
                 If Not String.IsNullOrWhiteSpace(value) Then
-                    Return FTPService.ParseTimeStamp(value).ToUniversalTime()
+                    Return ParseTimeStamp(value).ToUniversalTime()
                 End If
             Next
             Return Date.UtcNow
@@ -471,7 +471,7 @@ Public Class FTPService
             Throw
         Finally
             SyncLock _lifecycleSync
-                If Object.ReferenceEquals(_stopTokenSource, stopTokenSource) Then
+                If ReferenceEquals(_stopTokenSource, stopTokenSource) Then
                     _stopTokenSource = Nothing
                     _serverTask = Nothing
                     _server = Nothing

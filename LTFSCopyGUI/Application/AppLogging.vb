@@ -141,7 +141,7 @@ Public Module AppLogging
                         blockWhenFull:=False)
                 End Sub)
 
-            Serilog.Log.Logger = configuration.CreateLogger()
+            Log.Logger = configuration.CreateLogger()
             _initialized = True
 
             If Not _processExitRegistered Then
@@ -156,7 +156,7 @@ Public Module AppLogging
         Dim configuredLevel = InformationLevel.MinimumLevel
         Try
             InformationLevel.MinimumLevel = LogEventLevel.Information
-            Serilog.Log.Information("Logging initialized. LogDirectory={LogDirectory}", _logDirectory)
+            Log.Information("Logging initialized. LogDirectory={LogDirectory}", _logDirectory)
         Finally
             InformationLevel.MinimumLevel = configuredLevel
         End Try
@@ -169,7 +169,7 @@ Public Module AppLogging
     End Sub
 
     Private Sub OnProcessExit(sender As Object, e As EventArgs)
-        Serilog.Log.CloseAndFlush()
+        Log.CloseAndFlush()
     End Sub
 
     Private Function ResolveLogDirectory(requestedDirectory As String) As String

@@ -108,7 +108,7 @@ Public Module ApplicationNavigation
         If Not EnsureAdministrator("writer", normalizedTapeDrive, If(offlineMode, "offline", String.Empty)) Then Return
 
         Dim sessionId = $"writer-{Guid.NewGuid().ToString("N").Substring(0, 8)}"
-        Dim writerProcess = ApplicationElevation.StartWriterProcess(normalizedTapeDrive, sessionId, offlineMode)
+        Dim writerProcess = StartWriterProcess(normalizedTapeDrive, sessionId, offlineMode)
         If writerProcess Is Nothing Then Return
 
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(ApplicationNavigation))
@@ -154,7 +154,7 @@ Public Module ApplicationNavigation
     End Sub
 
     Private Function EnsureAdministrator(route As String, ParamArray routeArguments() As String) As Boolean
-        If ApplicationElevation.IsAdministrator Then
+        If IsAdministrator Then
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(ApplicationNavigation))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Navigation")
                     Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "PrivilegeCheck")
@@ -172,7 +172,7 @@ Public Module ApplicationNavigation
             Next
         End If
 
-        Dim elevationStarted = ApplicationElevation.StartElevated(arguments)
+        Dim elevationStarted = StartElevated(arguments)
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(ApplicationNavigation))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Navigation")
                 Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "PrivilegeCheck")
@@ -181,7 +181,7 @@ Public Module ApplicationNavigation
             End Using
         End Using
         If elevationStarted Then
-            ApplicationElevation.ExitCurrentProcess()
+            ExitCurrentProcess()
         End If
         Return False
     End Function

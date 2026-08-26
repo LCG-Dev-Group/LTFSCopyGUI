@@ -545,7 +545,7 @@ Public Class Form1
     End Sub
 
     Private Sub Button10_Click(sender As Object, e As EventArgs) Handles Button10.Click
-        ApplicationNavigation.ShowConfigurator()
+        ShowConfigurator()
     End Sub
 
     Private Sub 查找ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 查找ToolStripMenuItem.Click
@@ -865,7 +865,7 @@ Public Class Form1
     <TypeConverter(GetType(ListTypeDescriptor(Of List(Of TapeUtils.BlockDevice), TapeUtils.BlockDevice)))>
     Dim DevList As List(Of TapeUtils.BlockDevice)
     Private _deviceScanInProgress As Boolean
-    Public Async Function RefreshDeviceList() As Threading.Tasks.Task
+    Public Async Function RefreshDeviceList() As Task
         If _deviceScanInProgress Then
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(Form1))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Device")
@@ -897,7 +897,7 @@ Public Class Form1
         Try
             ' Device enumeration performs SetupAPI, device opens and SCSI Inquiry calls.
             ' Keep all of that work off the UI thread so the first form can paint.
-            Dim scannedDevices As List(Of TapeUtils.BlockDevice) = Await Threading.Tasks.Task.Run(
+            Dim scannedDevices As List(Of TapeUtils.BlockDevice) = Await Task.Run(
                 Function() TapeUtils.GetTapeDriveList())
 
             If IsDisposed OrElse Disposing Then Return
@@ -965,9 +965,9 @@ Public Class Form1
                 End Using
             End Using
         End Using
-        If Not ApplicationElevation.IsAdministrator Then
+        If Not IsAdministrator Then
             If MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_UACConfirm, My.Resources.ResText_Warning, MessageBoxButtons.OKCancel) = DialogResult.Cancel Then Exit Sub
-            If ApplicationElevation.StartElevated() Then
+            If StartElevated() Then
                 Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(Form1))
                     Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Device")
                         Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
@@ -977,7 +977,7 @@ Public Class Form1
                         End Using
                     End Using
                 End Using
-                ApplicationElevation.ExitCurrentProcess()
+                ExitCurrentProcess()
             End If
             Exit Sub
         End If
@@ -989,11 +989,11 @@ Public Class Form1
     End Sub
 
     Private Sub Button13_Click(sender As Object, e As EventArgs) Handles Button13.Click
-        ApplicationNavigation.ShowTapeCopy()
+        ShowTapeCopy()
     End Sub
 
     Private Sub Button14_Click(sender As Object, e As EventArgs) Handles Button14.Click
-        ApplicationNavigation.ShowChangerTool()
+        ShowChangerTool()
     End Sub
 
     Private Async Sub Button27_Click(sender As Object, e As EventArgs) Handles Button27.Click
@@ -1013,7 +1013,7 @@ Public Class Form1
             End Using
             TapeUtils.CheckSwitchConfig(device)
             My.Settings.Save()
-            ApplicationNavigation.ShowWriter(device.DevicePath)
+            ShowWriter(device.DevicePath)
         End If
     End Sub
 
