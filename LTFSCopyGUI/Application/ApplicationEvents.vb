@@ -61,6 +61,18 @@ Namespace My
         End Function
 
         Private Sub MyApplication_Startup(sender As Object, e As StartupEventArgs) Handles Me.Startup
+            If e.CommandLine.Count <> 0 Then
+                Dim param As String = e.CommandLine(0)
+                If param.StartsWith("/") Then param = "-" & param.TrimStart("/"c)
+                Select Case param
+                    Case "-s", "-open", "-writer-process", "-t", "-f", "-c", "-l", "-copy"
+                    Case "-rb", "-wb", "-raw", "-mkltfs"
+                        If Not CheckUAC(e) Then Return
+                        InitConsole()
+                    Case Else
+                        InitConsole()
+                End Select
+            End If
             Dim writerProcessArgumentIndex As Integer = -1
             For commandIndex As Integer = 0 To e.CommandLine.Count - 1
                 Dim commandArgument As String = e.CommandLine(commandIndex)
@@ -70,7 +82,6 @@ Namespace My
                     Exit For
                 End If
             Next
-
             Dim logDirectory As String = Path.Combine(Windows.Forms.Application.StartupPath, "log")
             Dim writerSessionId As String = Nothing
             If writerProcessArgumentIndex >= 0 Then
@@ -245,7 +256,6 @@ Namespace My
                             Exit For
                         Case "-rb"
                             If Not CheckUAC(e) Then Return
-                            InitConsole()
                             If i < param.Count - 1 Then
                                 Dim TapeDrive As String = param(i + 1)
                                 If TapeDrive.StartsWith("TAPE") Then
@@ -264,7 +274,6 @@ Namespace My
                             End If
                         Case "-wb"
                             If Not CheckUAC(e) Then Return
-                            InitConsole()
                             If i < param.Count - 2 Then
                                 Dim TapeDrive As String = param(i + 1)
                                 If TapeDrive.StartsWith("TAPE") Then
@@ -287,7 +296,6 @@ Namespace My
                             End If
                         Case "-raw"
                             If Not CheckUAC(e) Then Return
-                            InitConsole()
                             If i < param.Count - 4 Then
                                 Dim TapeDrive As String = param(i + 1)
                                 If TapeDrive.StartsWith("TAPE") Then
@@ -340,7 +348,6 @@ dataDir:{dataDir}
                             End If
                         Case "-mkltfs"
                             If Not CheckUAC(e) Then Return
-                            InitConsole()
                             'Console.WriteLine($"{i} {param.Count}")
                             If i < param.Count - 1 Then
                                 Dim TapeDrive As String = param(i + 1)
@@ -414,7 +421,6 @@ dataDir:{dataDir}
                             If i < param.Count - 2 Then
                                 Dim Num1 As Byte = Byte.Parse(param(i + 1))
                                 Dim Num2 As Byte = Byte.Parse(param(i + 2))
-                                InitConsole()
                                 Console.WriteLine($"{TapeUtils.GX256.Times(Num1, Num2)}")
                                 CloseConsole()
                                 End
@@ -431,7 +437,6 @@ dataDir:{dataDir}
                                 Else
                                     Num1 = IOManager.HexStringToByteArray(param(i + 1))
                                 End If
-                                InitConsole()
                                 Console.WriteLine($"{TapeUtils.Byte2Hex(TapeUtils.GX256.CalcCRC(Num1))}")
                                 CloseConsole()
                                 End
@@ -442,7 +447,6 @@ dataDir:{dataDir}
                                 If ltext.StartsWith("""") AndAlso ltext.EndsWith("""") Then
                                     ltext = ltext.Substring(1, ltext.Length - 2)
                                 End If
-                                InitConsole()
                                 Dim rsa As New Security.Cryptography.RSACryptoServiceProvider()
 
                                 If File.Exists(Settings.licKeyFile) Then
@@ -466,7 +470,6 @@ dataDir:{dataDir}
                         Case "-svc"
                             If i < param.Count - 0 Then
                                 If Not CheckUAC(e) Then Return
-                                InitConsole()
                                 Dim port As Integer = 25900
                                 If i + 2 <= param.Length - 1 Then
                                     port = Integer.Parse(param(i + 2))
@@ -818,7 +821,6 @@ dataDir:{dataDir}
                             End If
                         Case "-remoteraw"
                             If Not CheckUAC(e) Then Return
-                            InitConsole()
                             If i < param.Count - 6 Then
                                 Dim ipstr As String = param(i + 1)
                                 Dim ip As New Net.IPAddress(0)
@@ -883,7 +885,6 @@ dataDir:{dataDir}
                             End If
                         Case Else
                             Try
-                                InitConsole()
                                 Console.WriteLine($"{ApplicationWheels.ApplicationInfo}
 {Resources.StrCMDHelpText}")
 

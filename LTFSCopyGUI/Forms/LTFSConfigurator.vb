@@ -192,7 +192,7 @@ Public Class LTFSConfigurator
                                                     ComboBoxDriveLetter.Text = t
                                                 End If
                                             End If
-                                            If Not My.Settings.Application_License.ToLower().Contains("dev") Then TabControl1.TabPages.Remove(TabPageZBC)
+                                            If Not My.Settings.Application_License.ToLower().Contains("dev") AndAlso My.Settings.TapeUtils_DriverType <> TapeUtils.DriverType.ZBCDevice Then TabControl1.TabPages.Remove(TabPageZBC)
                                             LoadComplete = True
                                              SelectedIndex = ListBox1.SelectedIndex
                                          End Sub)
