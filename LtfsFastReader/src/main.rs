@@ -1140,6 +1140,7 @@ struct SmallFileEntry {
     status: SmallFileStatus,
     attempts: u8,
     queue_generation: u64,
+    retry_buffer: Option<(Vec<u8>, usize)>,
 }
 
 #[derive(Clone, Copy)]
@@ -1238,13 +1239,26 @@ impl SmallFileState {
     fn take_next_pending(&mut self, inflight_byte_limit: usize) -> Option<(u64, usize)> {
         let mut selected: Option<(usize, SmallQueueItem)> = None;
         for class in 0..SMALL_QUEUE_CLASS_COUNT {
-            let capacity = small_queue_capacity(class);
-            if self.reserved_bytes.saturating_add(capacity) > inflight_byte_limit {
-                continue;
-            }
             let Some(item) = self.clean_queue_front(class) else {
                 continue;
             };
+            let capacity = self
+                .entries
+                .get(&item.index)
+                .and_then(|entry| entry.retry_buffer.as_ref().map(|(_, reserved)| *reserved))
+                .unwrap_or_else(|| small_queue_capacity(class));
+            // A retry buffer is already included in reserved_bytes. It must
+            // remain schedulable even when speculative look-ahead files have
+            // consumed every other byte of the small-file budget.
+            let has_retained_reservation = self
+                .entries
+                .get(&item.index)
+                .is_some_and(|entry| entry.retry_buffer.is_some());
+            if !has_retained_reservation
+                && self.reserved_bytes.saturating_add(capacity) > inflight_byte_limit
+            {
+                continue;
+            }
             let should_select = selected
                 .map(|(_, current)| {
                     if item.priority != current.priority {
@@ -1265,7 +1279,12 @@ impl SmallFileState {
         let removed = self.queues[class].pop_front()?;
         debug_assert_eq!(removed.index, item.index);
         debug_assert_eq!(removed.generation, item.generation);
-        Some((item.index, small_queue_capacity(class)))
+        let capacity = self
+            .entries
+            .get(&item.index)
+            .and_then(|entry| entry.retry_buffer.as_ref().map(|(_, reserved)| *reserved))
+            .unwrap_or_else(|| small_queue_capacity(class));
+        Some((item.index, capacity))
     }
 }
 
@@ -1331,6 +1350,7 @@ impl SmallFilePool {
                 status: SmallFileStatus::Pending,
                 attempts: 0,
                 queue_generation: 0,
+                retry_buffer: None,
             },
         );
         state.enqueue_index(index, class, priority);
@@ -1360,19 +1380,26 @@ fn small_queue_capacity(class: usize) -> usize {
 fn small_failure(
     shared: &SmallShared,
     index: u64,
-    buffer: Vec<u8>,
+    mut buffer: Vec<u8>,
     reserved: usize,
     error: io::Error,
 ) {
     let mut state = shared.state.lock().unwrap();
     state.active_files = state.active_files.saturating_sub(1);
-    state.reserved_bytes = state.reserved_bytes.saturating_sub(reserved);
-    state.return_buffer(buffer, reserved);
+    buffer.resize(reserved, 0);
     if let Some(entry) = state.entries.get_mut(&index) {
+        // Keep the original reservation across retry backoff. Releasing it
+        // here lets later prefetched files consume the whole budget, after
+        // which the ordered consumer cannot retry this file or advance far
+        // enough to release those later files.
+        entry.retry_buffer = Some((buffer, reserved));
         entry.status = SmallFileStatus::Failed {
             message: error.to_string(),
             retryable: retryable_file_read_error(&error),
         };
+    } else {
+        state.reserved_bytes = state.reserved_bytes.saturating_sub(reserved);
+        state.return_buffer(buffer, reserved);
     }
     shared.changed.notify_all();
 }
@@ -1393,17 +1420,26 @@ fn small_open_worker(shared: Arc<SmallShared>) {
                     && let Some((index, reserved)) =
                         state.take_next_pending(shared.inflight_byte_limit)
                 {
-                    let task = {
+                    let (task, retry_buffer) = {
                         let entry = state.entries.get_mut(&index).unwrap();
                         entry.status = SmallFileStatus::Opening;
                         entry.attempts += 1;
-                        entry.task.clone()
+                        (entry.task.clone(), entry.retry_buffer.take())
                     };
                     state.active_files += 1;
-                    state.reserved_bytes += reserved;
+                    let (reserved, buffer) = match retry_buffer {
+                        Some((mut buffer, retained)) => {
+                            debug_assert_eq!(retained, reserved);
+                            buffer.resize(retained, 0);
+                            (retained, buffer)
+                        }
+                        None => {
+                            state.reserved_bytes += reserved;
+                            (reserved, state.take_buffer(reserved))
+                        }
+                    };
                     state.max_active_files = state.max_active_files.max(state.active_files);
                     state.max_reserved_bytes = state.max_reserved_bytes.max(state.reserved_bytes);
-                    let buffer = state.take_buffer(reserved);
                     break (task, reserved, buffer);
                 }
                 state = shared.changed.wait(state).unwrap();
@@ -1691,14 +1727,17 @@ fn small_completion_worker(shared: Arc<SmallShared>) {
                         }
                     }
                     Err(error) => {
-                        state.reserved_bytes =
-                            state.reserved_bytes.saturating_sub(operation.reserved);
-                        state.return_buffer(operation.buffer, operation.reserved);
+                        operation.buffer.resize(operation.reserved, 0);
                         if let Some(entry) = state.entries.get_mut(&operation.index) {
+                            entry.retry_buffer = Some((operation.buffer, operation.reserved));
                             entry.status = SmallFileStatus::Failed {
                                 message: error.to_string(),
                                 retryable: retryable_file_read_error(&error),
                             };
+                        } else {
+                            state.reserved_bytes =
+                                state.reserved_bytes.saturating_sub(operation.reserved);
+                            state.return_buffer(operation.buffer, operation.reserved);
                         }
                     }
                 }
@@ -3403,6 +3442,7 @@ mod tests {
                     status: SmallFileStatus::Pending,
                     attempts: 0,
                     queue_generation: 0,
+                    retry_buffer: None,
                 },
             );
             state.enqueue_index(index, class, priority);
@@ -3428,6 +3468,71 @@ mod tests {
         state.entries.remove(&5);
         add_pending(&mut state, 5, 1_000, false);
         assert_eq!(state.take_next_pending(4 * 1024), Some((5, 4 * 1024)));
+    }
+
+    #[test]
+    fn small_file_retry_remains_schedulable_at_the_inflight_limit() {
+        let reserved = 64 * 1024;
+        let (class, _) = small_buffer_class(reserved as u64).unwrap();
+        let mut state = SmallFileState::new();
+        state.entries.insert(
+            7,
+            SmallFileEntry {
+                task: SmallFileTask {
+                    index: 7,
+                    len: reserved as u64,
+                    path: String::new(),
+                },
+                status: SmallFileStatus::InFlight,
+                attempts: 0,
+                queue_generation: 0,
+                retry_buffer: None,
+            },
+        );
+        state.active_files = 1;
+        state.reserved_bytes = reserved;
+        let shared = SmallShared {
+            state: Mutex::new(state),
+            changed: Condvar::new(),
+            operations: Mutex::new(FxHashMap::default()),
+            completion_port: SharedHandle(null_mut()),
+            active_limit: 1,
+            inflight_byte_limit: reserved,
+            completion_batch: 1,
+            cancel_event: SharedHandle(null_mut()),
+            io_policy: ReaderIoPolicy::default(),
+        };
+
+        small_failure(
+            &shared,
+            7,
+            vec![0u8; reserved],
+            reserved,
+            io::Error::new(io::ErrorKind::TimedOut, "injected retryable failure"),
+        );
+
+        let mut state = shared.state.lock().unwrap();
+        assert_eq!(state.active_files, 0);
+        assert_eq!(state.reserved_bytes, reserved);
+        let entry = state.entries.get_mut(&7).unwrap();
+        assert!(matches!(
+            entry.status,
+            SmallFileStatus::Failed {
+                retryable: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            entry.retry_buffer.as_ref().map(|(_, reserved)| *reserved),
+            Some(reserved)
+        );
+        entry.status = SmallFileStatus::Pending;
+        state.enqueue_index(7, class, true);
+
+        // The retry's reservation is already counted in reserved_bytes, so
+        // checking reserved_bytes + reserved would strand it permanently.
+        assert_eq!(state.take_next_pending(reserved), Some((7, reserved)));
+        assert_eq!(state.reserved_bytes, reserved);
     }
 
     #[test]
