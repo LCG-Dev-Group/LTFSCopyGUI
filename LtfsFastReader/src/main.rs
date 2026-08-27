@@ -56,6 +56,91 @@ const MIN_FILE_RETRY_BASE_DELAY_MS: u32 = 100;
 const MAX_FILE_RETRY_BASE_DELAY_MS: u32 = 60_000;
 const ATA_NOMINAL_ROTATION_RATE_MIN_RPM: u16 = 0x0401;
 
+#[cfg(all(debug_assertions, not(test)))]
+struct DebugLog {
+    started: Instant,
+    file: Mutex<Option<std::fs::File>>,
+}
+
+#[cfg(all(debug_assertions, not(test)))]
+static DEBUG_LOG: std::sync::OnceLock<DebugLog> = std::sync::OnceLock::new();
+
+#[cfg(all(debug_assertions, not(test)))]
+fn debug_log_impl(arguments: std::fmt::Arguments<'_>) {
+    let logger = DEBUG_LOG.get_or_init(|| {
+        let file_name = format!("lfr-{}.log", std::process::id());
+        let path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(file_name);
+        let file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                writeln!(
+                    file,
+                    "\nlog-open\tpid={}\tpath={}",
+                    std::process::id(),
+                    path.display()
+                )
+                .ok();
+                file.flush().ok();
+                Some(file)
+            }
+            Err(error) => {
+                eprintln!(
+                    "LFR_DEBUG_LOG_OPEN_ERROR\tpath={}\terror={error}",
+                    path.display()
+                );
+                None
+            }
+        };
+        DebugLog {
+            started: Instant::now(),
+            file: Mutex::new(file),
+        }
+    });
+
+    let mut file = match logger.file.lock() {
+        Ok(file) => file,
+        Err(poisoned) => {
+            logger.file.clear_poison();
+            poisoned.into_inner()
+        }
+    };
+    let Some(file) = file.as_mut() else {
+        return;
+    };
+    let unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let elapsed_ms = logger.started.elapsed().as_millis();
+    let current_thread = thread::current();
+    let thread_name = current_thread.name().unwrap_or("-");
+    writeln!(
+        file,
+        "unix_ms={unix_ms}\telapsed_ms={elapsed_ms}\tpid={}\ttid={:?}\tthread={thread_name}\t{arguments}",
+        std::process::id(),
+        current_thread.id()
+    )
+    .ok();
+    file.flush().ok();
+}
+
+#[cfg(all(debug_assertions, not(test)))]
+macro_rules! debug_log {
+    ($($argument:tt)*) => {
+        debug_log_impl(format_args!($($argument)*))
+    };
+}
+
+#[cfg(any(not(debug_assertions), test))]
+macro_rules! debug_log {
+    ($($argument:tt)*) => {};
+}
+
 // C-FFI
 pub const LFR_ABI_VERSION: u32 = 3;
 pub const LFR_OK: i32 = 0;
@@ -902,6 +987,13 @@ impl AsyncSequentialReader {
                 if self.outstanding > 0
                     && self.last_completion_progress.elapsed() >= self.io_policy.read_stall_timeout
                 {
+                    debug_log!(
+                        "event=large-read-stall\tnext_consume={}\tnext_submit={}\toutstanding={}\ttimeout_ms={}",
+                        self.next_consume,
+                        self.next_submit,
+                        self.outstanding,
+                        self.io_policy.read_stall_timeout.as_millis()
+                    );
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         format!(
@@ -914,6 +1006,7 @@ impl AsyncSequentialReader {
                 }
                 return Ok(());
             }
+            debug_log!("event=large-read-iocp-error\terror={error}");
             return Err(error);
         }
         self.record_read_wait(wait_started.elapsed());
@@ -1037,6 +1130,11 @@ impl AsyncSequentialReader {
         let drain_started = Instant::now();
         while self.outstanding > 0 {
             if drain_started.elapsed() >= self.io_policy.cancel_grace {
+                debug_log!(
+                    "event=large-read-cancel-drain-stall\toutstanding={}\tgrace_ms={}\taction=abandon",
+                    self.outstanding,
+                    self.io_policy.cancel_grace.as_millis()
+                );
                 return self.abandon_pending_io();
             }
             let mut removed = 0u32;
@@ -1053,6 +1151,10 @@ impl AsyncSequentialReader {
             {
                 let error = io::Error::last_os_error();
                 if error.raw_os_error() != Some(WAIT_TIMEOUT as i32) {
+                    debug_log!(
+                        "event=large-read-cancel-drain-error\toutstanding={}\terror={error}\taction=abandon",
+                        self.outstanding
+                    );
                     return self.abandon_pending_io();
                 }
                 continue;
@@ -1486,7 +1588,23 @@ impl SmallFileState {
         }
     }
 
-    fn take_next_pending(&mut self, inflight_byte_limit: usize) -> Option<(u64, usize)> {
+    fn prioritize_pending(&mut self, index: u64) -> bool {
+        let Some(class) = self.entries.get(&index).and_then(|entry| {
+            matches!(entry.status, SmallFileStatus::Pending)
+                .then(|| small_buffer_class(entry.task.len).map(|(class, _)| class))
+                .flatten()
+        }) else {
+            return false;
+        };
+        self.enqueue_index(index, class, true);
+        true
+    }
+
+    fn take_next_pending(
+        &mut self,
+        inflight_byte_limit: usize,
+        demand_reserve: usize,
+    ) -> Option<(u64, usize)> {
         let mut selected: Option<(usize, SmallQueueItem)> = None;
         for class in 0..SMALL_QUEUE_CLASS_COUNT {
             let Some(item) = self.clean_queue_front(class) else {
@@ -1504,8 +1622,17 @@ impl SmallFileState {
                 .entries
                 .get(&item.index)
                 .is_some_and(|entry| entry.retry_buffer.is_some());
+            // Speculative look-ahead must leave enough budget for the ordered
+            // consumer's next small file. Otherwise a larger current file can
+            // be stranded behind smaller, later files that consumed the whole
+            // budget and cannot be released until the current file completes.
+            let reservation_limit = if item.priority {
+                inflight_byte_limit
+            } else {
+                inflight_byte_limit.saturating_sub(demand_reserve)
+            };
             if !has_retained_reservation
-                && self.reserved_bytes.saturating_add(capacity) > inflight_byte_limit
+                && self.reserved_bytes.saturating_add(capacity) > reservation_limit
             {
                 continue;
             }
@@ -1576,6 +1703,7 @@ struct SmallShared {
     completion_port: SharedHandle,
     active_limit: usize,
     inflight_byte_limit: usize,
+    demand_reserve: usize,
     completion_batch: usize,
     cancel_event: SharedHandle,
     io_policy: ReaderIoPolicy,
@@ -1599,8 +1727,24 @@ impl SmallFilePool {
             return;
         };
         let mut state = self.shared.state.lock().unwrap();
-        if state.shutdown || state.fatal_error.is_some() || state.entries.contains_key(&task.index)
-        {
+        if state.shutdown || state.fatal_error.is_some() {
+            return;
+        }
+        if state.entries.contains_key(&task.index) {
+            if priority && state.prioritize_pending(task.index) {
+                let _reserved_bytes = state.reserved_bytes;
+                self.shared.changed.notify_all();
+                drop(state);
+                debug_log!(
+                    "event=small-demand-prioritized\tfile={}\tlength={}\treserved_bytes={}\tinflight_limit={}\tdemand_reserve={}\tpath={:?}",
+                    task.index,
+                    task.len,
+                    _reserved_bytes,
+                    self.shared.inflight_byte_limit,
+                    self.shared.demand_reserve,
+                    task.path
+                );
+            }
             return;
         }
         let index = task.index;
@@ -1716,7 +1860,7 @@ fn small_open_worker(shared: Arc<SmallShared>, worker_id: usize) {
                 }
                 if state.active_files < shared.active_limit
                     && let Some((index, reserved)) =
-                        state.take_next_pending(shared.inflight_byte_limit)
+                        state.take_next_pending(shared.inflight_byte_limit, shared.demand_reserve)
                 {
                     let (task, retry_buffer) = {
                         let entry = state.entries.get_mut(&index).unwrap();
@@ -1890,10 +2034,20 @@ fn small_operation_watchdog(shared: &SmallShared) -> bool {
             if cancelled == 0 {
                 activity.cancel_error = io::Error::last_os_error().raw_os_error();
             }
+            debug_log!(
+                "event=small-sync-cancel\tworker={}\tfile={}\tstage={}\ttimed_out={}\tresult={}\terror={:?}",
+                worker_id,
+                activity.file_index,
+                activity.stage,
+                timed_out,
+                cancelled,
+                activity.cancel_error
+            );
         }
     }
 
     if let Some(message) = fatal_error.take() {
+        debug_log!("event=small-sync-fatal\tmessage={message:?}");
         let mut state = shared.state.lock().unwrap();
         if state.fatal_error.is_none() {
             state.fatal_error = Some(message);
@@ -1932,12 +2086,24 @@ fn small_operation_watchdog(shared: &SmallShared) -> bool {
 
             operation.cancel_requested_at = Some(now);
             operation.timed_out = timed_out;
-            unsafe {
-                CancelIoEx(operation.file.0, &operation.overlapped);
-            }
+            let _cancelled = unsafe { CancelIoEx(operation.file.0, &operation.overlapped) };
+            #[cfg(all(debug_assertions, not(test)))]
+            let cancel_error = (_cancelled == 0).then(|| io::Error::last_os_error().raw_os_error());
+            debug_log!(
+                "event=small-async-cancel\tfile={}\tlength={}\ttimed_out={}\tresult={}\terror={:?}",
+                operation.index,
+                operation.expected,
+                timed_out,
+                _cancelled,
+                cancel_error.flatten()
+            );
         }
 
         if must_leak_and_exit {
+            debug_log!(
+                "event=small-async-abandon\toperations={}\taction=leak-and-exit",
+                operations.len()
+            );
             for (_, operation) in operations.drain() {
                 // A remote redirector may still own this OVERLAPPED and buffer.
                 // Keep their addresses alive if cancellation itself is wedged.
@@ -1947,6 +2113,7 @@ fn small_operation_watchdog(shared: &SmallShared) -> bool {
     }
 
     if let Some(message) = fatal_error {
+        debug_log!("event=small-async-fatal\tmessage={message:?}");
         let mut state = shared.state.lock().unwrap();
         if state.fatal_error.is_none() {
             state.fatal_error = Some(message);
@@ -2107,13 +2274,21 @@ impl SmallFilePool {
         open_concurrency: usize,
         active_limit: usize,
         inflight_byte_limit: usize,
+        small_threshold: u64,
         completion_batch: usize,
         cancel_event: HANDLE,
         io_policy: ReaderIoPolicy,
     ) -> io::Result<Self> {
+        let Some((_, demand_reserve)) = small_buffer_class(small_threshold) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "small-file threshold exceeds the largest buffer class",
+            ));
+        };
         if open_concurrency == 0
             || active_limit == 0
             || inflight_byte_limit < 64 * 1024
+            || inflight_byte_limit < demand_reserve
             || !(1..=128).contains(&completion_batch)
         {
             return Err(io::Error::new(
@@ -2139,6 +2314,7 @@ impl SmallFilePool {
             completion_port: SharedHandle(raw_port),
             active_limit,
             inflight_byte_limit,
+            demand_reserve,
             completion_batch,
             cancel_event: SharedHandle(cancel_event),
             io_policy,
@@ -2380,9 +2556,11 @@ fn native_hash_options(mask: u32) -> FxHashMap<String, bool> {
 }
 
 fn native_set_error(shared: &NativeShared, error: impl ToString) {
+    let error = error.to_string();
+    debug_log!("event=native-error\tmessage={error:?}");
     let mut state = native_lock(shared);
     if state.error.is_empty() {
-        state.error = error.to_string();
+        state.error = error;
     }
     state.done = true;
     shared.changed.notify_all();
@@ -2396,11 +2574,18 @@ fn native_worker_progress(shared: &NativeShared, file_index: Option<u64>, stage:
             poisoned.into_inner()
         }
     };
+    #[cfg(all(debug_assertions, not(test)))]
+    let stage_changed = watch.file_index != file_index || watch.stage != stage;
     watch.file_index = file_index;
     watch.stage = stage;
     watch.last_progress = Instant::now();
     watch.cancel_requested_at = None;
     watch.cancel_error = None;
+    drop(watch);
+    #[cfg(all(debug_assertions, not(test)))]
+    if stage_changed {
+        debug_log!("event=worker-stage\tfile={file_index:?}\tstage={stage:?}");
+    }
 }
 
 fn native_worker_watchdog(shared: Arc<NativeShared>, policy: ReaderIoPolicy, worker_thread: usize) {
@@ -2419,6 +2604,7 @@ fn native_worker_watchdog(shared: Arc<NativeShared>, policy: ReaderIoPolicy, wor
             return;
         }
         if cancelled {
+            debug_log!("event=watchdog-cancelled\taction=cancel-synchronous-io");
             unsafe {
                 CancelSynchronousIo(worker_thread as HANDLE);
             }
@@ -2465,15 +2651,29 @@ fn native_worker_watchdog(shared: Arc<NativeShared>, policy: ReaderIoPolicy, wor
                     None
                 }
             } else {
+                debug_log!(
+                    "event=watchdog-stall\tfile={:?}\tstage={:?}\tstall_ms={}\taction=cancel-synchronous-io",
+                    watch.file_index,
+                    watch.stage,
+                    now.duration_since(watch.last_progress).as_millis()
+                );
                 let cancelled = unsafe { CancelSynchronousIo(worker_thread as HANDLE) };
                 watch.cancel_requested_at = Some(now);
                 if cancelled == 0 {
                     watch.cancel_error = io::Error::last_os_error().raw_os_error();
                 }
+                debug_log!(
+                    "event=watchdog-cancel-result\tfile={:?}\tstage={:?}\tresult={}\terror={:?}",
+                    watch.file_index,
+                    watch.stage,
+                    cancelled,
+                    watch.cancel_error
+                );
                 None
             }
         };
         if let Some(error) = fatal_error {
+            debug_log!("event=watchdog-fatal\tmessage={error:?}");
             native_set_error(&shared, error);
             return;
         }
@@ -2544,6 +2744,8 @@ fn native_publish_batch(
     slot_size: usize,
 ) -> io::Result<()> {
     let mut consumed = 0usize;
+    #[cfg(all(debug_assertions, not(test)))]
+    let mut waited_for_capacity = false;
     while consumed < data.len() {
         let mut state = native_lock(shared);
         while state.occupied_slots == state.slots.len() {
@@ -2552,6 +2754,17 @@ fn native_publish_batch(
             }
             if !state.error.is_empty() {
                 return Err(io::Error::other(state.error.clone()));
+            }
+            #[cfg(all(debug_assertions, not(test)))]
+            if !waited_for_capacity {
+                debug_log!(
+                    "event=publish-buffer-full\tfile={}\toffset={}\tbuffered_bytes={}\toccupied_slots={}",
+                    file_index,
+                    file_offset + consumed as u64,
+                    state.buffered_bytes,
+                    state.occupied_slots
+                );
+                waited_for_capacity = true;
             }
             let wait_started = Instant::now();
             state = native_wait(shared, state, "batch publish wait");
@@ -2599,6 +2812,15 @@ fn native_publish_batch(
         shared.changed.notify_all();
         native_worker_progress(shared, Some(file_index), "publish batch");
     }
+    #[cfg(all(debug_assertions, not(test)))]
+    if waited_for_capacity {
+        debug_log!(
+            "event=publish-buffer-resumed\tfile={}\toffset={}\tbytes={}",
+            file_index,
+            file_offset,
+            data.len()
+        );
+    }
     Ok(())
 }
 
@@ -2608,11 +2830,27 @@ fn native_run_worker(
     cancel_event: HANDLE,
     files: Vec<NativeFileTask>,
 ) {
+    debug_log!(
+        "event=worker-start\tfiles={}\tcapacity_bytes={}\tslot_size={}\tread_chunk_size={}\tqueue_depth={}",
+        files.len(),
+        config.capacity_bytes,
+        config.slot_size,
+        config.read_chunk_size,
+        config.queue_depth
+    );
     native_worker_progress(&shared, None, "detect target drive media");
+    let is_hdd = files_include_hdd(&files);
     let scheduling = file_read_scheduling(
         config.small_open_concurrency,
         config.small_active_files,
-        files_include_hdd(&files),
+        is_hdd,
+    );
+    debug_log!(
+        "event=worker-scheduling\tis_hdd={}\tsmall_open_concurrency={}\tsmall_active_files={}\tcross_file_prefetch={}",
+        is_hdd,
+        scheduling.small_open_concurrency,
+        scheduling.small_active_files,
+        scheduling.cross_file_prefetch
     );
     native_worker_progress(&shared, None, "create small-file pool");
     let enabled = native_hash_options(config.hash_mask);
@@ -2620,6 +2858,7 @@ fn native_run_worker(
         scheduling.small_open_concurrency,
         scheduling.small_active_files,
         config.small_inflight_bytes,
+        config.small_threshold,
         64,
         cancel_event,
         config.io_policy,
@@ -2649,6 +2888,16 @@ fn native_run_worker(
     let run_result = (|| -> io::Result<()> {
         let mut prepared_large: Option<(u64, io::Result<AsyncSequentialReader>)> = None;
         for (position, file) in files.iter().enumerate() {
+            #[cfg(all(debug_assertions, not(test)))]
+            let file_started = Instant::now();
+            debug_log!(
+                "event=file-start\tfile={}\tlength={}\tposition={}\ttotal_files={}\tpath={:?}",
+                file.index,
+                file.len,
+                position + 1,
+                files.len(),
+                file.path
+            );
             native_worker_progress(&shared, Some(file.index), "start file");
             if is_cancelled(cancel_event) {
                 return Err(cancelled_error());
@@ -2796,17 +3045,26 @@ fn native_run_worker(
                 shared.changed.notify_all();
             }
             native_publish(&shared, file.index, file.len, &[], FLAG_EOF)?;
+            debug_log!(
+                "event=file-complete\tfile={}\tlength={}\telapsed_ms={}\tpath={:?}",
+                file.index,
+                file.len,
+                file_started.elapsed().as_millis(),
+                file.path
+            );
         }
         Ok(())
     })();
 
     match &run_result {
         Ok(()) => {
+            debug_log!("event=worker-complete\tresult=ok");
             let mut state = native_lock(&shared);
             state.done = true;
             shared.changed.notify_all();
         }
         Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            debug_log!("event=worker-complete\tresult=cancelled\terror={error}");
             let mut state = native_lock(&shared);
             state.cancelled = true;
             state.done = true;
@@ -2815,6 +3073,7 @@ fn native_run_worker(
         Err(error) => native_set_error(&shared, error),
     }
     small_pool.shutdown();
+    debug_log!("event=worker-exit");
 }
 
 fn native_context<'a>(context: *mut LfrContext) -> Result<&'a LfrContext, i32> {
@@ -2851,9 +3110,28 @@ pub unsafe extern "system" fn lfr_create(
     output: *mut *mut LfrContext,
 ) -> i32 {
     if config.is_null() || output.is_null() {
+        debug_log!("event=create-rejected\treason=null-argument");
         return LFR_INVALID;
     }
     let config = unsafe { &*config };
+    debug_log!(
+        "event=create-request\tabi={}\tslot_size={}\tread_chunk_size={}\tqueue_depth={}\tcapacity_bytes={}\tsmall_open_concurrency={}\tsmall_active_files={}\tsmall_inflight_bytes={}\tsmall_threshold={}\thash_mask=0x{:X}\tnext_file_prime_depth={}\tread_stall_timeout_ms={}\tio_cancel_grace_ms={}\tmax_retries={}\tretry_base_delay_ms={}",
+        config.abi_version,
+        config.slot_size,
+        config.read_chunk_size,
+        config.queue_depth,
+        config.capacity_bytes,
+        config.small_open_concurrency,
+        config.small_active_files,
+        config.small_inflight_bytes,
+        config.small_threshold,
+        config.hash_mask,
+        config.next_file_prime_depth,
+        config.read_stall_timeout_ms,
+        config.io_cancel_grace_ms,
+        config.max_consecutive_file_retries,
+        config.file_retry_base_delay_ms
+    );
     if config.struct_size as usize != std::mem::size_of::<LfrConfig>()
         || config.abi_version != LFR_ABI_VERSION
         || config.slot_size == 0
@@ -2884,6 +3162,7 @@ pub unsafe extern "system" fn lfr_create(
         || !(MIN_FILE_RETRY_BASE_DELAY_MS..=MAX_FILE_RETRY_BASE_DELAY_MS)
             .contains(&config.file_retry_base_delay_ms)
     {
+        debug_log!("event=create-rejected\treason=invalid-config");
         return LFR_INVALID;
     }
     let slot_size = config.slot_size as usize;
@@ -2901,6 +3180,10 @@ pub unsafe extern "system" fn lfr_create(
         .collect();
     let cancel_event = unsafe { CreateEventW(null(), 1, 0, null()) };
     if cancel_event.is_null() {
+        debug_log!(
+            "event=create-failed\toperation=CreateEventW\terror={}",
+            io::Error::last_os_error()
+        );
         return LFR_ERROR;
     }
     let context = Box::new(LfrContext {
@@ -2952,9 +3235,9 @@ pub unsafe extern "system" fn lfr_create(
         worker: Mutex::new(None),
         worker_watchdog: Mutex::new(None),
     });
-    unsafe {
-        *output = Box::into_raw(context);
-    }
+    let context = Box::into_raw(context);
+    unsafe { *output = context };
+    debug_log!("event=create-complete\tcontext={context:p}\tslots={slot_count}");
     LFR_OK
 }
 
@@ -3054,6 +3337,14 @@ pub unsafe extern "system" fn lfr_start(context: *mut LfrContext) -> i32 {
             .fold(0u64, |total, file| total.saturating_add(file.len));
         files
     };
+    #[cfg(all(debug_assertions, not(test)))]
+    let selected_bytes = files
+        .iter()
+        .fold(0u64, |total, file| total.saturating_add(file.len));
+    debug_log!(
+        "event=start\tcontext={context:p}\tfiles={}\tselected_bytes={selected_bytes}",
+        files.len()
+    );
     let shared = Arc::clone(&context.shared);
     let config = NativeConfig {
         slot_size: context.config.slot_size,
@@ -3072,6 +3363,7 @@ pub unsafe extern "system" fn lfr_start(context: *mut LfrContext) -> i32 {
     let worker =
         thread::spawn(move || native_run_worker(shared, config, cancel_event as HANDLE, files));
     let worker_thread = worker.as_raw_handle() as HANDLE as usize;
+    debug_log!("event=start-worker-created\tthread_handle=0x{worker_thread:X}");
     let watchdog_shared = Arc::clone(&context.shared);
     let watchdog_policy = context.config.io_policy;
     let watchdog = thread::spawn(move || {
@@ -3489,8 +3781,16 @@ pub unsafe extern "system" fn lfr_cancel(context: *mut LfrContext) -> i32 {
     };
     {
         let mut state = native_lock(&context.shared);
+        #[cfg(all(debug_assertions, not(test)))]
+        let snapshot = (state.buffered_bytes, state.occupied_slots, state.done);
         state.cancelled = true;
         context.shared.changed.notify_all();
+        debug_log!(
+            "event=cancel\tcontext={context:p}\tbuffered_bytes={}\toccupied_slots={}\tdone={}",
+            snapshot.0,
+            snapshot.1,
+            snapshot.2
+        );
     }
     unsafe {
         SetEvent(context.cancel_event.0);
@@ -3507,6 +3807,9 @@ pub unsafe extern "system" fn lfr_destroy(context: *mut LfrContext) {
     if context.is_null() {
         return;
     }
+    #[cfg(all(debug_assertions, not(test)))]
+    let destroy_started = Instant::now();
+    debug_log!("event=destroy-begin\tcontext={context:p}");
     let context = unsafe { Box::from_raw(context) };
     {
         let mut state = native_lock(&context.shared);
@@ -3527,7 +3830,13 @@ pub unsafe extern "system" fn lfr_destroy(context: *mut LfrContext) {
     }
     .take();
     if let Some(worker) = worker {
-        let _ = worker.join();
+        debug_log!("event=destroy-worker-join-begin");
+        let _result = worker.join();
+        debug_log!(
+            "event=destroy-worker-join-end\telapsed_ms={}\tpanicked={}",
+            destroy_started.elapsed().as_millis(),
+            _result.is_err()
+        );
     }
     let watchdog = match context.worker_watchdog.lock() {
         Ok(watchdog) => watchdog,
@@ -3540,8 +3849,18 @@ pub unsafe extern "system" fn lfr_destroy(context: *mut LfrContext) {
     }
     .take();
     if let Some(watchdog) = watchdog {
-        let _ = watchdog.join();
+        debug_log!("event=destroy-watchdog-join-begin");
+        let _result = watchdog.join();
+        debug_log!(
+            "event=destroy-watchdog-join-end\telapsed_ms={}\tpanicked={}",
+            destroy_started.elapsed().as_millis(),
+            _result.is_err()
+        );
     }
+    debug_log!(
+        "event=destroy-complete\telapsed_ms={}",
+        destroy_started.elapsed().as_millis()
+    );
 }
 
 #[cfg(test)]
@@ -3983,6 +4302,7 @@ mod tests {
             8,
             12,
             2 * 1024 * 1024,
+            64 * 1024,
             16,
             null_mut(),
             ReaderIoPolicy::default(),
@@ -4057,20 +4377,86 @@ mod tests {
         add_pending(&mut state, 2, 1_000, false); // 4 KiB class
         add_pending(&mut state, 3, 0, false); // zero-length class
 
-        assert_eq!(state.take_next_pending(256 * 1024), Some((0, 256 * 1024)));
-        assert_eq!(state.take_next_pending(256 * 1024), Some((2, 4 * 1024)));
+        assert_eq!(
+            state.take_next_pending(256 * 1024, 0),
+            Some((0, 256 * 1024))
+        );
+        assert_eq!(state.take_next_pending(256 * 1024, 0), Some((2, 4 * 1024)));
 
         add_pending(&mut state, 4, 16_000, true);
         add_pending(&mut state, 6, 8_000, true);
-        assert_eq!(state.take_next_pending(1024 * 1024), Some((6, 16 * 1024)));
-        assert_eq!(state.take_next_pending(1024 * 1024), Some((4, 16 * 1024)));
-        assert_eq!(state.take_next_pending(1024 * 1024), Some((1, 1024 * 1024)));
-        assert_eq!(state.take_next_pending(1024 * 1024), Some((3, 0)));
+        assert_eq!(
+            state.take_next_pending(1024 * 1024, 0),
+            Some((6, 16 * 1024))
+        );
+        assert_eq!(
+            state.take_next_pending(1024 * 1024, 0),
+            Some((4, 16 * 1024))
+        );
+        assert_eq!(
+            state.take_next_pending(1024 * 1024, 0),
+            Some((1, 1024 * 1024))
+        );
+        assert_eq!(state.take_next_pending(1024 * 1024, 0), Some((3, 0)));
 
         add_pending(&mut state, 5, 1_000, false);
         state.entries.remove(&5);
         add_pending(&mut state, 5, 1_000, false);
-        assert_eq!(state.take_next_pending(4 * 1024), Some((5, 4 * 1024)));
+        assert_eq!(state.take_next_pending(4 * 1024, 0), Some((5, 4 * 1024)));
+    }
+
+    #[test]
+    fn demanded_small_file_uses_budget_reserved_from_speculative_prefetch() {
+        fn add_pending(state: &mut SmallFileState, index: u64, len: u64) {
+            let (class, _) = small_buffer_class(len).unwrap();
+            state.entries.insert(
+                index,
+                SmallFileEntry {
+                    task: SmallFileTask {
+                        index,
+                        len,
+                        path: String::new(),
+                    },
+                    status: SmallFileStatus::Pending,
+                    attempts: 0,
+                    queue_generation: 0,
+                    retry_buffer: None,
+                },
+            );
+            state.enqueue_index(index, class, false);
+        }
+
+        let mib = 1024 * 1024;
+        let inflight_limit = 4 * mib;
+        let demand_reserve = 2 * mib;
+        let mut state = SmallFileState::new();
+        add_pending(&mut state, 1, 600_000);
+        add_pending(&mut state, 2, 600_000);
+        add_pending(&mut state, 3, 600_000);
+        add_pending(&mut state, 10, 1_500_000);
+
+        for expected_index in [1, 2] {
+            let (index, reserved) = state
+                .take_next_pending(inflight_limit, demand_reserve)
+                .unwrap();
+            assert_eq!(index, expected_index);
+            assert_eq!(reserved, mib);
+            state.reserved_bytes += reserved;
+            state.entries.get_mut(&index).unwrap().status = SmallFileStatus::Ready {
+                data: Vec::new(),
+                reserved,
+            };
+        }
+
+        assert_eq!(
+            state.take_next_pending(inflight_limit, demand_reserve),
+            None
+        );
+        assert!(state.prioritize_pending(10));
+        assert_eq!(
+            state.take_next_pending(inflight_limit, demand_reserve),
+            Some((10, 2 * mib))
+        );
     }
 
     #[test]
@@ -4103,6 +4489,7 @@ mod tests {
             completion_port: SharedHandle(null_mut()),
             active_limit: 1,
             inflight_byte_limit: reserved,
+            demand_reserve: reserved,
             completion_batch: 1,
             cancel_event: SharedHandle(null_mut()),
             io_policy: ReaderIoPolicy::default(),
@@ -4136,7 +4523,10 @@ mod tests {
 
         // The retry's reservation is already counted in reserved_bytes, so
         // checking reserved_bytes + reserved would strand it permanently.
-        assert_eq!(state.take_next_pending(reserved), Some((7, reserved)));
+        assert_eq!(
+            state.take_next_pending(reserved, reserved),
+            Some((7, reserved))
+        );
         assert_eq!(state.reserved_bytes, reserved);
     }
 
@@ -4164,6 +4554,7 @@ mod tests {
             completion_port: SharedHandle(null_mut()),
             active_limit: 1,
             inflight_byte_limit: 64 * 1024,
+            demand_reserve: 64 * 1024,
             completion_batch: 1,
             cancel_event: SharedHandle(null_mut()),
             io_policy: policy,

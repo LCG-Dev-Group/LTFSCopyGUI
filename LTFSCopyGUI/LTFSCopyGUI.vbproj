@@ -521,10 +521,16 @@
     </BootstrapperPackage>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.VisualBasic.targets" />
+  <PropertyGroup>
+    <FastReaderCargoProfile>release</FastReaderCargoProfile>
+    <FastReaderCargoOutputDirectory>release</FastReaderCargoOutputDirectory>
+    <FastReaderCargoProfile Condition="'$(Configuration)' == 'Debug'">dev</FastReaderCargoProfile>
+    <FastReaderCargoOutputDirectory Condition="'$(Configuration)' == 'Debug'">debug</FastReaderCargoOutputDirectory>
+  </PropertyGroup>
   <Target Name="BuildFastReader" AfterTargets="Build">
-    <Exec Command="cargo +nightly build -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --release --lib --manifest-path &quot;$(MSBuildProjectDirectory)\..\LtfsFastReader\Cargo.toml&quot;" WorkingDirectory="$(MSBuildProjectDirectory)\..\LtfsFastReader" />
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LtfsFastReader\target\x86_64-win7-windows-msvc\release\ltfscopy_fastreader.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LtfsFastReader\target\x86_64-win7-windows-msvc\release\ltfscopy_fastreader.pdb" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(MSBuildProjectDirectory)\..\LtfsFastReader\target\x86_64-win7-windows-msvc\release\ltfscopy_fastreader.pdb')" />
+    <Exec Command="cargo +nightly build -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --profile $(FastReaderCargoProfile) --lib --manifest-path &quot;$(MSBuildProjectDirectory)\..\LtfsFastReader\Cargo.toml&quot;" WorkingDirectory="$(MSBuildProjectDirectory)\..\LtfsFastReader" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LtfsFastReader\target\x86_64-win7-windows-msvc\$(FastReaderCargoOutputDirectory)\ltfscopy_fastreader.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LtfsFastReader\target\x86_64-win7-windows-msvc\$(FastReaderCargoOutputDirectory)\ltfscopy_fastreader.pdb" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(MSBuildProjectDirectory)\..\LtfsFastReader\target\x86_64-win7-windows-msvc\$(FastReaderCargoOutputDirectory)\ltfscopy_fastreader.pdb')" />
   </Target>
   <PropertyGroup>
     <PreBuildEvent>"$(ProjectDir)Build\BuildVersionPropagator.exe" "$(ProjectDir)Build\Build.vb"</PreBuildEvent>

@@ -34,3 +34,7 @@ windows-sys = { version = "0.61", features = [
 lto = true
 panic = "abort"
 debug = 1
+
+[profile.dev]
+panic = "abort"
+debug = 2
