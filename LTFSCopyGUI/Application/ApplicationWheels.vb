@@ -531,42 +531,33 @@ Public Class GlobHelper
     End Function
 
     Private Function GetOrCreateSubdir(parent As ltfsindex.directory, childName As String, absPath As String) As ltfsindex.directory
-        Dim found As ltfsindex.directory = Nothing
+        Dim found As ltfsindex.directory = parent.FindDirectoryByName(childName)
 
-        SyncLock parent.contents._directory
-            For Each fe As ltfsindex.directory In parent.contents._directory
-                If fe.name.Equals(childName, StringComparison.OrdinalIgnoreCase) Then
-                    found = fe
-                    Exit For
-                End If
-            Next
+        If found Is Nothing Then
+            Dim info As DirectoryInfo = Nothing
+            Try : info = New DirectoryInfo(absPath)
+            Catch : info = Nothing
+            End Try
 
-            If found Is Nothing Then
-                Dim info As DirectoryInfo = Nothing
-                Try : info = New DirectoryInfo(absPath)
-                Catch : info = Nothing
-                End Try
+            Dim ct = If(info IsNot Nothing, info.CreationTimeUtc, Now.ToUniversalTime)
+            Dim at = If(info IsNot Nothing, info.LastAccessTimeUtc, Now.ToUniversalTime)
+            Dim mt = If(info IsNot Nothing, info.LastWriteTimeUtc, Now.ToUniversalTime)
+            Dim tsFmt As Func(Of Date, String) =
+                Function(dt) dt.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z")
 
-                Dim ct = If(info IsNot Nothing, info.CreationTimeUtc, Now.ToUniversalTime)
-                Dim at = If(info IsNot Nothing, info.LastAccessTimeUtc, Now.ToUniversalTime)
-                Dim mt = If(info IsNot Nothing, info.LastWriteTimeUtc, Now.ToUniversalTime)
-                Dim tsFmt As Func(Of Date, String) =
-                    Function(dt) dt.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z")
-
-                found = New ltfsindex.directory With {
-                    .name = childName,
-                    .creationtime = tsFmt(ct),
-                    .fileuid = schema.highestfileuid + 1,
-                    .accesstime = tsFmt(at),
-                    .modifytime = tsFmt(mt),
-                    .changetime = tsFmt(mt),
-                    .backuptime = tsFmt(Now.ToUniversalTime),
-                    .readonly = False
-                }
-                parent.contents._directory.Add(found)
-                Threading.Interlocked.Increment(schema.highestfileuid)
-            End If
-        End SyncLock
+            found = New ltfsindex.directory With {
+                .name = childName,
+                .creationtime = tsFmt(ct),
+                .fileuid = schema.highestfileuid + 1,
+                .accesstime = tsFmt(at),
+                .modifytime = tsFmt(mt),
+                .changetime = tsFmt(mt),
+                .backuptime = tsFmt(Now.ToUniversalTime),
+                .readonly = False
+            }
+            parent.AddDirectory(found)
+            Threading.Interlocked.Increment(schema.highestfileuid)
+        End If
 
         Return found
     End Function
@@ -797,6 +788,95 @@ Public Module GlobCollector
             result.Add(file)
         Next
         Return result
+    End Function
+
+    Private Iterator Function EnumerateFilesStreaming(root As DirectoryInfo, skipSymlink As Boolean) As IEnumerable(Of FileInfo)
+        If root Is Nothing Then Exit Function
+        If skipSymlink Then
+            Try
+                If root.Attributes.HasFlag(FileAttributes.ReparsePoint) Then Exit Function
+            Catch
+            End Try
+        End If
+
+        Dim pending As New Stack(Of DirectoryInfo)
+        pending.Push(root)
+        While pending.Count > 0
+            Dim directory As DirectoryInfo = pending.Pop()
+            For Each entry As FileSystemInfo In directory.EnumerateFileSystemInfos()
+                Dim file As FileInfo = TryCast(entry, FileInfo)
+                If file IsNot Nothing Then
+                    Yield file
+                    Continue For
+                End If
+
+                Dim childDirectory As DirectoryInfo = TryCast(entry, DirectoryInfo)
+                If childDirectory Is Nothing Then Continue For
+                If skipSymlink Then
+                    Try
+                        If childDirectory.Attributes.HasFlag(FileAttributes.ReparsePoint) Then Continue For
+                    Catch
+                    End Try
+                End If
+                pending.Push(childDirectory)
+            Next
+        End While
+    End Function
+
+    Public Iterator Function EnumerateAdd_ByFullPathInputs(inputs As IEnumerable(Of String),
+                                                           matcher As Matcher) As IEnumerable(Of GlobHelper.AddFile)
+        If inputs Is Nothing Then Throw New ArgumentNullException(NameOf(inputs))
+        If matcher Is Nothing Then Throw New ArgumentNullException(NameOf(matcher))
+
+        Dim normalized = inputs.
+            Where(Function(p) Not String.IsNullOrWhiteSpace(p)).
+            Select(Function(p) NormalizeFullPath(p)).
+            ToList()
+        Dim deduplicate As Boolean = normalized.Count > 1
+        Dim seenSource As HashSet(Of String) = If(deduplicate, New HashSet(Of String)(StringComparer.OrdinalIgnoreCase), Nothing)
+        Dim seenRelative As HashSet(Of String) = If(deduplicate, New HashSet(Of String)(StringComparer.OrdinalIgnoreCase), Nothing)
+
+        For Each inputPath As String In normalized
+            If Directory.Exists(inputPath) Then
+                Dim baseDirForRel = Path.GetDirectoryName(TrailingTrimSeparators(inputPath))
+                If String.IsNullOrEmpty(baseDirForRel) Then baseDirForRel = inputPath
+
+                For Each fileInfo As FileInfo In EnumerateFilesStreaming(New DirectoryInfo(inputPath), My.Settings.LTFSWriter_SkipSymlink)
+                    Dim fileFull As String = fileInfo.FullName
+                    Dim matchRel As String = NormalizeRelativeSeparators(GetRelativePathFast(inputPath, fileFull))
+                    If String.IsNullOrEmpty(matchRel) OrElse Not matcher.Match(matchRel).HasMatches Then Continue For
+
+                    Dim rel As String = NormalizeRelativeSeparators(GetRelativePathFast(baseDirForRel, fileFull))
+                    If rel.StartsWith(Path.DirectorySeparatorChar) OrElse rel.StartsWith(Path.AltDirectorySeparatorChar) Then rel = rel.Substring(1)
+                    If String.IsNullOrEmpty(rel) Then Continue For
+                    If deduplicate AndAlso (Not seenRelative.Add(rel) OrElse Not seenSource.Add(fileFull)) Then Continue For
+
+                    Dim xattrPath As String = Nothing
+                    Dim xattrCandidate As String = fileFull & ".xattr"
+                    If File.Exists(xattrCandidate) Then xattrPath = xattrCandidate
+
+                    Yield New GlobHelper.AddFile With {
+                        .SourceFullPath = fileFull,
+                        .RelativePath = rel,
+                        .SourceInfo = fileInfo,
+                        .SourceXattrPath = xattrPath}
+                Next
+            ElseIf File.Exists(inputPath) Then
+                Dim parentDir As String = Path.GetDirectoryName(inputPath)
+                If String.IsNullOrEmpty(parentDir) Then Continue For
+
+                Dim fileInfo As New FileInfo(inputPath)
+                Dim rel As String = NormalizeRelativeSeparators(Path.GetFileName(inputPath))
+                If String.IsNullOrEmpty(rel) OrElse Not matcher.Match(rel).HasMatches Then Continue For
+                If deduplicate AndAlso (Not seenRelative.Add(rel) OrElse Not seenSource.Add(inputPath)) Then Continue For
+
+                Yield New GlobHelper.AddFile With {
+                    .SourceFullPath = inputPath,
+                    .RelativePath = rel,
+                    .SourceInfo = fileInfo,
+                    .SourceXattrPath = Nothing}
+            End If
+        Next
     End Function
 
     Public Function PlanAdd_ByFullPathInputs(inputs As IEnumerable(Of String),
