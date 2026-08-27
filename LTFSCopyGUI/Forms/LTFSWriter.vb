@@ -7156,15 +7156,15 @@ Public Class LTFSWriter
         th.Start()
     End Sub
     Private Sub 读取索引ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 读取索引ToolStripMenuItem.Click
-        If TapeUtils.DriverTypeSetting = TapeUtils.DriverType.TapeStream Then
-            TapeUtils.CloseTapeDrive(driveHandle)
-            If Not IO.File.Exists(TapeDrive) Then
-                IO.File.Create(TapeDrive).Close()
-            End If
-        End If
         Dim th As New Threading.Thread(
             Sub()
                 Try
+                    If TapeUtils.DriverTypeSetting = TapeUtils.DriverType.TapeStream Then
+                        TapeUtils.CloseTapeDrive(driveHandle)
+                        If Not IO.File.Exists(TapeDrive) Then
+                            IO.File.Create(TapeDrive).Close()
+                        End If
+                    End If
                     If Not TapeUtils.IsOpened(driveHandle) Then
                         TapeUtils.OpenTapeDrive(TapeDrive, driveHandle)
                     End If
