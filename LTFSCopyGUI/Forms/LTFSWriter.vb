@@ -5490,13 +5490,21 @@ Public Class LTFSWriter
 
         Dim fastHashes As Dictionary(Of Long, Dictionary(Of String, String)) = Nothing
         If useFastReader AndAlso candidates.Count > 0 Then
-            fastHashes = fastProvider.HashFiles(candidates, Timeout.Infinite)
+            fastHashes = fastProvider.HashFiles(
+                candidates,
+                Timeout.Infinite,
+                Sub(fileIndex)
+                    Dim fr = writeList(CInt(fileIndex))
+                    PrintMsg($"{My.Resources.ResText_CHashing} {My.Settings.LTFSWriter_DedupeAlgorithm}: {fr.File.name}  {My.Resources.ResText_Size} {IOManager.FormatSize(fr.File.length)}")
+                End Sub)
         End If
 
         For Each longIndex In candidates
             Dim index = CInt(longIndex)
             Dim fr = writeList(index)
-            PrintMsg($"{My.Resources.ResText_CHashing} {My.Settings.LTFSWriter_DedupeAlgorithm}: {fr.File.name}  {My.Resources.ResText_Size} {IOManager.FormatSize(fr.File.length)}")
+            If Not useFastReader Then
+                PrintMsg($"{My.Resources.ResText_CHashing} {My.Settings.LTFSWriter_DedupeAlgorithm}: {fr.File.name}  {My.Resources.ResText_Size} {IOManager.FormatSize(fr.File.length)}")
+            End If
             Dim hash = If(useFastReader, GetFastReaderDedupeHash(fastHashes(longIndex)), ComputeDedupeHash(fr.SourcePath))
             If String.IsNullOrEmpty(hash) Then Throw New IO.IOException($"Unable to calculate dedupe hash: {fr.SourcePath}")
             ValidatePlannedSource(fr, plans(index))

@@ -731,7 +731,8 @@ Public Class RustFastReaderProvider
     End Function
 
     Public Function HashFiles(fileIndices As IEnumerable(Of Long),
-                              Optional timeoutMs As Integer = Timeout.Infinite) As Dictionary(Of Long, Dictionary(Of String, String))
+                              Optional timeoutMs As Integer = Timeout.Infinite,
+                              Optional hashStarted As Action(Of Long) = Nothing) As Dictionary(Of Long, Dictionary(Of String, String))
         EnsureStarted()
         If _streamStarted Then Throw New InvalidOperationException("Hash scan must finish before the ordered native stream starts")
         If timeoutMs = 0 Then Throw New TimeoutException("Native hash timeout")
@@ -754,6 +755,7 @@ Public Class RustFastReaderProvider
                 results(fileIndex) = EmptyHashes()
                 Continue For
             End If
+            If hashStarted IsNot Nothing Then hashStarted(fileIndex)
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(RustFastReaderProvider))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")
                     Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
