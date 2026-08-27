@@ -121,7 +121,7 @@
     <value>Barcode write fail</value>
   </data>
   <data name="StrCMDHelpText" xml:space="preserve">
-    <value>-s                                            Disable index reading
+    <value>  -s                                            Disable index reading
   -t &lt;drive&gt;                                    LTFSWriter
   ├  -t 0
   ├  -t TAPE0

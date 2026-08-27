@@ -496,20 +496,20 @@ Namespace My.Resources
         End Property
         
         '''<summary>
-        '''  查找类似 启用外部高速读取器（需要Windows 10及以上系统） 的本地化字符串。
-        '''</summary>
-        Friend ReadOnly Property PropertyDescription_LTFSWriter_ExternalReaderEnabled() As String
-            Get
-                Return ResourceManager.GetString("PropertyDescription_LTFSWriter_ExternalReaderEnabled", resourceCulture)
-            End Get
-        End Property
-
-        '''<summary>
         '''  查找类似 写入 tar 元数据索引 的本地化字符串。
         '''</summary>
         Friend ReadOnly Property PropertyDescription_LTFSWriter_EnrichTarMetadata() As String
             Get
                 Return ResourceManager.GetString("PropertyDescription_LTFSWriter_EnrichTarMetadata", resourceCulture)
+            End Get
+        End Property
+        
+        '''<summary>
+        '''  查找类似 启用外部高速读取器（需要Windows 10及以上系统） 的本地化字符串。
+        '''</summary>
+        Friend ReadOnly Property PropertyDescription_LTFSWriter_ExternalReaderEnabled() As String
+            Get
+                Return ResourceManager.GetString("PropertyDescription_LTFSWriter_ExternalReaderEnabled", resourceCulture)
             End Get
         End Property
         
@@ -2570,7 +2570,7 @@ Namespace My.Resources
         End Property
         
         '''<summary>
-        '''  查找类似 -s                                            不要自动读取索引
+        '''  查找类似   -s                                            不要自动读取索引
         '''  -t &lt;drive&gt;                                    直接读写
         '''  ├  -t 0
         '''  ├  -t TAPE0
@@ -2581,7 +2581,7 @@ Namespace My.Resources
         '''                                           
         '''  -c                                            LTFSConfigurator
         '''                                           
-        '''  -l                                            Changer Tool        ''' [字符串的其余部分被截断]&quot;; 的本地化字符串。
+        '''  -l                                            Changer Too [字符串的其余部分被截断]&quot;; 的本地化字符串。
         '''</summary>
         Friend ReadOnly Property StrCMDHelpText() As String
             Get

@@ -121,7 +121,7 @@
     <value>设置Barcode失败</value>
   </data>
   <data name="StrCMDHelpText" xml:space="preserve">
-    <value>-s                                            不要自动读取索引
+    <value>  -s                                            不要自动读取索引
   -t &lt;drive&gt;                                    直接读写
   ├  -t 0
   ├  -t TAPE0
