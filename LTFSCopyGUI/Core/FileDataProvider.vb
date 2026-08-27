@@ -72,13 +72,16 @@ Public Class FileDataProvider
     ' - smallThresholdBytes: 小文件阈值（默认 16KiB）
     ' - smallCacheCapacity: 小文件缓存容量上限（默认 1000 个）
     ' - requireSignal: 是否需要外部通过 RequestNextFile 触发下一个文件（默认 False=积极连续缓存）
-    Public Sub New(writeList As IEnumerable(Of LTFSWriter.FileRecord),
+    Public Sub New(writeList As List(Of LTFSWriter.FileRecord),
                    Optional pipeBufferBytes As Long = 256 << 20,
                    Optional smallThresholdBytes As Long = 16 * 1024,
                    Optional smallCacheCapacity As Integer = 1000,
                    Optional requireSignal As Boolean = False)
 
-        _writeList = writeList.ToList()
+        'The writer already owns a stable indexed plan.  Keep that list by
+        'reference; copying several million FileRecord references here creates
+        'another large peak without improving provider safety.
+        _writeList = writeList
         _smallThreshold = Math.Max(1, smallThresholdBytes)
         _smallCacheCapacity = Math.Max(1, smallCacheCapacity)
         _requireSignal = requireSignal

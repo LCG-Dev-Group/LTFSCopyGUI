@@ -69,6 +69,7 @@ Public Class ltfsindex
         Private _lazyStore As LazySchemaStore
         Private _lazyRecordOffset As Long
         Private _lazyRecordLength As Long
+        Private _lazySelectionIndex As Long = -1
         Private _lazyScalarsLoaded As Boolean = True
         Private _lazyExtendedAttributesLoaded As Boolean = True
         Private _lazyExtentInfoLoaded As Boolean = True
@@ -111,10 +112,14 @@ Public Class ltfsindex
             _lazyExtentInfoLoaded = True
         End Sub
 
-        Friend Sub AttachLazyRecord(store As LazySchemaStore, recordOffset As Long, recordLength As Long)
+        Friend Sub AttachLazyRecord(store As LazySchemaStore,
+                                    recordOffset As Long,
+                                    recordLength As Long,
+                                    Optional selectionIndex As Long = -1)
             _lazyStore = store
             _lazyRecordOffset = recordOffset
             _lazyRecordLength = recordLength
+            _lazySelectionIndex = selectionIndex
             _lazyScalarsLoaded = False
             _lazyExtendedAttributesLoaded = False
             _lazyExtentInfoLoaded = False
@@ -298,9 +303,26 @@ Public Class ltfsindex
         <Category("Internal")>
         <Xml.Serialization.XmlIgnore>
         Public Property fullpath As String
+        Private _selected As Boolean = True
         <Category("Internal")>
         <Xml.Serialization.XmlIgnore>
-        Public Property Selected As Boolean = True
+        Public Property Selected As Boolean
+            Get
+                If _lazyStore IsNot Nothing AndAlso _lazySelectionIndex >= 0 Then
+                    Return _lazyStore.GetSelection(_lazySelectionIndex)
+                End If
+                Return _selected
+            End Get
+            Set(value As Boolean)
+                If _lazyStore IsNot Nothing AndAlso _lazySelectionIndex >= 0 Then
+                    _selected = value
+                    _lazyStore.SetSelection(_lazySelectionIndex, value)
+                    Return
+                End If
+                If _selected = value Then Return
+                _selected = value
+            End Set
+        End Property
         <Category("Internal")>
         <Xml.Serialization.XmlIgnore>
         Public Property WrittenBytes As Long = 0
@@ -512,6 +534,7 @@ Public Class ltfsindex
                 .fileuid = fileuid1,
                 .fullpath = fullpath, .length = length,
                 .modifytime = modifytime, .name = name, .openforwrite = openforwrite, .readonly = [readonly],
+                .symlink = symlink,
                 .tag = tag}
             result.extendedattributes = New List(Of xattr)
             For Each x As xattr In extendedattributes
@@ -538,6 +561,7 @@ Public Class ltfsindex
         Private _contents As contentsDef = New contentsDef
         Private _lazyStore As LazySchemaStore
         Private _lazyRecordOffset As Long
+        Private _lazySelectionIndex As Long = -1
         Private _lazyMetadataLoaded As Boolean = True
         Private _lazyContentsLoaded As Boolean = True
         Private _lazyCountsLoaded As Boolean = True
@@ -592,10 +616,12 @@ Public Class ltfsindex
 
         Friend Sub AttachLazyRecord(store As LazySchemaStore,
                                     recordOffset As Long,
-                                    Optional parent As directory = Nothing)
+                                    Optional parent As directory = Nothing,
+                                    Optional selectionIndex As Long = -1)
             _lazyStore = store
             _lazyRecordOffset = recordOffset
             _lazyParent = parent
+            _lazySelectionIndex = selectionIndex
             _lazyMetadataLoaded = False
             _lazyContentsLoaded = False
             _lazyCountsLoaded = False
@@ -622,7 +648,7 @@ Public Class ltfsindex
             If modified IsNot Nothing Then Return modified
 
             Dim result As New file
-            result.AttachLazyRecord(_lazyStore, child.RecordOffset, child.RecordLength)
+            result.AttachLazyRecord(_lazyStore, child.RecordOffset, child.RecordLength, child.SelectionIndex)
             Return result
         End Function
 
@@ -634,7 +660,7 @@ Public Class ltfsindex
             End If
 
             Dim result As New directory
-            result.AttachLazyRecord(_lazyStore, child.RecordOffset, Me)
+            result.AttachLazyRecord(_lazyStore, child.RecordOffset, Me, child.SelectionIndex)
             Return result
         End Function
 
@@ -646,11 +672,17 @@ Public Class ltfsindex
             Return Nothing
         End Function
 
+        Friend Iterator Function EnumerateFilesByName(fileName As String) As IEnumerable(Of file)
+            If fileName Is Nothing Then Exit Function
+            For Each item As file In EnumerateLazyFiles()
+                If String.Equals(item.name, fileName, StringComparison.OrdinalIgnoreCase) Then Yield item
+            Next
+        End Function
+
         Friend Function FindFilesByName(fileName As String) As List(Of file)
             Dim result As New List(Of file)
-            If fileName Is Nothing Then Return result
-            For Each item As file In EnumerateLazyFiles()
-                If String.Equals(item.name, fileName, StringComparison.OrdinalIgnoreCase) Then result.Add(item)
+            For Each item As file In EnumerateFilesByName(fileName)
+                result.Add(item)
             Next
             Return result
         End Function
@@ -663,11 +695,17 @@ Public Class ltfsindex
             Return Nothing
         End Function
 
+        Friend Iterator Function EnumerateDirectoriesByName(directoryName As String) As IEnumerable(Of directory)
+            If directoryName Is Nothing Then Exit Function
+            For Each item As directory In EnumerateLazyDirectories()
+                If String.Equals(item.name, directoryName, StringComparison.OrdinalIgnoreCase) Then Yield item
+            Next
+        End Function
+
         Friend Function FindDirectoriesByName(directoryName As String) As List(Of directory)
             Dim result As New List(Of directory)
-            If directoryName Is Nothing Then Return result
-            For Each item As directory In EnumerateLazyDirectories()
-                If String.Equals(item.name, directoryName, StringComparison.OrdinalIgnoreCase) Then result.Add(item)
+            For Each item As directory In EnumerateDirectoriesByName(directoryName)
+                result.Add(item)
             Next
             Return result
         End Function
@@ -727,6 +765,16 @@ Public Class ltfsindex
             Return removed
         End Function
 
+        Friend Sub SetLazySelection(value As Boolean)
+            Selected = value
+            For Each childFile As file In EnumerateLazyFiles()
+                childFile.Selected = value
+            Next
+            For Each childDirectory As directory In EnumerateLazyDirectories()
+                childDirectory.SetLazySelection(value)
+            Next
+        End Sub
+
         Private Sub EnsureLazyCounts()
             If _lazyStore Is Nothing OrElse _lazyCountsLoaded Then Exit Sub
             _lazyTotalFileCount = _lazyStore.GetDirectoryTotalFileCount(_lazyRecordOffset)
@@ -760,8 +808,8 @@ Public Class ltfsindex
 
         Friend Function HasPotentialChildren() As Boolean
             If _lazyStore IsNot Nothing AndAlso Not _lazyContentsLoaded Then
-                Return _lazyStore.GetDirectoryFileCount(_lazyRecordOffset) > 0 OrElse
-                       _lazyStore.GetDirectoryDirectoryCount(_lazyRecordOffset) > 0
+                Return _lazyStore.GetVisibleDirectoryFileCount(_lazyRecordOffset) > 0 OrElse
+                       _lazyStore.GetVisibleDirectoryDirectoryCount(_lazyRecordOffset) > 0
             End If
             Return _contents IsNot Nothing AndAlso
                    ((_contents._directory IsNot Nothing AndAlso _contents._directory.Count > 0) OrElse
@@ -770,12 +818,12 @@ Public Class ltfsindex
 
         Friend Function GetLazyDirectFileCount() As Integer
             If _lazyStore Is Nothing OrElse _lazyContentsLoaded Then Return If(_contents Is Nothing OrElse _contents._file Is Nothing, 0, _contents._file.Count)
-            Return _lazyStore.GetDirectoryFileCount(_lazyRecordOffset)
+            Return _lazyStore.GetVisibleDirectoryFileCount(_lazyRecordOffset)
         End Function
 
         Friend Function GetLazyDirectDirectoryCount() As Integer
             If _lazyStore Is Nothing OrElse _lazyContentsLoaded Then Return If(_contents Is Nothing OrElse _contents._directory Is Nothing, 0, _contents._directory.Count)
-            Return _lazyStore.GetDirectoryDirectoryCount(_lazyRecordOffset)
+            Return _lazyStore.GetVisibleDirectoryDirectoryCount(_lazyRecordOffset)
         End Function
 
         Friend Function GetLazyFileAt(index As Integer) As file
@@ -867,6 +915,38 @@ Public Class ltfsindex
                 Yield added
             Next
         End Function
+
+        Friend Sub SortChildrenByName(fileComparer As Comparison(Of String), directoryComparer As Comparison(Of String))
+            If _lazyStore IsNot Nothing AndAlso Not _lazyContentsLoaded Then
+                If fileComparer IsNot Nothing Then _lazyStore.SortFileChildren(_lazyRecordOffset, fileComparer)
+                If directoryComparer IsNot Nothing Then _lazyStore.SortDirectoryChildren(_lazyRecordOffset, directoryComparer)
+                _lazyFileCursorIndex = -1
+                _lazyFileCursorOffset = -1
+                _lazyDirectoryCursorIndex = -1
+                _lazyDirectoryCursorOffset = -1
+                Return
+            End If
+
+            If _contents Is Nothing Then _contents = New contentsDef
+            If fileComparer IsNot Nothing AndAlso _contents._file IsNot Nothing Then
+                _contents._file.Sort(Function(left As file, right As file) fileComparer(left.name, right.name))
+            End If
+            If directoryComparer IsNot Nothing AndAlso _contents._directory IsNot Nothing Then
+                _contents._directory.Sort(Function(left As directory, right As directory) directoryComparer(left.name, right.name))
+            End If
+            _totalCountsDirty = True
+        End Sub
+
+        Friend Sub SortMaterializedChildren(fileComparer As Comparison(Of file),
+                                             directoryComparer As Comparison(Of directory))
+            If _lazyStore IsNot Nothing AndAlso Not _lazyContentsLoaded Then
+                Throw New InvalidOperationException("Materialized child sorting was requested for a lazy directory.")
+            End If
+            If _contents Is Nothing Then _contents = New contentsDef
+            If fileComparer IsNot Nothing AndAlso _contents._file IsNot Nothing Then _contents._file.Sort(fileComparer)
+            If directoryComparer IsNot Nothing AndAlso _contents._directory IsNot Nothing Then _contents._directory.Sort(directoryComparer)
+            _totalCountsDirty = True
+        End Sub
 
         <Category("LTFSIndex")>
         Public Property name As String
@@ -972,6 +1052,7 @@ Public Class ltfsindex
         <Category("Internal")>
         Public Property LastUnwrittenFilesCount As Integer
         <Category("LTFSIndex")>
+        <Browsable(False)>
         Public Property contents As contentsDef
             Get
                 EnsureLazyContents()
@@ -1024,10 +1105,12 @@ Public Class ltfsindex
                     Return _lazyStore.GetDirectoryTotalFileCount(_lazyRecordOffset)
                 End If
                 If _totalCountsDirty Then RefreshCount()
-                If _TotalDirectories = 0 AndAlso contents._directory IsNot Nothing AndAlso contents._directory.Count > 0 Then
+                If _TotalDirectories = 0 AndAlso _contents IsNot Nothing AndAlso
+                   _contents._directory IsNot Nothing AndAlso _contents._directory.Count > 0 Then
                     RefreshCount()
                 End If
-                If _TotalFiles = 0 AndAlso contents._file IsNot Nothing AndAlso contents._file.Count > 0 Then
+                If _TotalFiles = 0 AndAlso _contents IsNot Nothing AndAlso
+                   _contents._file IsNot Nothing AndAlso _contents._file.Count > 0 Then
                     RefreshCount()
                 End If
                 Return _TotalFiles
@@ -1041,10 +1124,12 @@ Public Class ltfsindex
                     Return If(UnwrittenFiles Is Nothing, 0L, UnwrittenFiles.Count)
                 End If
                 If _totalCountsDirty Then RefreshCount()
-                If _TotalDirectories = 0 AndAlso contents._directory IsNot Nothing AndAlso contents._directory.Count > 0 Then
+                If _TotalDirectories = 0 AndAlso _contents IsNot Nothing AndAlso
+                   _contents._directory IsNot Nothing AndAlso _contents._directory.Count > 0 Then
                     RefreshCount()
                 End If
-                If _TotalFiles = 0 AndAlso contents._file IsNot Nothing AndAlso contents._file.Count > 0 Then
+                If _TotalFiles = 0 AndAlso _contents IsNot Nothing AndAlso
+                   _contents._file IsNot Nothing AndAlso _contents._file.Count > 0 Then
                     RefreshCount()
                 End If
                 If _TotalFilesUnwritten = 0 AndAlso UnwrittenFiles IsNot Nothing AndAlso UnwrittenFiles.Count > 0 Then
@@ -1061,10 +1146,12 @@ Public Class ltfsindex
                     Return _lazyStore.GetDirectoryTotalDirectoryCount(_lazyRecordOffset)
                 End If
                 If _totalCountsDirty Then RefreshCount()
-                If _TotalDirectories = 0 AndAlso contents._directory IsNot Nothing AndAlso contents._directory.Count > 0 Then
+                If _TotalDirectories = 0 AndAlso _contents IsNot Nothing AndAlso
+                   _contents._directory IsNot Nothing AndAlso _contents._directory.Count > 0 Then
                     RefreshCount()
                 End If
-                If _TotalFiles = 0 AndAlso contents._file IsNot Nothing AndAlso contents._file.Count > 0 Then
+                If _TotalFiles = 0 AndAlso _contents IsNot Nothing AndAlso
+                   _contents._file IsNot Nothing AndAlso _contents._file.Count > 0 Then
                     RefreshCount()
                 End If
                 Return _TotalDirectories
@@ -1078,35 +1165,21 @@ Public Class ltfsindex
                 _totalCountsDirty = False
                 Return
             End If
-            If contents._directory Is Nothing OrElse contents._directory.Count = 0 Then
-                If contents._file IsNot Nothing Then
-                    _TotalFiles = contents._file.Count
-                Else
-                    _TotalFiles = 0
-                End If
-                If UnwrittenFiles IsNot Nothing Then
-                    _TotalFilesUnwritten = UnwrittenFiles.Count
-                Else
-                    _TotalFilesUnwritten = 0
-                End If
-            Else
-                If contents._file IsNot Nothing Then
-                    _TotalFiles = contents._file.Count
-                End If
-                If UnwrittenFiles IsNot Nothing Then
-                    _TotalFilesUnwritten = UnwrittenFiles.Count
-                End If
-                For Each d As directory In contents._directory
-                    _TotalFiles += d.TotalFiles
-                    _TotalFilesUnwritten += d.TotalFilesUnwritten
-                Next
-            End If
-            If contents._directory IsNot Nothing Then
-                _TotalDirectories = contents._directory.Count
-                For Each d As directory In contents._directory
-                    _TotalDirectories += d.TotalDirectories
-                Next
-            End If
+            ' Enumerate through the lazy boundary.  The eager branch of the
+            ' enumerator reads _contents directly; the lazy branch reads one
+            ' child record at a time and never calls the public contents
+            ' property (whose getter materializes the complete directory).
+            _TotalFiles = 0
+            _TotalDirectories = 0
+            _TotalFilesUnwritten = If(UnwrittenFiles Is Nothing, 0L, UnwrittenFiles.Count)
+            For Each ignoredFile As file In EnumerateLazyFiles()
+                _TotalFiles += 1
+            Next
+            For Each childDirectory As directory In EnumerateLazyDirectories()
+                _TotalFiles += childDirectory.TotalFiles
+                _TotalFilesUnwritten += childDirectory.TotalFilesUnwritten
+                _TotalDirectories += 1L + childDirectory.TotalDirectories
+            Next
             _totalCountsDirty = False
         End Sub
         Public Sub DeepRefreshCount()
@@ -1119,7 +1192,7 @@ Public Class ltfsindex
             End If
             _TotalFiles = 0
             _TotalDirectories = 0
-            For Each d As directory In contents._directory
+            For Each d As directory In EnumerateLazyDirectories()
                 d.DeepRefreshCount()
             Next
             RefreshCount()
@@ -1129,9 +1202,26 @@ Public Class ltfsindex
         <Xml.Serialization.XmlIgnore>
         <Category("Internal")>
         Public Property fullpath As String
+        Private _selected As Boolean = True
         <Xml.Serialization.XmlIgnore>
         <Category("Internal")>
-        Public Property Selected As Boolean = True
+        Public Property Selected As Boolean
+            Get
+                If _lazyStore IsNot Nothing AndAlso _lazySelectionIndex >= 0 Then
+                    Return _lazyStore.GetSelection(_lazySelectionIndex)
+                End If
+                Return _selected
+            End Get
+            Set(value As Boolean)
+                If _lazyStore IsNot Nothing AndAlso _lazySelectionIndex >= 0 Then
+                    _selected = value
+                    _lazyStore.SetSelection(_lazySelectionIndex, value)
+                    Return
+                End If
+                If _selected = value Then Return
+                _selected = value
+            End Set
+        End Property
 
         Public Function GetSerializedText(Optional ByVal ReduceSize As Boolean = True) As String
             If _lazyStore IsNot Nothing Then
@@ -1173,6 +1263,11 @@ Public Class ltfsindex
             Return CType(reader.Deserialize(t), directory)
         End Function
         Public Shared Function FromFile(FileName As String) As directory
+            If String.IsNullOrWhiteSpace(FileName) OrElse Not IO.File.Exists(FileName) Then Return Nothing
+            If New IO.FileInfo(FileName).Length >= LazyLoadThresholdBytes Then
+                Return LazySchemaReader.LoadDirectory(FileName)
+            End If
+
             Dim result As directory
             Dim reader As New Xml.Serialization.XmlSerializer(GetType(directory))
             Dim t As IO.StreamReader = New IO.StreamReader(FileName)
@@ -1230,7 +1325,7 @@ Public Class ltfsindex
         While q.Count > 0
             Dim qn As New List(Of directory)
             For Each d As directory In q
-                For Each fn As file In d.contents._file
+                For Each fn As file In d.EnumerateLazyFiles()
                     If fn.sha1 IsNot Nothing Then
                         If fn.sha1.Length = 40 Then
                             fn.SetXattr("ltfs.hash.sha1sum", fn.sha1)
@@ -1238,7 +1333,7 @@ Public Class ltfsindex
                         fn.sha1 = Nothing
                     End If
                 Next
-                For Each dn As directory In d.contents._directory
+                For Each dn As directory In d.EnumerateLazyDirectories()
                     qn.Add(dn)
                 Next
             Next
@@ -1469,6 +1564,40 @@ Public Class ltfsindex
     End Function
     Private Const LazyLoadThresholdBytes As Long = 4L * 1024L * 1024L
 
+    Public Shared Function FromSchemaFile(FileName As String) As ltfsindex
+        If String.IsNullOrWhiteSpace(FileName) OrElse Not IO.File.Exists(FileName) Then Return Nothing
+
+        Try
+            ' A serializer-produced schema contains the XML Schema namespace,
+            ' while the compact tape schema does not.  Probe only the header so
+            ' opening a multi-million-file index never requires ReadAllText.
+            Dim serializedSchema As Boolean = False
+            Using probe As New IO.StreamReader(FileName, Text.Encoding.UTF8,
+                                                detectEncodingFromByteOrderMarks:=True,
+                                                bufferSize:=1 << 16)
+                Dim header As New Text.StringBuilder(1 << 16)
+                While header.Length < (1 << 16) AndAlso Not probe.EndOfStream
+                    Dim line As String = probe.ReadLine()
+                    If line Is Nothing Then Exit While
+                    header.AppendLine(line)
+                End While
+                serializedSchema = header.ToString().IndexOf("XMLSchema", StringComparison.Ordinal) >= 0
+            End Using
+
+            If serializedSchema Then
+                If New IO.FileInfo(FileName).Length >= LazyLoadThresholdBytes Then
+                    Return LazySchemaReader.Load(FileName)
+                End If
+                Return FromXML(IO.File.ReadAllText(FileName))
+            End If
+
+            Return FromSchFile(FileName)
+        Catch ex As Exception
+            MessageBox.Show(New Form With {.TopMost = True}, ex.ToString)
+            Return Nothing
+        End Try
+    End Function
+
     Public Shared Function FromSchFile(FileName As String) As ltfsindex
         Try
             If IO.File.Exists(FileName) AndAlso New IO.FileInfo(FileName).Length >= LazyLoadThresholdBytes Then
@@ -1546,19 +1675,28 @@ Public Class ltfsindex
         Return result
     End Function
     Public Shared Sub WSort(d As List(Of directory), OnFileFound As Action(Of file), OnDirectoryFound As Action(Of directory), Optional ByRef StopFlag As Boolean = False)
-        Dim q As List(Of directory) = d
-        While (Not StopFlag) AndAlso q.Count > 0
-            Dim q2 As New List(Of directory)
-            For Each dq As directory In q
-                If OnDirectoryFound IsNot Nothing Then OnDirectoryFound(dq)
-                For Each fi As file In dq.EnumerateLazyFiles()
-                    If OnFileFound IsNot Nothing Then OnFileFound(fi)
-                Next
-                For Each childDirectory As directory In dq.EnumerateLazyDirectories()
-                    q2.Add(childDirectory)
-                Next
+        If d Is Nothing Then Exit Sub
+
+        ' Keep only the pending traversal path.  The old breadth-first queue
+        ' retained every directory in the current level and callers then often
+        ' forced .contents on each directory.  Lazy directories can now be
+        ' visited one by one without building a second in-memory tree.
+        Dim pending As New Stack(Of directory)
+        For i As Integer = d.Count - 1 To 0 Step -1
+            If d(i) IsNot Nothing Then pending.Push(d(i))
+        Next
+
+        While (Not StopFlag) AndAlso pending.Count > 0
+            Dim current As directory = pending.Pop()
+            If OnDirectoryFound IsNot Nothing Then OnDirectoryFound(current)
+            For Each fi As file In current.EnumerateLazyFiles()
+                If OnFileFound IsNot Nothing Then OnFileFound(fi)
+                If StopFlag Then Exit For
             Next
-            q = q2
+            If StopFlag Then Exit While
+            For Each childDirectory As directory In current.EnumerateLazyDirectories()
+                If childDirectory IsNot Nothing Then pending.Push(childDirectory)
+            Next
         End While
     End Sub
 End Class
@@ -1572,6 +1710,7 @@ Friend NotInheritable Class LazySchemaChildData
     Public Property Kind As LazySchemaChildKind
     Public Property RecordOffset As Long
     Public Property RecordLength As Long
+    Public Property SelectionIndex As Long
 End Class
 
 Friend NotInheritable Class LazyDirectoryScalarData
@@ -1601,6 +1740,7 @@ End Class
 
 Friend Structure LazyDirectoryBuildState
     Public Offset As Long
+    Public SelectionIndex As Long
     Public FirstFileIndexOffset As Long
     Public LastFileIndexOffset As Long
     Public FirstDirectoryIndexOffset As Long
@@ -1613,6 +1753,7 @@ End Structure
 
 Friend Structure LazyDirectoryReference
     Public Offset As Long
+    Public SelectionIndex As Long
     Public TotalFileCount As Long
     Public TotalDirectoryCount As Long
 End Structure
@@ -1633,25 +1774,29 @@ Friend NotInheritable Class LazySchemaStore
     Private Const DirectoryMagic As Integer = &H4C534452 ' LSDR
     Private Const DirectoryVersion As Integer = 2
     Private Const DirectoryHeaderSize As Integer = 64
-    Private Const FileIndexEntrySize As Integer = 24
-    Private Const DirectoryIndexEntrySize As Integer = 16
+    Private Const FileIndexEntrySize As Integer = 32
+    Private Const DirectoryIndexEntrySize As Integer = 24
     Private Const IoBufferSize As Integer = 1 << 16
 
     Private ReadOnly _fileRecordsPath As String
     Private ReadOnly _directoryRecordsPath As String
     Private ReadOnly _fileIndexPath As String
     Private ReadOnly _directoryIndexPath As String
+    Private ReadOnly _selectionPath As String
     Private ReadOnly _buildLock As New Object
+    Private ReadOnly _selectionLock As New Object
 
     Private _fileRecords As IO.FileStream
     Private _directoryRecords As IO.FileStream
     Private _fileIndex As IO.FileStream
     Private _directoryIndex As IO.FileStream
+    Private _selectionStream As IO.FileStream
     Private _fileWriter As IO.BinaryWriter
     Private _directoryWriter As IO.BinaryWriter
     Private _fileIndexWriter As IO.BinaryWriter
     Private _directoryIndexWriter As IO.BinaryWriter
     Private _building As Boolean
+    Private _nextSelectionIndex As Long
     Private ReadOnly _mutationLock As New Object
     Private ReadOnly _directoryMutations As New Dictionary(Of Long, LazyDirectoryMutation)
     Private ReadOnly _modifiedFiles As New Dictionary(Of Long, ltfsindex.file)
@@ -1659,19 +1804,107 @@ Friend NotInheritable Class LazySchemaStore
     Private ReadOnly _fileTotalDeltas As New Dictionary(Of Long, Long)
     Private ReadOnly _directoryTotalDeltas As New Dictionary(Of Long, Long)
 
+    Private Const SortChunkSize As Integer = 8192
+
+    Private NotInheritable Class LazySortItem
+        Public Property Name As String
+        Public Property IndexOffset As Long
+        Public Property Sequence As Long
+    End Class
+
+    Private NotInheritable Class LazySortRunCursor
+        Implements IDisposable
+
+        Private ReadOnly _stream As IO.FileStream
+        Private ReadOnly _reader As IO.BinaryReader
+        Private _hasCurrent As Boolean
+        Private _name As String
+        Private _indexOffset As Long
+        Private _sequence As Long
+
+        Public Sub New(path As String, runId As Integer)
+            Me.RunId = runId
+            _stream = New IO.FileStream(path, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read,
+                                        IoBufferSize, IO.FileOptions.SequentialScan)
+            _reader = New IO.BinaryReader(_stream, New Text.UTF8Encoding(False, True), leaveOpen:=False)
+        End Sub
+
+        Public ReadOnly Property Name As String
+            Get
+                Return _name
+            End Get
+        End Property
+        Public ReadOnly Property IndexOffset As Long
+            Get
+                Return _indexOffset
+            End Get
+        End Property
+        Public ReadOnly Property Sequence As Long
+            Get
+                Return _sequence
+            End Get
+        End Property
+        Public ReadOnly Property RunId As Integer
+
+        Public Function MoveNext() As Boolean
+            If _stream.Position >= _stream.Length Then
+                _hasCurrent = False
+                Return False
+            End If
+
+            _sequence = _reader.ReadInt64()
+            _indexOffset = _reader.ReadInt64()
+            _name = ReadNullableString(_reader)
+            _hasCurrent = True
+            Return True
+        End Function
+
+        Public ReadOnly Property HasCurrent As Boolean
+            Get
+                Return _hasCurrent
+            End Get
+        End Property
+
+        Public Sub Dispose() Implements IDisposable.Dispose
+            If _reader IsNot Nothing Then _reader.Dispose()
+        End Sub
+    End Class
+
+    Private NotInheritable Class LazySortRunComparer
+        Implements IComparer(Of LazySortRunCursor)
+
+        Private ReadOnly _nameComparer As Comparison(Of String)
+
+        Public Sub New(nameComparer As Comparison(Of String))
+            _nameComparer = nameComparer
+        End Sub
+
+        Public Function Compare(left As LazySortRunCursor, right As LazySortRunCursor) As Integer _
+            Implements IComparer(Of LazySortRunCursor).Compare
+            Dim result As Integer = _nameComparer(If(left.Name, String.Empty), If(right.Name, String.Empty))
+            If result <> 0 Then Return result
+            result = left.Sequence.CompareTo(right.Sequence)
+            If result <> 0 Then Return result
+            Return left.RunId.CompareTo(right.RunId)
+        End Function
+    End Class
+
     Private Sub New(fileRecordsPath As String,
                     directoryRecordsPath As String,
                     fileIndexPath As String,
-                    directoryIndexPath As String)
+                    directoryIndexPath As String,
+                    selectionPath As String)
         _fileRecordsPath = fileRecordsPath
         _directoryRecordsPath = directoryRecordsPath
         _fileIndexPath = fileIndexPath
         _directoryIndexPath = directoryIndexPath
+        _selectionPath = selectionPath
 
         _fileRecords = New IO.FileStream(_fileRecordsPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
         _directoryRecords = New IO.FileStream(_directoryRecordsPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
         _fileIndex = New IO.FileStream(_fileIndexPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
         _directoryIndex = New IO.FileStream(_directoryIndexPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
+        _selectionStream = New IO.FileStream(_selectionPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.ReadWrite, IoBufferSize, IO.FileOptions.RandomAccess)
         Dim utf8 As New Text.UTF8Encoding(False, True)
         _fileWriter = New IO.BinaryWriter(_fileRecords, utf8, leaveOpen:=True)
         _directoryWriter = New IO.BinaryWriter(_directoryRecords, utf8, leaveOpen:=True)
@@ -1683,10 +1916,10 @@ Friend NotInheritable Class LazySchemaStore
     Friend Shared Function CreateForBuild() As LazySchemaStore
         Dim paths As New List(Of String)
         Try
-            For Each suffix As String In New String() {"files", "directories", "file-index", "directory-index"}
+            For Each suffix As String In New String() {"files", "directories", "file-index", "directory-index", "selection"}
                 paths.Add(CreateTempFilePath(suffix))
             Next
-            Return New LazySchemaStore(paths(0), paths(1), paths(2), paths(3))
+            Return New LazySchemaStore(paths(0), paths(1), paths(2), paths(3), paths(4))
         Catch
             For Each path As String In paths
                 Try
@@ -1744,10 +1977,40 @@ Friend NotInheritable Class LazySchemaStore
         Return _fileRecords.Position - startOffset
     End Function
 
+    Friend Function AllocateSelectionIndex() As Long
+        EnsureBuilding()
+        SyncLock _selectionLock
+            Dim result As Long = _nextSelectionIndex
+            _selectionStream.Seek(result, IO.SeekOrigin.Begin)
+            _selectionStream.WriteByte(1)
+            _nextSelectionIndex += 1
+            Return result
+        End SyncLock
+    End Function
+
+    Friend Function GetSelection(selectionIndex As Long) As Boolean
+        If selectionIndex < 0 Then Return True
+        SyncLock _selectionLock
+            If _selectionStream Is Nothing OrElse selectionIndex >= _selectionStream.Length Then Return True
+            _selectionStream.Seek(selectionIndex, IO.SeekOrigin.Begin)
+            Return _selectionStream.ReadByte() > 0
+        End SyncLock
+    End Function
+
+    Friend Sub SetSelection(selectionIndex As Long, selected As Boolean)
+        If selectionIndex < 0 Then Exit Sub
+        SyncLock _selectionLock
+            If _selectionStream Is Nothing OrElse selectionIndex >= _selectionStream.Length Then Exit Sub
+            _selectionStream.Seek(selectionIndex, IO.SeekOrigin.Begin)
+            _selectionStream.WriteByte(If(selected, CByte(1), CByte(0)))
+        End SyncLock
+    End Sub
+
     Friend Function BeginDirectoryRecord() As LazyDirectoryBuildState
         EnsureBuilding()
         Dim state As New LazyDirectoryBuildState With {
             .Offset = _directoryRecords.Position,
+            .SelectionIndex = AllocateSelectionIndex(),
             .FirstFileIndexOffset = -1,
             .LastFileIndexOffset = -1,
             .FirstDirectoryIndexOffset = -1,
@@ -1775,13 +2038,15 @@ Friend NotInheritable Class LazySchemaStore
                          recordOffset As Long,
                          recordLength As Long,
                          Optional childTotalFileCount As Long = 0,
-                         Optional childTotalDirectoryCount As Long = 0)
+                         Optional childTotalDirectoryCount As Long = 0,
+                         Optional selectionIndex As Long = -1)
         EnsureBuilding()
         If kind = LazySchemaChildKind.FileRecord Then
             Dim fileIndexOffset As Long = _fileIndex.Position
             _fileIndexWriter.Write(CLng(-1))
             _fileIndexWriter.Write(recordOffset)
             _fileIndexWriter.Write(recordLength)
+            _fileIndexWriter.Write(selectionIndex)
             If state.FileCount = 0 Then
                 state.FirstFileIndexOffset = fileIndexOffset
             Else
@@ -1797,6 +2062,7 @@ Friend NotInheritable Class LazySchemaStore
             Dim directoryIndexOffset As Long = _directoryIndex.Position
             _directoryIndexWriter.Write(CLng(-1))
             _directoryIndexWriter.Write(recordOffset)
+            _directoryIndexWriter.Write(selectionIndex)
             If state.DirectoryCount = 0 Then
                 state.FirstDirectoryIndexOffset = directoryIndexOffset
             Else
@@ -1849,6 +2115,7 @@ Friend NotInheritable Class LazySchemaStore
         SyncLock _buildLock
             _building = False
             CloseBuildStreams()
+            CloseSelectionStream()
             DeleteBackingFiles()
         End SyncLock
     End Sub
@@ -2027,23 +2294,23 @@ Friend NotInheritable Class LazySchemaStore
     End Function
 
     Friend Function EnumerateAddedFiles(parentOffset As Long) As IEnumerable(Of ltfsindex.file)
-        Dim snapshot As List(Of ltfsindex.file) = Nothing
+        Dim result As IEnumerable(Of ltfsindex.file) = Nothing
         SyncLock _mutationLock
             Dim mutation As LazyDirectoryMutation = Nothing
-            If _directoryMutations.TryGetValue(parentOffset, mutation) Then snapshot = mutation.AddedFiles.ToList()
+            If _directoryMutations.TryGetValue(parentOffset, mutation) Then result = mutation.AddedFiles
         End SyncLock
-        If snapshot Is Nothing Then Return Enumerable.Empty(Of ltfsindex.file)()
-        Return snapshot
+        If result Is Nothing Then Return Enumerable.Empty(Of ltfsindex.file)()
+        Return result
     End Function
 
     Friend Function EnumerateAddedDirectories(parentOffset As Long) As IEnumerable(Of ltfsindex.directory)
-        Dim snapshot As List(Of ltfsindex.directory) = Nothing
+        Dim result As IEnumerable(Of ltfsindex.directory) = Nothing
         SyncLock _mutationLock
             Dim mutation As LazyDirectoryMutation = Nothing
-            If _directoryMutations.TryGetValue(parentOffset, mutation) Then snapshot = mutation.AddedDirectories.ToList()
+            If _directoryMutations.TryGetValue(parentOffset, mutation) Then result = mutation.AddedDirectories
         End SyncLock
-        If snapshot Is Nothing Then Return Enumerable.Empty(Of ltfsindex.directory)()
-        Return snapshot
+        If result Is Nothing Then Return Enumerable.Empty(Of ltfsindex.directory)()
+        Return result
     End Function
 
     Private Sub CloseBuildStreams()
@@ -2085,8 +2352,17 @@ Friend NotInheritable Class LazySchemaStore
         End If
     End Sub
 
+    Private Sub CloseSelectionStream()
+        SyncLock _selectionLock
+            If _selectionStream IsNot Nothing Then
+                Try : _selectionStream.Dispose() : Catch : End Try
+                _selectionStream = Nothing
+            End If
+        End SyncLock
+    End Sub
+
     Private Sub DeleteBackingFiles()
-        For Each path As String In New String() {_fileRecordsPath, _directoryRecordsPath, _fileIndexPath, _directoryIndexPath}
+        For Each path As String In New String() {_fileRecordsPath, _directoryRecordsPath, _fileIndexPath, _directoryIndexPath, _selectionPath}
             Try
                 If IO.File.Exists(path) Then IO.File.Delete(path)
             Catch
@@ -2113,20 +2389,17 @@ Friend NotInheritable Class LazySchemaStore
         Return result
     End Function
 
-    Friend Function ReadDirectoryChildren(recordOffset As Long) As List(Of LazySchemaChildData)
-        Dim header As LazyDirectoryHeader = ReadDirectoryHeader(recordOffset)
-        Dim result As New List(Of LazySchemaChildData)(Math.Max(0, header.FileCount + header.DirectoryCount))
+    Friend Iterator Function EnumerateDirectoryChildren(recordOffset As Long) As IEnumerable(Of LazySchemaChildData)
         For Each directoryChild As LazySchemaChildData In EnumerateDirectoryReferences(recordOffset)
-            result.Add(directoryChild)
+            Yield directoryChild
         Next
         For Each fileChild As LazySchemaChildData In EnumerateFileReferences(recordOffset)
-            result.Add(fileChild)
+            Yield fileChild
         Next
-        Return result
     End Function
 
     Friend Function HasDirectoryChildren(recordOffset As Long) As Boolean
-        Return GetDirectoryFileCount(recordOffset) > 0 OrElse GetDirectoryDirectoryCount(recordOffset) > 0
+        Return GetVisibleDirectoryFileCount(recordOffset) > 0 OrElse GetVisibleDirectoryDirectoryCount(recordOffset) > 0
     End Function
 
     Friend Function GetDirectoryFileCount(recordOffset As Long) As Integer
@@ -2165,6 +2438,30 @@ Friend NotInheritable Class LazySchemaStore
         Return ReadDirectoryHeader(recordOffset).DirectoryCount
     End Function
 
+    Friend Function GetVisibleDirectoryFileCount(recordOffset As Long) As Integer
+        SyncLock _mutationLock
+            Dim result As Long = ReadDirectoryFileCount(recordOffset)
+            Dim mutation As LazyDirectoryMutation = Nothing
+            If _directoryMutations.TryGetValue(recordOffset, mutation) Then
+                result -= mutation.RemovedFileOffsets.Count
+                result += mutation.AddedFiles.Count
+            End If
+            Return CInt(Math.Max(0L, Math.Min(Integer.MaxValue, result)))
+        End SyncLock
+    End Function
+
+    Friend Function GetVisibleDirectoryDirectoryCount(recordOffset As Long) As Integer
+        SyncLock _mutationLock
+            Dim result As Long = ReadDirectoryDirectoryCount(recordOffset)
+            Dim mutation As LazyDirectoryMutation = Nothing
+            If _directoryMutations.TryGetValue(recordOffset, mutation) Then
+                result -= mutation.RemovedDirectoryOffsets.Count
+                result += mutation.AddedDirectories.Count
+            End If
+            Return CInt(Math.Max(0L, Math.Min(Integer.MaxValue, result)))
+        End SyncLock
+    End Function
+
     Friend Function ReadDirectoryTotalFileCount(recordOffset As Long) As Long
         Return ReadDirectoryHeader(recordOffset).TotalFileCount
     End Function
@@ -2188,6 +2485,178 @@ Friend NotInheritable Class LazySchemaStore
             Return Math.Max(0L, ReadDirectoryTotalDirectoryCount(recordOffset) + delta)
         End SyncLock
     End Function
+
+    Private Function FlushSortChunk(items As List(Of LazySortItem),
+                                    nameComparer As Comparison(Of String)) As String
+        If items Is Nothing OrElse items.Count = 0 Then Return Nothing
+        items.Sort(Function(left As LazySortItem, right As LazySortItem)
+                       Dim result As Integer = nameComparer(If(left.Name, String.Empty), If(right.Name, String.Empty))
+                       If result <> 0 Then Return result
+                       Return left.Sequence.CompareTo(right.Sequence)
+                   End Function)
+
+        Dim path As String = CreateTempFilePath("sort-run")
+        Try
+            Using stream As New IO.FileStream(path, IO.FileMode.Create, IO.FileAccess.Write, IO.FileShare.Read,
+                                              IoBufferSize, IO.FileOptions.SequentialScan)
+                Using writer As New IO.BinaryWriter(stream, New Text.UTF8Encoding(False, True), leaveOpen:=False)
+                    For Each item As LazySortItem In items
+                        writer.Write(item.Sequence)
+                        writer.Write(item.IndexOffset)
+                        WriteNullableString(writer, item.Name)
+                    Next
+                End Using
+            End Using
+            items.Clear()
+            Return path
+        Catch
+            Try
+                If IO.File.Exists(path) Then IO.File.Delete(path)
+            Catch
+            End Try
+            Throw
+        End Try
+    End Function
+
+    Private Sub MergeSortRuns(runPaths As List(Of String),
+                              nameComparer As Comparison(Of String),
+                              onIndex As Action(Of Long))
+        Dim cursors As New List(Of LazySortRunCursor)
+        Dim active As New SortedSet(Of LazySortRunCursor)(New LazySortRunComparer(nameComparer))
+        Try
+            For i As Integer = 0 To runPaths.Count - 1
+                Dim cursor As New LazySortRunCursor(runPaths(i), i)
+                cursors.Add(cursor)
+                If cursor.MoveNext() Then active.Add(cursor)
+            Next
+
+            While active.Count > 0
+                Dim cursor As LazySortRunCursor = active.Min
+                active.Remove(cursor)
+                onIndex(cursor.IndexOffset)
+                If cursor.MoveNext() Then active.Add(cursor)
+            End While
+        Finally
+            For Each cursor As LazySortRunCursor In cursors
+                cursor.Dispose()
+            Next
+        End Try
+    End Sub
+
+    Private Sub SortIndexChain(recordOffset As Long,
+                               indexPath As String,
+                               entrySize As Integer,
+                               isFile As Boolean,
+                               nameComparer As Comparison(Of String))
+        If nameComparer Is Nothing Then Exit Sub
+        Dim header As LazyDirectoryHeader = ReadDirectoryHeader(recordOffset)
+        Dim itemCount As Integer = If(isFile, header.FileCount, header.DirectoryCount)
+        If itemCount <= 1 Then Exit Sub
+
+        Dim firstIndexOffset As Long = If(isFile, header.FileIndexOffset, header.DirectoryIndexOffset)
+        If firstIndexOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema index chain.")
+
+        Dim runPaths As New List(Of String)
+        Dim items As New List(Of LazySortItem)(Math.Min(SortChunkSize, itemCount))
+        Try
+            Using indexStream As New IO.FileStream(indexPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.ReadWrite,
+                                                   IoBufferSize, IO.FileOptions.SequentialScan)
+                Using reader As New IO.BinaryReader(indexStream, New Text.UTF8Encoding(False, True), leaveOpen:=True)
+                    Dim indexOffset As Long = firstIndexOffset
+                    For sequence As Long = 0 To itemCount - 1
+                        If indexOffset < 0 OrElse indexOffset > indexStream.Length - entrySize Then
+                            Throw New IO.InvalidDataException("Invalid lazy schema index chain.")
+                        End If
+
+                        indexStream.Seek(indexOffset, IO.SeekOrigin.Begin)
+                        Dim nextIndexOffset As Long = reader.ReadInt64()
+                        Dim childRecordOffset As Long = reader.ReadInt64()
+                        Dim childRecordLength As Long = If(isFile, reader.ReadInt64(), 0L)
+                        If isFile Then
+                            reader.ReadInt64()
+                        Else
+                            reader.ReadInt64()
+                        End If
+                        Dim childName As String
+                        If isFile Then
+                            childName = ReadFileScalars(childRecordOffset, childRecordLength).Name
+                        Else
+                            childName = ReadDirectoryScalars(childRecordOffset).Name
+                        End If
+                        items.Add(New LazySortItem With {
+                                      .Name = If(childName, String.Empty),
+                                      .IndexOffset = indexOffset,
+                                      .Sequence = sequence})
+
+                        If items.Count >= SortChunkSize Then
+                            Dim runPath As String = FlushSortChunk(items, nameComparer)
+                            If runPath IsNot Nothing Then runPaths.Add(runPath)
+                        End If
+                        indexOffset = nextIndexOffset
+                    Next
+                    If items.Count > 0 Then
+                        Dim runPath As String = FlushSortChunk(items, nameComparer)
+                        If runPath IsNot Nothing Then runPaths.Add(runPath)
+                    End If
+                End Using
+            End Using
+
+            If runPaths.Count = 0 Then Exit Sub
+
+            Dim firstSortedOffset As Long = -1
+            Dim previousSortedOffset As Long = -1
+            Dim sortedCount As Integer = 0
+            Using indexStream As New IO.FileStream(indexPath, IO.FileMode.Open, IO.FileAccess.ReadWrite, IO.FileShare.Read,
+                                                   IoBufferSize, IO.FileOptions.RandomAccess)
+                Using writer As New IO.BinaryWriter(indexStream, New Text.UTF8Encoding(False, True), leaveOpen:=True)
+                    MergeSortRuns(runPaths, nameComparer,
+                                  Sub(sortedIndexOffset As Long)
+                                      If firstSortedOffset < 0 Then firstSortedOffset = sortedIndexOffset
+                                      If previousSortedOffset >= 0 Then
+                                          indexStream.Seek(previousSortedOffset, IO.SeekOrigin.Begin)
+                                          writer.Write(sortedIndexOffset)
+                                      End If
+                                      previousSortedOffset = sortedIndexOffset
+                                      sortedCount += 1
+                                  End Sub)
+                    If previousSortedOffset >= 0 Then
+                        indexStream.Seek(previousSortedOffset, IO.SeekOrigin.Begin)
+                        writer.Write(CLng(-1))
+                    End If
+                    writer.Flush()
+                End Using
+            End Using
+
+            If sortedCount <> itemCount Then Throw New IO.InvalidDataException("Lazy schema sort lost an index entry.")
+            Using directoryStream As New IO.FileStream(_directoryRecordsPath, IO.FileMode.Open, IO.FileAccess.ReadWrite, IO.FileShare.Read,
+                                                       IoBufferSize, IO.FileOptions.RandomAccess)
+                Using writer As New IO.BinaryWriter(directoryStream, New Text.UTF8Encoding(False, True), leaveOpen:=True)
+                    directoryStream.Seek(recordOffset + If(isFile, 24L, 36L), IO.SeekOrigin.Begin)
+                    writer.Write(firstSortedOffset)
+                    writer.Flush()
+                End Using
+            End Using
+        Finally
+            For Each runPath As String In runPaths
+                Try
+                    If IO.File.Exists(runPath) Then IO.File.Delete(runPath)
+                Catch
+                End Try
+            Next
+        End Try
+    End Sub
+
+    Friend Sub SortFileChildren(recordOffset As Long, nameComparer As Comparison(Of String))
+        SyncLock _mutationLock
+            SortIndexChain(recordOffset, _fileIndexPath, FileIndexEntrySize, True, nameComparer)
+        End SyncLock
+    End Sub
+
+    Friend Sub SortDirectoryChildren(recordOffset As Long, nameComparer As Comparison(Of String))
+        SyncLock _mutationLock
+            SortIndexChain(recordOffset, _directoryIndexPath, DirectoryIndexEntrySize, False, nameComparer)
+        End SyncLock
+    End Sub
 
     Friend Function ReadFileAt(recordOffset As Long,
                                index As Integer,
@@ -2216,7 +2685,8 @@ Friend NotInheritable Class LazySchemaStore
                 Dim result As New LazySchemaChildData With {
                     .Kind = LazySchemaChildKind.FileRecord,
                     .RecordOffset = reader.ReadInt64(),
-                    .RecordLength = reader.ReadInt64()}
+                    .RecordLength = reader.ReadInt64(),
+                    .SelectionIndex = reader.ReadInt64()}
                 cursorIndex = index
                 cursorOffset = entryOffset
                 Return result
@@ -2251,7 +2721,8 @@ Friend NotInheritable Class LazySchemaStore
                 Dim result As New LazySchemaChildData With {
                     .Kind = LazySchemaChildKind.DirectoryRecord,
                     .RecordOffset = reader.ReadInt64(),
-                    .RecordLength = 0}
+                    .RecordLength = 0,
+                    .SelectionIndex = reader.ReadInt64()}
                 cursorIndex = index
                 cursorOffset = entryOffset
                 Return result
@@ -2274,7 +2745,8 @@ Friend NotInheritable Class LazySchemaStore
                     Dim result As New LazySchemaChildData With {
                         .Kind = LazySchemaChildKind.FileRecord,
                         .RecordOffset = reader.ReadInt64(),
-                        .RecordLength = reader.ReadInt64()}
+                        .RecordLength = reader.ReadInt64(),
+                        .SelectionIndex = reader.ReadInt64()}
                     Yield result
                     entryOffset = nextOffset
                 Next
@@ -2297,7 +2769,8 @@ Friend NotInheritable Class LazySchemaStore
                     Dim result As New LazySchemaChildData With {
                         .Kind = LazySchemaChildKind.DirectoryRecord,
                         .RecordOffset = reader.ReadInt64(),
-                        .RecordLength = 0}
+                        .RecordLength = 0,
+                        .SelectionIndex = reader.ReadInt64()}
                     Yield result
                     entryOffset = nextOffset
                 Next
@@ -2681,7 +3154,7 @@ Friend NotInheritable Class LazySchemaStore
                 Dim childDirectory As ltfsindex.directory = GetModifiedDirectory(child.RecordOffset)
                 If childDirectory Is Nothing Then
                     childDirectory = New ltfsindex.directory
-                    childDirectory.AttachLazyRecord(Me, child.RecordOffset)
+                    childDirectory.AttachLazyRecord(Me, child.RecordOffset, selectionIndex:=child.SelectionIndex)
                 End If
                 WriteDirectory(writer, childDirectory, useCollectionWrappers, fileSerializer, fileNamespaces)
             Next
@@ -2701,18 +3174,14 @@ Friend NotInheritable Class LazySchemaStore
             WriteElement(writer, "fileuid", directory.fileuid.ToString(CultureInfo.InvariantCulture))
             writer.WriteStartElement("contents")
             If useCollectionWrappers Then writer.WriteStartElement("_file")
-            If directory.contents IsNot Nothing AndAlso directory.contents._file IsNot Nothing Then
-                For Each childFile As ltfsindex.file In directory.contents._file
-                    WriteFileObject(writer, childFile, fileSerializer, fileNamespaces)
-                Next
-            End If
+            For Each childFile As ltfsindex.file In directory.EnumerateLazyFiles()
+                WriteFileObject(writer, childFile, fileSerializer, fileNamespaces)
+            Next
             If useCollectionWrappers Then writer.WriteEndElement()
             If useCollectionWrappers Then writer.WriteStartElement("_directory")
-            If directory.contents IsNot Nothing AndAlso directory.contents._directory IsNot Nothing Then
-                For Each childDirectory As ltfsindex.directory In directory.contents._directory
-                    WriteDirectory(writer, childDirectory, useCollectionWrappers, fileSerializer, fileNamespaces)
-                Next
-            End If
+            For Each childDirectory As ltfsindex.directory In directory.EnumerateLazyDirectories()
+                WriteDirectory(writer, childDirectory, useCollectionWrappers, fileSerializer, fileNamespaces)
+            Next
             If useCollectionWrappers Then writer.WriteEndElement()
             writer.WriteEndElement()
         End If
@@ -2785,6 +3254,7 @@ Friend NotInheritable Class LazySchemaStore
         Try
             SyncLock _buildLock
                 CloseBuildStreams()
+                CloseSelectionStream()
                 DeleteBackingFiles()
             End SyncLock
         Finally
@@ -2872,6 +3342,132 @@ Friend NotInheritable Class LazySchemaReader
     Private Sub New()
     End Sub
 
+    Private NotInheritable Class FileSystemDirectoryBuildFrame
+        Public ReadOnly Info As IO.DirectoryInfo
+        Public ReadOnly State As LazyDirectoryBuildState
+        Public ReadOnly Values As LazyDirectoryScalarData
+        Public ReadOnly Entries As System.Collections.Generic.IEnumerator(Of IO.FileSystemInfo)
+
+        Public Sub New(info As IO.DirectoryInfo, state As LazyDirectoryBuildState)
+            Me.Info = info
+            Me.State = state
+            Me.Values = CreateDirectoryScalars(info)
+            Me.Entries = info.EnumerateFileSystemInfos().GetEnumerator()
+        End Sub
+
+        Public Sub Dispose()
+            If Entries IsNot Nothing Then Entries.Dispose()
+        End Sub
+    End Class
+
+    Private Shared Function CreateDirectoryScalars(info As IO.DirectoryInfo) As LazyDirectoryScalarData
+        Dim nowText As String = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z", CultureInfo.InvariantCulture)
+        Dim result As New LazyDirectoryScalarData With {
+            .Name = If(info Is Nothing, String.Empty, info.Name),
+            .ReadOnly = False,
+            .CreationTime = nowText,
+            .ChangeTime = nowText,
+            .ModifyTime = nowText,
+            .AccessTime = nowText,
+            .BackupTime = nowText,
+            .FileUid = 0}
+        If info Is Nothing Then Return result
+
+        Try : result.CreationTime = info.CreationTimeUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z", CultureInfo.InvariantCulture) : Catch : End Try
+        Try : result.AccessTime = info.LastAccessTimeUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z", CultureInfo.InvariantCulture) : Catch : End Try
+        Try : result.ModifyTime = info.LastWriteTimeUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z", CultureInfo.InvariantCulture) : Catch : End Try
+        result.ChangeTime = result.ModifyTime
+        Return result
+    End Function
+
+    Private Shared Function WriteFileRecord(store As LazySchemaStore,
+                                             value As ltfsindex.file,
+                                             serializer As Xml.Serialization.XmlSerializer,
+                                             namespaces As Xml.Serialization.XmlSerializerNamespaces) As Tuple(Of Long, Long)
+        Dim recordOffset As Long = store.BeginFileRecord()
+        Using writer As XmlWriter = store.CreateFileXmlWriter()
+            serializer.Serialize(writer, value, namespaces)
+        End Using
+        Dim recordLength As Long = store.EndFileRecord(recordOffset)
+        Return Tuple.Create(recordOffset, recordLength)
+    End Function
+
+    Friend Shared Function BuildFromDirectory(root As IO.DirectoryInfo,
+                                              createFile As Func(Of IO.FileInfo, Long, ltfsindex.file),
+                                              ByRef fileCount As Long) As ltfsindex
+        If root Is Nothing Then Throw New ArgumentNullException(NameOf(root))
+        If createFile Is Nothing Then Throw New ArgumentNullException(NameOf(createFile))
+        If Not root.Exists Then Throw New IO.DirectoryNotFoundException(root.FullName)
+
+        Dim store As LazySchemaStore = LazySchemaStore.CreateForBuild()
+        Dim frames As New Stack(Of FileSystemDirectoryBuildFrame)
+        Try
+            Dim result As New ltfsindex
+            Dim serializer As New Xml.Serialization.XmlSerializer(GetType(ltfsindex.file))
+            Dim namespaces As New Xml.Serialization.XmlSerializerNamespaces
+            namespaces.Add(String.Empty, String.Empty)
+
+            Dim rootState As LazyDirectoryBuildState = store.BeginDirectoryRecord()
+            frames.Push(New FileSystemDirectoryBuildFrame(root, rootState))
+            Dim rootOffset As Long = -1
+
+            While frames.Count > 0
+                Dim current As FileSystemDirectoryBuildFrame = frames.Peek()
+                If current.Entries.MoveNext() Then
+                    Dim entry As IO.FileSystemInfo = current.Entries.Current
+                    Dim sourceFile As IO.FileInfo = TryCast(entry, IO.FileInfo)
+                    If sourceFile IsNot Nothing Then
+                        fileCount += 1
+                        Dim outputFile As ltfsindex.file = createFile(sourceFile, fileCount)
+                        If outputFile Is Nothing Then Continue While
+                        Dim record As Tuple(Of Long, Long) = WriteFileRecord(store, outputFile, serializer, namespaces)
+                        store.AddChild(current.State,
+                                       LazySchemaChildKind.FileRecord,
+                                       record.Item1,
+                                       record.Item2,
+                                       selectionIndex:=store.AllocateSelectionIndex())
+                        Continue While
+                    End If
+
+                    Dim sourceDirectory As IO.DirectoryInfo = TryCast(entry, IO.DirectoryInfo)
+                    If sourceDirectory Is Nothing Then Continue While
+                    Dim childState As LazyDirectoryBuildState = store.BeginDirectoryRecord()
+                    frames.Push(New FileSystemDirectoryBuildFrame(sourceDirectory, childState))
+                    Continue While
+                End If
+
+                current.Dispose()
+                Dim finishedOffset As Long = store.FinishDirectoryRecord(current.State, current.Values)
+                frames.Pop()
+                If frames.Count = 0 Then
+                    rootOffset = finishedOffset
+                Else
+                    Dim parent As FileSystemDirectoryBuildFrame = frames.Peek()
+                    store.AddChild(parent.State,
+                                   LazySchemaChildKind.DirectoryRecord,
+                                   finishedOffset,
+                                   0,
+                                   current.State.TotalFileCount,
+                                   current.State.TotalDirectoryCount,
+                                   current.State.SelectionIndex)
+                End If
+            End While
+
+            store.FinishBuild()
+            Dim rootDirectory As New ltfsindex.directory
+            rootDirectory.AttachLazyRecord(store, rootOffset, selectionIndex:=rootState.SelectionIndex)
+            result._directory.Add(rootDirectory)
+            result.AttachLazyStore(store)
+            Return result
+        Catch
+            For Each frame As FileSystemDirectoryBuildFrame In frames
+                Try : frame.Dispose() : Catch : End Try
+            Next
+            store.AbortBuild()
+            Throw
+        End Try
+    End Function
+
     Friend Shared Function Load(fileName As String) As ltfsindex
         Dim store As LazySchemaStore = LazySchemaStore.CreateForBuild()
         Try
@@ -2891,6 +3487,37 @@ Friend NotInheritable Class LazySchemaReader
             End Using
             store.FinishBuild()
             result.AttachLazyStore(store)
+            Return result
+        Catch
+            store.AbortBuild()
+            Throw
+        End Try
+    End Function
+
+    Friend Shared Function LoadDirectory(fileName As String) As ltfsindex.directory
+        Dim store As LazySchemaStore = LazySchemaStore.CreateForBuild()
+        Try
+            Dim reference As LazyDirectoryReference
+            Using input As New IO.FileStream(fileName, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, 1 << 16, IO.FileOptions.SequentialScan)
+                Dim settings As New XmlReaderSettings With {
+                    .IgnoreComments = True,
+                    .IgnoreWhitespace = True,
+                    .IgnoreProcessingInstructions = True,
+                    .DtdProcessing = DtdProcessing.Prohibit,
+                    .XmlResolver = Nothing,
+                    .CloseInput = False}
+                Using reader As XmlReader = XmlReader.Create(input, settings)
+                    reader.MoveToContent()
+                    If reader.NodeType <> XmlNodeType.Element OrElse reader.LocalName <> "directory" Then
+                        Throw New IO.InvalidDataException("Directory root element was not found.")
+                    End If
+                    reference = ParseDirectory(reader, store)
+                End Using
+            End Using
+
+            store.FinishBuild()
+            Dim result As New ltfsindex.directory
+            result.AttachLazyRecord(store, reference.Offset, selectionIndex:=reference.SelectionIndex)
             Return result
         Catch
             store.AbortBuild()
@@ -2940,7 +3567,7 @@ Friend NotInheritable Class LazySchemaReader
                 Case "file"
                     Dim fileReference As LazyFileRecordReference = ParseFile(reader, store)
                     Dim rootFile As New ltfsindex.file
-                    rootFile.AttachLazyRecord(store, fileReference.Offset, fileReference.Length)
+                    rootFile.AttachLazyRecord(store, fileReference.Offset, fileReference.Length, fileReference.SelectionIndex)
                     result._file.Add(rootFile)
                 Case "_directory", "contents"
                     ParseRootContainer(reader, result, store)
@@ -2964,7 +3591,7 @@ Friend NotInheritable Class LazySchemaReader
                 Case "file"
                     Dim fileReference As LazyFileRecordReference = ParseFile(reader, store)
                     Dim rootFile As New ltfsindex.file
-                    rootFile.AttachLazyRecord(store, fileReference.Offset, fileReference.Length)
+                    rootFile.AttachLazyRecord(store, fileReference.Offset, fileReference.Length, fileReference.SelectionIndex)
                     result._file.Add(rootFile)
                 Case "_directory", "contents"
                     ParseRootContainer(reader, result, store)
@@ -2984,7 +3611,7 @@ Friend NotInheritable Class LazySchemaReader
             If reader.NodeType = XmlNodeType.Element AndAlso reader.Depth = containerDepth + 1 AndAlso reader.LocalName = "file" Then
                 Dim fileReference As LazyFileRecordReference = ParseFile(reader, store)
                 Dim rootFile As New ltfsindex.file
-                rootFile.AttachLazyRecord(store, fileReference.Offset, fileReference.Length)
+                rootFile.AttachLazyRecord(store, fileReference.Offset, fileReference.Length, fileReference.SelectionIndex)
                 result._file.Add(rootFile)
             End If
         End While
@@ -3027,10 +3654,12 @@ Friend NotInheritable Class LazySchemaReader
                     Case "directory"
                         Dim childDirectory As LazyDirectoryReference = ParseDirectory(reader, store)
                         store.AddChild(state, LazySchemaChildKind.DirectoryRecord, childDirectory.Offset, 0,
-                                       childDirectory.TotalFileCount, childDirectory.TotalDirectoryCount)
+                                       childDirectory.TotalFileCount, childDirectory.TotalDirectoryCount,
+                                       childDirectory.SelectionIndex)
                     Case "file"
                         Dim fileReference As LazyFileRecordReference = ParseFile(reader, store)
-                        store.AddChild(state, LazySchemaChildKind.FileRecord, fileReference.Offset, fileReference.Length)
+                        store.AddChild(state, LazySchemaChildKind.FileRecord, fileReference.Offset, fileReference.Length,
+                                       selectionIndex:=fileReference.SelectionIndex)
                     Case Else
                         LazySchemaStore.SkipElement(reader)
                 End Select
@@ -3039,6 +3668,7 @@ Friend NotInheritable Class LazySchemaReader
 
         Return New LazyDirectoryReference With {
             .Offset = store.FinishDirectoryRecord(state, values),
+            .SelectionIndex = state.SelectionIndex,
             .TotalFileCount = state.TotalFileCount,
             .TotalDirectoryCount = state.TotalDirectoryCount}
     End Function
@@ -3055,10 +3685,12 @@ Friend NotInheritable Class LazySchemaReader
                 Case "directory"
                     Dim childDirectory As LazyDirectoryReference = ParseDirectory(reader, store)
                     store.AddChild(parentState, LazySchemaChildKind.DirectoryRecord, childDirectory.Offset, 0,
-                                   childDirectory.TotalFileCount, childDirectory.TotalDirectoryCount)
+                                   childDirectory.TotalFileCount, childDirectory.TotalDirectoryCount,
+                                   childDirectory.SelectionIndex)
                 Case "file"
                     Dim fileReference As LazyFileRecordReference = ParseFile(reader, store)
-                    store.AddChild(parentState, LazySchemaChildKind.FileRecord, fileReference.Offset, fileReference.Length)
+                    store.AddChild(parentState, LazySchemaChildKind.FileRecord, fileReference.Offset, fileReference.Length,
+                                   selectionIndex:=fileReference.SelectionIndex)
                 Case "contents", "_directory", "_file"
                     ParseDirectoryContainer(reader, parentState, store)
                 Case Else
@@ -3070,10 +3702,13 @@ Friend NotInheritable Class LazySchemaReader
     Private Structure LazyFileRecordReference
         Public Offset As Long
         Public Length As Long
+        Public SelectionIndex As Long
     End Structure
 
     Private Shared Function ParseFile(reader As XmlReader, store As LazySchemaStore) As LazyFileRecordReference
-        Dim result As New LazyFileRecordReference With {.Offset = store.BeginFileRecord()}
+        Dim result As New LazyFileRecordReference With {
+            .Offset = store.BeginFileRecord(),
+            .SelectionIndex = store.AllocateSelectionIndex()}
         Using subtree As XmlReader = reader.ReadSubtree()
             subtree.MoveToContent()
             Using writer As XmlWriter = store.CreateFileXmlWriter()
@@ -3086,7 +3721,7 @@ Friend NotInheritable Class LazySchemaReader
 
     Private Shared Function CreateDirectory(reference As LazyDirectoryReference, store As LazySchemaStore) As ltfsindex.directory
         Dim result As New ltfsindex.directory
-        result.AttachLazyRecord(store, reference.Offset)
+        result.AttachLazyRecord(store, reference.Offset, selectionIndex:=reference.SelectionIndex)
         Return result
     End Function
 

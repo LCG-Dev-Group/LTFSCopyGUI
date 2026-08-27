@@ -227,7 +227,7 @@ Public Class RustFastReaderProvider
     Private _disposed As Integer
     Private ReadOnly _logSessionId As String = $"fastreader-{Guid.NewGuid().ToString("N").Substring(0, 8)}"
 
-    Public Sub New(writeList As IEnumerable(Of LTFSWriter.FileRecord),
+    Public Sub New(writeList As List(Of LTFSWriter.FileRecord),
                    blockSize As Integer,
                    capacityBytes As Long,
                    Optional readStallTimeoutMs As UInteger = DefaultReadStallTimeoutMs,
@@ -244,7 +244,9 @@ Public Class RustFastReaderProvider
         If ioCancelGraceMs < 100UI OrElse ioCancelGraceMs > 60000UI Then Throw New ArgumentOutOfRangeException(NameOf(ioCancelGraceMs))
         If maxConsecutiveFileRetries > 10UI Then Throw New ArgumentOutOfRangeException(NameOf(maxConsecutiveFileRetries))
         If fileRetryBaseDelayMs < 100UI OrElse fileRetryBaseDelayMs > 60000UI Then Throw New ArgumentOutOfRangeException(NameOf(fileRetryBaseDelayMs))
-        _writeList = writeList.ToList()
+        'The writer passes its indexed write plan.  Reuse it instead of making
+        'a second reference array for every pending file.
+        _writeList = writeList
         _slotSize = blockSize
         Dim alignedReadChunk = ((CLng(ReadChunkSize) + _slotSize - 1L) \ _slotSize) * _slotSize
         If alignedReadChunk > 64L * 1024L * 1024L Then Throw New ArgumentOutOfRangeException(NameOf(blockSize))

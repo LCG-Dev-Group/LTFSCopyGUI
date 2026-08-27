@@ -334,20 +334,20 @@ Public Class HashTaskWindow
                 Sub()
                     Try
                         Dim schhash As ltfsindex
-                        Dim s As String = IO.File.ReadAllText(OpenFileDialog1.FileName)
-                        If s.Contains("XMLSchema") Then
-                            schhash = ltfsindex.FromXML(s)
-                        Else
-                            schhash = ltfsindex.FromSchemaText(s)
+                        schhash = ltfsindex.FromSchemaFile(OpenFileDialog1.FileName)
+                        If schema Is Nothing OrElse schhash Is Nothing OrElse
+                           schema._directory Is Nothing OrElse schema._directory.Count = 0 OrElse
+                           schhash._directory Is Nothing OrElse schhash._directory.Count = 0 Then
+                            Throw New IO.InvalidDataException("Both schemas must contain a root directory.")
                         End If
-                        Dim q As New List(Of IOManager.IndexedLHashDirectory)
-                        q.Add(New IOManager.IndexedLHashDirectory(schema._directory(0), schhash._directory(0)))
+
+                        Dim q As New Stack(Of IOManager.IndexedLHashDirectory)
+                        q.Push(New IOManager.IndexedLHashDirectory(schema._directory(0), schhash._directory(0)))
                         While q.Count > 0
-                            Dim qtmp As New List(Of IOManager.IndexedLHashDirectory)
-                            For Each d As IOManager.IndexedLHashDirectory In q
-                                For Each f As ltfsindex.file In d.LTFSIndexDir.contents._file
+                            Dim d As IOManager.IndexedLHashDirectory = q.Pop()
+                            For Each f As ltfsindex.file In d.LTFSIndexDir.EnumerateLazyFiles()
                                     Try
-                                        For Each flookup As ltfsindex.file In d.LHash_Dir.contents._file
+                                        For Each flookup As ltfsindex.file In d.LHash_Dir.EnumerateLazyFiles()
                                             If flookup.name = f.name And flookup.length = f.length Then
                                                 If flookup.sha1 IsNot Nothing Then
                                                     If flookup.sha1 <> "" And flookup.sha1.Length = 40 Then
@@ -363,17 +363,13 @@ Public Class HashTaskWindow
                                     Catch ex As Exception
                                         PrintMsg(ex.ToString)
                                     End Try
-                                Next
-                                For Each sd As ltfsindex.directory In d.LTFSIndexDir.contents._directory
-                                    For Each dlookup As ltfsindex.directory In d.LHash_Dir.contents._directory
-                                        If dlookup.name = sd.name Then
-                                            qtmp.Add(New IOManager.IndexedLHashDirectory(sd, dlookup))
-                                            Exit For
-                                        End If
-                                    Next
-                                Next
                             Next
-                            q = qtmp
+                            For Each sd As ltfsindex.directory In d.LTFSIndexDir.EnumerateLazyDirectories()
+                                Dim dlookup As ltfsindex.directory = d.LHash_Dir.FindDirectoryByName(sd.name)
+                                If dlookup IsNot Nothing Then
+                                    q.Push(New IOManager.IndexedLHashDirectory(sd, dlookup))
+                                End If
+                            Next
                         End While
 
                     Catch ex As Exception

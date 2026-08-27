@@ -16,6 +16,7 @@ Imports Serilog.Context
 Imports ZstdSharp
 
 Public Class LTFSWriter
+    Private Const WriterTreePageSize As Integer = 1024
     Private _lastSelectedFolder As String = String.Empty
     Private _deviceLease As SCSIDeviceLockManager.WriterLease
 
@@ -1986,6 +1987,9 @@ Public Class LTFSWriter
         Inherits TreeNode
 
         Public Property ChildrenLoaded As Boolean
+        Public Property ChildrenComplete As Boolean
+        Public Property NextDirectoryIndex As Integer
+        Public Property NextFileIndex As Integer
         Public Property IsPlaceholder As Boolean
     End Class
 
@@ -2004,7 +2008,8 @@ Public Class LTFSWriter
             .Tag = directory,
             .ImageIndex = If(rootNode, 0, 1),
             .SelectedImageIndex = If(rootNode, 0, 1),
-            .StateImageIndex = If(rootNode, 0, 1)}
+            .StateImageIndex = If(rootNode, 0, 1),
+            .ChildrenComplete = Not directory.HasPotentialChildren()}
     End Function
 
     Private Function CreateArchiveTreeNode(file As ltfsindex.file) As TreeNode
@@ -2025,7 +2030,8 @@ Public Class LTFSWriter
             .ImageIndex = 1,
             .SelectedImageIndex = 1,
             .StateImageIndex = 1,
-            .ForeColor = Color.Blue}
+            .ForeColor = Color.Blue,
+            .ChildrenComplete = directory.Directories Is Nothing OrElse directory.Directories.Count = 0}
     End Function
 
     Private Function HasPotentialTreeChildren(node As TreeNode) As Boolean
@@ -2043,10 +2049,25 @@ Public Class LTFSWriter
 
     Private Sub AddUnloadedChildMarker(node As TreeNode)
         Dim writerNode As WriterTreeNode = TryCast(node, WriterTreeNode)
-        If writerNode Is Nothing OrElse writerNode.ChildrenLoaded OrElse node.Nodes.Count > 0 Then Return
+        If writerNode Is Nothing OrElse writerNode.ChildrenComplete OrElse HasUnloadedChildMarker(node) Then Return
         If Not HasPotentialTreeChildren(node) Then Return
-        node.Nodes.Add(New WriterTreeNode With {.IsPlaceholder = True})
+        Dim marker As New WriterTreeNode With {
+            .Text = "...",
+            .IsPlaceholder = True,
+            .ChildrenComplete = True}
+        'Keep the normal expand glyph so the user can request the next page.
+        marker.Nodes.Add(New TreeNode())
+        node.Nodes.Add(marker)
     End Sub
+
+    Private Shared Function HasUnloadedChildMarker(node As TreeNode) As Boolean
+        If node Is Nothing Then Return False
+        For Each child As TreeNode In node.Nodes
+            Dim writerChild As WriterTreeNode = TryCast(child, WriterTreeNode)
+            If writerChild IsNot Nothing AndAlso writerChild.IsPlaceholder Then Return True
+        Next
+        Return False
+    End Function
 
     Private Sub RemoveUnloadedChildMarker(node As TreeNode)
         If node Is Nothing Then Return
@@ -2058,16 +2079,31 @@ Public Class LTFSWriter
 
     Private Sub AddTarVirtualChildren(directory As TarVirtualDirectory, node As TreeNode)
         If directory Is Nothing OrElse node Is Nothing Then Return
-        For Each child As TarVirtualDirectory In directory.Directories
+        Dim writerNode As WriterTreeNode = TryCast(node, WriterTreeNode)
+        If writerNode Is Nothing OrElse writerNode.ChildrenComplete Then Return
+
+        Dim directoryCount As Integer = If(directory.Directories Is Nothing, 0, directory.Directories.Count)
+        Dim remaining As Integer = WriterTreePageSize
+        While remaining > 0 AndAlso writerNode.NextDirectoryIndex < directoryCount
+            Dim child As TarVirtualDirectory = directory.Directories(writerNode.NextDirectoryIndex)
+            writerNode.NextDirectoryIndex += 1
+            If child Is Nothing Then Continue While
             Dim childNode As WriterTreeNode = CreateTarDirectoryTreeNode(child)
-            node.Nodes.Add(childNode)
-            AddUnloadedChildMarker(childNode)
-        Next
+            If childNode IsNot Nothing Then
+                node.Nodes.Add(childNode)
+                AddUnloadedChildMarker(childNode)
+            End If
+            remaining -= 1
+        End While
+
+        writerNode.ChildrenLoaded = True
+        writerNode.ChildrenComplete = writerNode.NextDirectoryIndex >= directoryCount
+        If Not writerNode.ChildrenComplete Then AddUnloadedChildMarker(node)
     End Sub
 
     Private Sub LoadTreeNodeChildren(node As TreeNode)
         Dim writerNode As WriterTreeNode = TryCast(node, WriterTreeNode)
-        If writerNode Is Nothing OrElse writerNode.IsPlaceholder OrElse writerNode.ChildrenLoaded Then Return
+        If writerNode Is Nothing OrElse writerNode.IsPlaceholder OrElse writerNode.ChildrenComplete Then Return
 
         writerNode.ChildrenLoaded = True
         Dim manageUpdate As Boolean = Not _treeRefreshInProgress
@@ -2076,60 +2112,65 @@ Public Class LTFSWriter
             RemoveUnloadedChildMarker(node)
             If TypeOf node.Tag Is ltfsindex.directory Then
                 Dim directory As ltfsindex.directory = DirectCast(node.Tag, ltfsindex.directory)
-                Dim addDirectoryNode As Action(Of ltfsindex.directory) =
-                    Sub(childDirectory As ltfsindex.directory)
-                    Dim childNode As WriterTreeNode = CreateDirectoryTreeNode(childDirectory, False)
-                    node.Nodes.Add(childNode)
-                    AddUnloadedChildMarker(childNode)
-                    End Sub
+                Dim directoryCount As Integer = directory.GetLazyDirectDirectoryCount()
+                Dim fileCount As Integer = directory.GetLazyDirectFileCount()
+                Dim remaining As Integer = WriterTreePageSize
 
-                Dim processFile As Action(Of ltfsindex.file) =
-                    Sub(file As ltfsindex.file)
-                        Dim archive As String = file.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.Archive)
-                        If String.Equals(archive, "true", StringComparison.OrdinalIgnoreCase) Then
-                            node.Nodes.Add(CreateArchiveTreeNode(file))
+                While remaining > 0 AndAlso writerNode.NextDirectoryIndex < directoryCount
+                    Dim childDirectory As ltfsindex.directory = directory.GetLazyDirectoryAt(writerNode.NextDirectoryIndex)
+                    writerNode.NextDirectoryIndex += 1
+                    If childDirectory Is Nothing Then Continue While
+
+                    Dim alreadyLoaded As Boolean = False
+                    For Each existingNode As TreeNode In node.Nodes
+                        Dim existingDirectory As ltfsindex.directory = TryCast(existingNode.Tag, ltfsindex.directory)
+                        If SameDirectoryRecord(existingDirectory, childDirectory) Then
+                            alreadyLoaded = True
+                            Exit For
                         End If
+                    Next
+                    If Not alreadyLoaded Then
+                        Dim childNode As WriterTreeNode = CreateDirectoryTreeNode(childDirectory, False)
+                        If childNode IsNot Nothing Then
+                            node.Nodes.Add(childNode)
+                            AddUnloadedChildMarker(childNode)
+                        End If
+                    End If
+                    remaining -= 1
+                End While
 
-                        Dim tarRoot As TarVirtualDirectory = Nothing
-                        If TryGetTarVirtualRoot(file, tarRoot) Then
-                            Dim tarNode As WriterTreeNode = CreateTarDirectoryTreeNode(tarRoot)
+                While remaining > 0 AndAlso writerNode.NextFileIndex < fileCount
+                    Dim file As ltfsindex.file = directory.GetLazyFileAt(writerNode.NextFileIndex)
+                    writerNode.NextFileIndex += 1
+                    If file Is Nothing Then Continue While
+
+                    Dim archive As String = file.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.Archive)
+                    If String.Equals(archive, "true", StringComparison.OrdinalIgnoreCase) Then
+                        Dim archiveNode As TreeNode = CreateArchiveTreeNode(file)
+                        If archiveNode IsNot Nothing Then node.Nodes.Add(archiveNode)
+                    End If
+
+                    Dim tarRoot As TarVirtualDirectory = Nothing
+                    If TryGetTarVirtualRoot(file, tarRoot) Then
+                        Dim tarNode As WriterTreeNode = CreateTarDirectoryTreeNode(tarRoot)
+                        If tarNode IsNot Nothing Then
                             node.Nodes.Add(tarNode)
                             AddUnloadedChildMarker(tarNode)
                         End If
-                    End Sub
-
-                If directory.HasUnmaterializedLazyContents Then
-                    For Each childDirectory As ltfsindex.directory In directory.EnumerateLazyDirectories()
-                        addDirectoryNode(childDirectory)
-                    Next
-                    For Each file As ltfsindex.file In directory.EnumerateLazyFiles()
-                        processFile(file)
-                    Next
-                Else
-                    Dim directories As New List(Of ltfsindex.directory)
-                    Dim files As New List(Of ltfsindex.file)
-                    If directory.contents IsNot Nothing Then
-                        SyncLock directory.contents._directory
-                            If directory.contents._directory IsNot Nothing Then directories.AddRange(directory.contents._directory)
-                        End SyncLock
-                        SyncLock directory.contents._file
-                            If directory.contents._file IsNot Nothing Then files.AddRange(directory.contents._file)
-                        End SyncLock
                     End If
+                    remaining -= 1
+                End While
 
-                    For Each childDirectory As ltfsindex.directory In directories
-                        addDirectoryNode(childDirectory)
-                    Next
-                    For Each file As ltfsindex.file In files
-                        processFile(file)
-                    Next
-                End If
+                writerNode.ChildrenComplete = writerNode.NextDirectoryIndex >= directoryCount AndAlso
+                                               writerNode.NextFileIndex >= fileCount
+                If Not writerNode.ChildrenComplete Then AddUnloadedChildMarker(node)
             ElseIf TypeOf node.Tag Is TarVirtualDirectory Then
                 AddTarVirtualChildren(DirectCast(node.Tag, TarVirtualDirectory), node)
             End If
         Catch
-            node.Nodes.Clear()
             writerNode.ChildrenLoaded = False
+            RemoveUnloadedChildMarker(node)
+            AddUnloadedChildMarker(node)
         Finally
             If manageUpdate Then TreeView1.EndUpdate()
         End Try
@@ -2139,6 +2180,43 @@ Public Class LTFSWriter
         If node Is Nothing OrElse node.Tag Is Nothing Then Return Nothing
         If TypeOf node.Tag Is ltfsindex.directory Then Return DirectCast(node.Tag, ltfsindex.directory).name
         If TypeOf node.Tag Is TarVirtualDirectory Then Return DirectCast(node.Tag, TarVirtualDirectory).Name
+        Return Nothing
+    End Function
+
+    Private Shared Function SameDirectoryRecord(left As ltfsindex.directory, right As ltfsindex.directory) As Boolean
+        If left Is Nothing OrElse right Is Nothing Then Return False
+        If Object.ReferenceEquals(left, right) Then Return True
+        Return left.HasLazyRecord AndAlso right.HasLazyRecord AndAlso
+               left.LazyRecordOffset = right.LazyRecordOffset AndAlso
+               Object.ReferenceEquals(left.LazyStoreReference, right.LazyStoreReference)
+    End Function
+
+    Private Function FindOrCreateDirectoryTreeChild(parent As TreeNode, childName As String) As TreeNode
+        If parent Is Nothing OrElse String.IsNullOrEmpty(childName) Then Return Nothing
+
+        For Each child As TreeNode In parent.Nodes
+            If String.Equals(GetTreeNodeName(child), childName, StringComparison.Ordinal) Then Return child
+        Next
+
+        Dim parentDirectory As ltfsindex.directory = TryCast(parent.Tag, ltfsindex.directory)
+        If parentDirectory Is Nothing Then Return Nothing
+        Dim writerParent As WriterTreeNode = TryCast(parent, WriterTreeNode)
+        If writerParent IsNot Nothing Then
+            While Not writerParent.ChildrenComplete
+                Dim previousDirectoryIndex As Integer = writerParent.NextDirectoryIndex
+                Dim previousFileIndex As Integer = writerParent.NextFileIndex
+                LoadTreeNodeChildren(parent)
+                For Each child As TreeNode In parent.Nodes
+                    If String.Equals(GetTreeNodeName(child), childName, StringComparison.Ordinal) Then Return child
+                Next
+                If Not writerParent.ChildrenComplete AndAlso
+                   writerParent.NextDirectoryIndex = previousDirectoryIndex AndAlso
+                   writerParent.NextFileIndex = previousFileIndex Then
+                    Exit While
+                End If
+            End While
+        End If
+
         Return Nothing
     End Function
 
@@ -2157,7 +2235,6 @@ Public Class LTFSWriter
         If current Is Nothing Then Return Nothing
 
         For i As Integer = 1 To parts.Length - 1
-            LoadTreeNodeChildren(current)
             Dim nextNode As TreeNode = Nothing
             For Each child As TreeNode In current.Nodes
                 If String.Equals(GetTreeNodeName(child), parts(i), StringComparison.Ordinal) Then
@@ -2165,10 +2242,10 @@ Public Class LTFSWriter
                     Exit For
                 End If
             Next
+            If nextNode Is Nothing Then nextNode = FindOrCreateDirectoryTreeChild(current, parts(i))
             If nextNode Is Nothing Then Return Nothing
             current = nextNode
         Next
-        LoadTreeNodeChildren(current)
         Return current
     End Function
 
@@ -2196,7 +2273,7 @@ Public Class LTFSWriter
                             For Each directory As ltfsindex.directory In schema._directory
                                 Dim rootNode As WriterTreeNode = CreateDirectoryTreeNode(directory, True)
                                 TreeView1.Nodes.Add(rootNode)
-                                LoadTreeNodeChildren(rootNode)
+                                AddUnloadedChildMarker(rootNode)
                             Next
                         End If
                     End SyncLock
@@ -2314,6 +2391,8 @@ Public Class LTFSWriter
     Private Const ListItemCacheCapacity As Integer = 512
     Private _lazyListDirectory As ltfsindex.directory
     Private _lazyListFileCount As Integer
+    Private _lazyListPendingDirectory As ltfsindex.directory
+    Private _lazyListPendingFileCount As Integer
     Private _lastListRefreshTag As Object = Nothing
     Private _treeRefreshInProgress As Boolean
     Private _listViewColumnSignature As String = Nothing
@@ -2485,26 +2564,39 @@ Public Class LTFSWriter
         _listItemCacheOrder.Clear()
         _lazyListDirectory = Nothing
         _lazyListFileCount = 0
+        _lazyListPendingDirectory = Nothing
+        _lazyListPendingFileCount = 0
     End Sub
 
-    Private Sub SetListViewRows(rows As List(Of WriterListRow), Optional lazyDirectory As ltfsindex.directory = Nothing)
+    Private Sub SetListViewRows(rows As List(Of WriterListRow),
+                                Optional lazyDirectory As ltfsindex.directory = Nothing,
+                                Optional includePendingFiles As Boolean = False)
         ClearListViewRows()
         If rows IsNot Nothing AndAlso rows.Count > 0 Then _listRows.AddRange(rows)
         If lazyDirectory IsNot Nothing Then
             _lazyListDirectory = lazyDirectory
             _lazyListFileCount = lazyDirectory.GetLazyDirectFileCount()
+            If includePendingFiles Then
+                _lazyListPendingDirectory = lazyDirectory
+                SyncLock lazyDirectory.UnwrittenFiles
+                    _lazyListPendingFileCount = lazyDirectory.UnwrittenFiles.Count
+                End SyncLock
+            End If
         End If
-        Dim rowCount As Integer = _listRows.Count
+        Dim rowCount As Long = _listRows.Count
+        rowCount += _lazyListPendingFileCount
         If _lazyListDirectory IsNot Nothing Then rowCount += _lazyListFileCount
-        If ListView1.VirtualListSize <> rowCount Then
-            ListView1.VirtualListSize = rowCount
+        Dim virtualCount As Integer = CInt(Math.Min(Integer.MaxValue, rowCount))
+        If ListView1.VirtualListSize <> virtualCount Then
+            ListView1.VirtualListSize = virtualCount
         Else
             ListView1.Invalidate()
         End If
     End Sub
 
     Private Function GetListViewRowCount() As Integer
-        Return _listRows.Count + _lazyListFileCount
+        Dim rowCount As Long = CLng(_listRows.Count) + _lazyListPendingFileCount + _lazyListFileCount
+        Return CInt(Math.Min(Integer.MaxValue, rowCount))
     End Function
 
     Private Function GetListViewItem(index As Integer) As ListViewItem
@@ -2518,9 +2610,27 @@ Public Class LTFSWriter
             item = EnsureVirtualListViewItemColumns(_listRows(index).GetItem(Me))
         ElseIf _lazyListDirectory IsNot Nothing Then
             Dim lazyIndex As Integer = index - _listRows.Count
-            If lazyIndex < 0 OrElse lazyIndex >= _lazyListFileCount Then Return Nothing
-            Dim file As ltfsindex.file = _lazyListDirectory.GetLazyFileAt(lazyIndex)
-            item = EnsureVirtualListViewItemColumns(New WriterListRow(WriterListRowKind.File, file).GetItem(Me))
+            If _lazyListPendingDirectory IsNot Nothing Then
+                If lazyIndex < _lazyListPendingFileCount Then
+                    Dim pendingFile As ltfsindex.file = Nothing
+                    SyncLock _lazyListPendingDirectory.UnwrittenFiles
+                        If lazyIndex < _lazyListPendingDirectory.UnwrittenFiles.Count Then
+                            pendingFile = _lazyListPendingDirectory.UnwrittenFiles(lazyIndex)
+                        End If
+                    End SyncLock
+                    If pendingFile Is Nothing Then Return Nothing
+                    item = EnsureVirtualListViewItemColumns(New WriterListRow(WriterListRowKind.UnwrittenFile, pendingFile).GetItem(Me))
+                Else
+                    lazyIndex -= _lazyListPendingFileCount
+                    If lazyIndex < 0 OrElse lazyIndex >= _lazyListFileCount Then Return Nothing
+                    Dim file As ltfsindex.file = _lazyListDirectory.GetLazyFileAt(lazyIndex)
+                    item = EnsureVirtualListViewItemColumns(New WriterListRow(WriterListRowKind.File, file).GetItem(Me))
+                End If
+            Else
+                If lazyIndex < 0 OrElse lazyIndex >= _lazyListFileCount Then Return Nothing
+                Dim file As ltfsindex.file = _lazyListDirectory.GetLazyFileAt(lazyIndex)
+                item = EnsureVirtualListViewItemColumns(New WriterListRow(WriterListRowKind.File, file).GetItem(Me))
+            End If
         Else
             Return Nothing
         End If
@@ -2797,16 +2907,14 @@ Public Class LTFSWriter
                     ListView1.Tag = d
 
                     If d.HasUnmaterializedLazyContents Then
-                        For Each f As ltfsindex.file In d.UnwrittenFiles
-                            pendingRows.Add(New WriterListRow(WriterListRowKind.UnwrittenFile, f))
-                        Next
-                        SetListViewRows(pendingRows, d)
+                        'Keep both collections virtual.  Enumerating d.UnwrittenFiles
+                        'into WriterListRow objects here duplicates every pending
+                        'file in a large add operation.
+                        SetListViewRows(Nothing, d, includePendingFiles:=True)
                     Else
-                        SyncLock d.contents._file
-                            For Each f As ltfsindex.file In d.contents._file
-                                pendingRows.Add(New WriterListRow(WriterListRowKind.File, f))
-                            Next
-                        End SyncLock
+                        For Each f As ltfsindex.file In d.EnumerateLazyFiles()
+                            pendingRows.Add(New WriterListRow(WriterListRowKind.File, f))
+                        Next
                         SyncLock d.UnwrittenFiles
                             For Each f As ltfsindex.file In d.UnwrittenFiles
                                 pendingRows.Add(New WriterListRow(WriterListRowKind.UnwrittenFile, f))
@@ -2903,6 +3011,12 @@ Public Class LTFSWriter
     End Sub
     Private Sub TreeView1_BeforeExpand(sender As Object, e As TreeViewCancelEventArgs) Handles TreeView1.BeforeExpand
         If _treeRefreshInProgress Then Return
+        Dim placeholder As WriterTreeNode = TryCast(e.Node, WriterTreeNode)
+        If placeholder IsNot Nothing AndAlso placeholder.IsPlaceholder Then
+            e.Cancel = True
+            If e.Node.Parent IsNot Nothing Then LoadTreeNodeChildren(e.Node.Parent)
+            Return
+        End If
         LoadTreeNodeChildren(e.Node)
     End Sub
     Private Sub TreeView1_BeforeSelect(sender As Object, e As TreeViewCancelEventArgs) Handles TreeView1.BeforeSelect
@@ -3389,7 +3503,7 @@ Public Class LTFSWriter
             Dim FileExist As Boolean = False
             Dim SameFile As Boolean = False
             '检查磁带已有文件
-            For Each oldf As ltfsindex.file In d.FindFilesByName(f.Name)
+            For Each oldf As ltfsindex.file In d.EnumerateFilesByName(f.Name)
                 If String.Equals(oldf.name, f.Name, StringComparison.OrdinalIgnoreCase) Then
                     SameFile = IsSameFile(f, oldf)
                     If OverWrite AndAlso Not SameFile Then d.RemoveFile(oldf)
@@ -3527,7 +3641,7 @@ Public Class LTFSWriter
         For Each f As IO.FileInfo In dnew1.EnumerateFiles()
             Dim FileExist As Boolean = False
             '检查磁带已有文件
-            For Each fe As ltfsindex.file In d1.FindFilesByName(f.Name)
+            For Each fe As ltfsindex.file In d1.EnumerateFilesByName(f.Name)
                 FileExist = True
                 If OverWrite Then d1.RemoveFile(fe)
             Next
@@ -3579,6 +3693,46 @@ Public Class LTFSWriter
             ConcatDirectory(dn, dT, OverWrite)
         Next
     End Sub
+
+    Private Sub RemoveUnwrittenForDirectoryTree(root As ltfsindex.directory)
+        If root Is Nothing Then Return
+
+        'Remove pending records as a stream.  The previous implementation first
+        'built RList for every directory, which duplicated the pending entries
+        'and could allocate millions of references during a subtree delete.
+        Dim pending As New Stack(Of ltfsindex.directory)
+        pending.Push(root)
+        While pending.Count > 0
+            Dim current As ltfsindex.directory = pending.Pop()
+            While True
+                Threading.Thread.Sleep(0)
+                SyncLock UFReadCount
+                    If UFReadCount > 0 Then Continue While
+                    If current.UnwrittenFiles IsNot Nothing Then
+                        SyncLock current.UnwrittenFiles
+                            For i As Integer = current.UnwrittenFiles.Count - 1 To 0 Step -1
+                                Dim pendingFile As ltfsindex.file = current.UnwrittenFiles(i)
+                                current.UnwrittenFiles.RemoveAt(i)
+                                For j As Integer = UnwrittenFiles.Count - 1 To 0 Step -1
+                                    Dim fileRecord As FileRecord = UnwrittenFiles(j)
+                                    If fileRecord IsNot Nothing AndAlso fileRecord.File Is pendingFile Then
+                                        UnwrittenFiles.RemoveAt(j)
+                                        Exit For
+                                    End If
+                                Next
+                            Next
+                        End SyncLock
+                    End If
+                    Exit While
+                End SyncLock
+            End While
+
+            For Each child As ltfsindex.directory In current.EnumerateLazyDirectories()
+                If child IsNot Nothing Then pending.Push(child)
+            Next
+        End While
+    End Sub
+
     Public Sub DeleteDir()
         Dim Nodes As List(Of TreeNode) = SelectedNodes
         If Nodes.Count = 0 Then Exit Sub
@@ -3594,37 +3748,7 @@ Public Class LTFSWriter
                 Dim pd As ltfsindex.directory = DirectCast(node.Parent.Tag, ltfsindex.directory)
                 pd.RemoveDirectory(d)
                 If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
-                Dim IterAllDirectory As Action(Of ltfsindex.directory) =
-                    Sub(d1 As ltfsindex.directory)
-                        Dim RList As New List(Of FileRecord)
-                        SyncLock d1.UnwrittenFiles
-                            For Each f As ltfsindex.file In d1.UnwrittenFiles
-                                UFReadCount.Inc()
-                                For Each fr As FileRecord In UnwrittenFiles
-                                    If fr.File Is f Then
-                                        RList.Add(fr)
-                                    End If
-                                Next
-                                UFReadCount.Dec()
-                            Next
-                        End SyncLock
-
-                        For Each fr As FileRecord In RList
-                            While True
-                                Threading.Thread.Sleep(0)
-                                SyncLock UFReadCount
-                                    If UFReadCount > 0 Then Continue While
-                                    UnwrittenFiles.Remove(fr)
-                                    Exit While
-                                End SyncLock
-                            End While
-                        Next
-                        For Each d2 As ltfsindex.directory In d1.EnumerateLazyDirectories()
-                            IterAllDirectory(d2)
-                        Next
-
-                    End Sub
-                IterAllDirectory(d)
+                RemoveUnwrittenForDirectoryTree(d)
                 If TreeView1.SelectedNode IsNot Nothing AndAlso TreeView1.SelectedNode.Parent IsNot Nothing AndAlso TreeView1.SelectedNode.Parent.Tag IsNot Nothing AndAlso TypeOf (TreeView1.SelectedNode.Parent.Tag) Is ltfsindex.directory Then
                     TreeView1.SelectedNode = TreeView1.SelectedNode.Parent
                 End If
@@ -3649,7 +3773,7 @@ Public Class LTFSWriter
                 End If
                 If TreeView1.SelectedNode.Parent IsNot Nothing Then
                     Dim pd As ltfsindex.directory = DirectCast(TreeView1.SelectedNode.Parent.Tag, ltfsindex.directory)
-                    For Each d2 As ltfsindex.directory In pd.FindDirectoriesByName(s)
+                    For Each d2 As ltfsindex.directory In pd.EnumerateDirectoriesByName(s)
                         If d2 IsNot d Then
                             MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_DirNExist)
                             Exit Sub
@@ -3679,7 +3803,7 @@ Public Class LTFSWriter
                 MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_FNIllegal)
                 Exit Sub
             End If
-            For Each allf As ltfsindex.file In d.FindFilesByName(newname)
+            For Each allf As ltfsindex.file In d.EnumerateFilesByName(newname)
                 If allf IsNot f AndAlso Not (f.HasLazyRecord AndAlso allf.HasLazyRecord AndAlso f.LazyRecordOffset = allf.LazyRecordOffset) Then
                     MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_FNExist)
                     Exit Sub
@@ -3778,7 +3902,11 @@ Public Class LTFSWriter
         Try
             StopFlag = False
             If fileSeq Is Nothing Then fileSeq = Enumerable.Empty(Of GlobHelper.AddFile)()
-            PrintMsg($"{My.Resources.ResText_Adding}{itemCount}{My.Resources.ResText_Items_x}")
+            If itemCount >= 0 Then
+                PrintMsg($"{My.Resources.ResText_Adding}{itemCount}{My.Resources.ResText_Items_x}")
+            Else
+                PrintMsg(My.Resources.ResText_Adding)
+            End If
 
             Dim helper As New GlobHelper() With {
                 .schema = schema,
@@ -3832,14 +3960,25 @@ Public Class LTFSWriter
         End Try
     End Sub
 
-    Public Sub AddFileOrDir(d As ltfsindex.directory, Paths As String(), ByVal match As String, Optional ByVal overwrite As Boolean = False)
+    Private Shared Function GetEnumerableCount(Of T)(values As IEnumerable(Of T)) As Integer
+        If values Is Nothing Then Return -1
+        Dim genericCollection As ICollection(Of T) = TryCast(values, ICollection(Of T))
+        If genericCollection IsNot Nothing Then Return genericCollection.Count
+        Dim collection As System.Collections.ICollection = TryCast(values, System.Collections.ICollection)
+        If collection IsNot Nothing Then Return collection.Count
+        Return -1
+    End Function
+
+    Public Sub AddFileOrDir(d As ltfsindex.directory, Paths As IEnumerable(Of String), ByVal match As String, Optional ByVal overwrite As Boolean = False)
+        If Paths Is Nothing Then Exit Sub
+        Dim pathCount As Integer = GetEnumerableCount(Paths)
         SetStatusLight(LWStatus.Busy)
         Dim th As New Threading.Thread(
             Sub()
                 Try
                     Dim matcher = GlobCollector.BuildMatcherFromString(match)
                     Dim files = GlobCollector.EnumerateAdd_ByFullPathInputs(Paths, matcher)
-                    AddFilePlanOnWorker(d, files, overwrite, Paths.Length)
+                    AddFilePlanOnWorker(d, files, overwrite, pathCount)
                 Catch ex As Exception
                     PrintMsg($"Add failed: {ex.Message}")
                     SetStatusLight(LWStatus.Err)
@@ -3858,28 +3997,32 @@ Public Class LTFSWriter
                                  fileSeq As IEnumerable(Of GlobHelper.AddFile),
                                  Optional ByVal overwrite As Boolean = False)
         If fileSeq Is Nothing Then Exit Sub
-        Dim snapshot As New List(Of GlobHelper.AddFile)(fileSeq)
-        If snapshot.Count = 0 Then Exit Sub
+        Dim itemCount As Integer = GetEnumerableCount(fileSeq)
 
         SetStatusLight(LWStatus.Busy)
         Dim th As New Threading.Thread(
             Sub()
-                AddFilePlanOnWorker(d, snapshot, overwrite, snapshot.Count)
+                AddFilePlanOnWorker(d, fileSeq, overwrite, itemCount)
             End Sub)
         LockGUI()
         th.Start()
     End Sub
-    Public Sub AddFileOrDir(d As ltfsindex.directory, Paths As String(), Optional ByVal overwrite As Boolean = False,
+    Public Sub AddFileOrDir(d As ltfsindex.directory, Paths As IEnumerable(Of String), Optional ByVal overwrite As Boolean = False,
                             Optional ByVal exceptExtension As String() = Nothing)
+        If Paths Is Nothing Then Exit Sub
+        Dim pathCount As Integer = GetEnumerableCount(Paths)
         SetStatusLight(LWStatus.Busy)
         Dim th As New Threading.Thread(
                 Sub()
                     StopFlag = False
-                    PrintMsg($"{My.Resources.ResText_Adding}{Paths.Length}{My.Resources.ResText_Items_x}")
+                    If pathCount >= 0 Then
+                        PrintMsg($"{My.Resources.ResText_Adding}{pathCount}{My.Resources.ResText_Items_x}")
+                    Else
+                        PrintMsg(My.Resources.ResText_Adding)
+                    End If
                     Dim numi As Integer = 0
-                    Dim PList As List(Of String) = Paths.ToList()
-                    'PList.Sort(ExplorerComparer)
-                    For Each path As String In PList
+                    For Each path As String In Paths
+                        If String.IsNullOrWhiteSpace(path) Then Continue For
                         If Not path.StartsWith("\\") Then path = $"\\?\{path}"
                         Dim i As Integer = Threading.Interlocked.Increment(numi)
                         If StopFlag Then Exit For
@@ -3896,14 +4039,14 @@ Public Class LTFSWriter
                                     Next
                                 End If
                                 If Not skip Then
-                                    PrintMsg($"{My.Resources.ResText_Adding} [{i}/{Paths.Length}] {f.Name}")
+                                    PrintMsg($"{My.Resources.ResText_Adding} [{i}/{If(pathCount >= 0, pathCount.ToString(), "?")}] {f.Name}")
                                     AddFile(f, d, overwrite)
                                 Else
-                                    PrintMsg($"{My.Resources.ResText_Skip} [{i}/{Paths.Length}] {f.Name}")
+                                    PrintMsg($"{My.Resources.ResText_Skip} [{i}/{If(pathCount >= 0, pathCount.ToString(), "?")}] {f.Name}")
                                 End If
                             ElseIf IO.Directory.Exists(path) Then
                                 Dim f As IO.DirectoryInfo = New IO.DirectoryInfo(path)
-                                PrintMsg($"{My.Resources.ResText_Adding} [{i}/{Paths.Length}] {f.Name}")
+                                PrintMsg($"{My.Resources.ResText_Adding} [{i}/{If(pathCount >= 0, pathCount.ToString(), "?")}] {f.Name}")
                                 AddDirectry(f, d, overwrite, exceptExtension)
                             End If
                         Catch ex As Exception
@@ -3926,6 +4069,14 @@ Public Class LTFSWriter
         LockGUI()
         th.Start()
     End Sub
+
+    Private Shared Iterator Function EnumerateTopLevelAddPaths(sourceDirectory As IO.DirectoryInfo) As IEnumerable(Of String)
+        If sourceDirectory Is Nothing Then Exit Function
+        For Each entry As IO.FileSystemInfo In sourceDirectory.EnumerateFileSystemInfos()
+            If entry IsNot Nothing Then Yield entry.FullName
+        Next
+    End Function
+
     Private Sub ListView1_DragEnter(sender As Object, e As DragEventArgs) Handles ListView1.DragEnter
         If Not AllowOperation OrElse Not MenuStrip1.Enabled Then
             PrintMsg(My.Resources.ResText_DragNA)
@@ -3947,18 +4098,11 @@ Public Class LTFSWriter
             Dim sourceDirectory As String = SelectWriterFolder()
             If String.IsNullOrEmpty(sourceDirectory) Then Exit Sub
             Dim dnew As IO.DirectoryInfo = New IO.DirectoryInfo(sourceDirectory)
-            Dim Paths As New List(Of String)
-            For Each f As IO.FileInfo In dnew.GetFiles("*", IO.SearchOption.TopDirectoryOnly)
-                Paths.Add(f.FullName)
-            Next
-            For Each f As IO.DirectoryInfo In dnew.GetDirectories("*", IO.SearchOption.TopDirectoryOnly)
-                Paths.Add(f.FullName)
-            Next
             Dim d As ltfsindex.directory = DirectCast(ListView1.Tag, ltfsindex.directory)
             If My.Settings.LTFSWriter_MatchPattern IsNot Nothing AndAlso My.Settings.LTFSWriter_MatchPattern.Length > 0 Then
-                AddFileOrDir(d, Paths.ToArray(), My.Settings.LTFSWriter_MatchPattern, 覆盖已有文件ToolStripMenuItem.Checked)
+                AddFileOrDir(d, EnumerateTopLevelAddPaths(dnew), My.Settings.LTFSWriter_MatchPattern, 覆盖已有文件ToolStripMenuItem.Checked)
             Else
-                AddFileOrDir(d, Paths.ToArray(), 覆盖已有文件ToolStripMenuItem.Checked)
+                AddFileOrDir(d, EnumerateTopLevelAddPaths(dnew), 覆盖已有文件ToolStripMenuItem.Checked)
             End If
             'Try
             '    ConcatDirectory(dnew, d, 覆盖已有文件ToolStripMenuItem.Checked)
@@ -4641,87 +4785,53 @@ Public Class LTFSWriter
             StartTarExtraction(selectedPath, New List(Of TarVirtualFile), tarDirectories)
             Exit Sub
         End If
-        Dim FileList As New List(Of FileRecord)
+        Dim totalFiles As Long = 0
+        For Each node As TreeNode In Nodes
+            Dim selectedDir As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
+            If selectedDir IsNot Nothing Then totalFiles += selectedDir.TotalFiles
+        Next
         Dim th As New Threading.Thread(
                 Sub()
+                    Dim succeeded As Boolean = False
                     PrintMsg(My.Resources.ResText_Restoring)
                     SetStatusLight(LWStatus.Busy)
                     Try
                         StopFlag = False
-                        Dim IterDir As Action(Of ltfsindex.directory, IO.DirectoryInfo) =
-                            Sub(tapeDir As ltfsindex.directory, outputDir As IO.DirectoryInfo)
-                                For Each f As ltfsindex.file In tapeDir.contents._file
-                                    f.TempObj = New ltfsindex.file.refFile() With {.FileName = ""}
-                                    FileList.Add(New FileRecord With {.File = f, .SourcePath = IO.Path.Combine(outputDir.FullName, f.name)})
-                                Next
-                                For Each d As ltfsindex.directory In tapeDir.contents._directory
-                                    Dim thisDir As String = IO.Path.Combine(outputDir.FullName, d.name)
-                                    Dim dirOutput As IO.DirectoryInfo
-                                    Dim RestoreTimeStamp As Boolean = Not IO.Directory.Exists(thisDir)
-                                    If RestoreTimeStamp Then IO.Directory.CreateDirectory(thisDir)
-                                    dirOutput = New IO.DirectoryInfo(thisDir)
-                                    IterDir(d, dirOutput)
-                                    If RestoreTimeStamp Then
-                                        Try
-                                            dirOutput.CreationTimeUtc = TapeUtils.ParseTimeStamp(d.creationtime)
-                                            dirOutput.LastWriteTimeUtc = TapeUtils.ParseTimeStamp(d.modifytime)
-                                            dirOutput.LastAccessTimeUtc = TapeUtils.ParseTimeStamp(d.accesstime)
-                                        Catch ex As Exception
-                                        End Try
-                                    End If
-                                Next
-                            End Sub
                         PrintMsg(My.Resources.ResText_PrepFile)
-                        For Each n As TreeNode In Nodes
-                            Dim selectedDir As ltfsindex.directory = DirectCast(n.Tag, ltfsindex.directory)
-                            Dim ODir As String = IO.Path.Combine(selectedPath, selectedDir.name)
-                            If Not ODir.StartsWith("\\") Then ODir = $"\\?\{ODir}"
-                            If Not IO.Directory.Exists(ODir) Then IO.Directory.CreateDirectory(ODir)
-                            IterDir(selectedDir, New IO.DirectoryInfo(ODir))
-                        Next
-
-                        FileList.Sort(New Comparison(Of FileRecord)(Function(a As FileRecord, b As FileRecord) As Integer
-                                                                        If a.File.extentinfo Is Nothing And b.File.extentinfo IsNot Nothing Then Return 0.CompareTo(1)
-                                                                        If b.File.extentinfo Is Nothing And a.File.extentinfo IsNot Nothing Then Return 1.CompareTo(0)
-                                                                        If a.File.extentinfo Is Nothing And b.File.extentinfo Is Nothing Then Return 0.CompareTo(0)
-                                                                        If a.File.extentinfo.Count = 0 And b.File.extentinfo.Count <> 0 Then Return 0.CompareTo(1)
-                                                                        If b.File.extentinfo.Count = 0 And a.File.extentinfo.Count <> 0 Then Return 1.CompareTo(0)
-                                                                        If a.File.extentinfo.Count = 0 And b.File.extentinfo.Count = 0 Then Return 0.CompareTo(0)
-                                                                        If a.File.extentinfo(0).partition = ltfsindex.PartitionLabel.a And b.File.extentinfo(0).partition = ltfsindex.PartitionLabel.b Then Return 0.CompareTo(1)
-                                                                        If a.File.extentinfo(0).partition = ltfsindex.PartitionLabel.b And b.File.extentinfo(0).partition = ltfsindex.PartitionLabel.a Then Return 1.CompareTo(0)
-                                                                        Return a.File.extentinfo(0).startblock.CompareTo(b.File.extentinfo(0).startblock)
-                                                                    End Function))
-                        For i As Integer = 1 To FileList.Count - 1
-                            If FileList(i).File.length = FileList(i - 1).File.length AndAlso IOManager.ChecksumEquals(FileList(i).File, FileList(i - 1).File, My.Settings.LTFSWriter_DedupeAlgorithm) Then
-                                FileList(i).File.TempObj = FileList(i - 1).File.TempObj
-                            End If
-                        Next
                         CurrentFilesProcessed = 0
                         CurrentBytesProcessed = 0
                         UnwrittenSizeOverrideValue = 0
-                        UnwrittenCountOverrideValue = CULng(FileList.Count)
+                        UnwrittenCountOverrideValue = CULng(Math.Max(0, totalFiles))
                         StartTime = Now
-                        For Each FI As FileRecord In FileList
-                            UnwrittenSizeOverrideValue = CULng(UnwrittenSizeOverrideValue + FI.File.length)
-                            FI.File.TempObj = Nothing
-                        Next
                         PrintMsg(My.Resources.ResText_RestFile)
-                        Dim c As Integer = 0
+                        Dim c As Long = 0
                         TapeUtils.ReserveUnit(driveHandle)
                         TapeUtils.PreventMediaRemoval(driveHandle)
                         RestorePosition = New TapeUtils.PositionData(driveHandle)
-                        For Each fr As FileRecord In FileList
-                            c += 1
-                            PrintMsg($"{My.Resources.ResText_Restoring} [{c}/{FileList.Count}] {fr.File.name}", False, $"{My.Resources.ResText_Restoring} [{c}/{FileList.Count}] {fr.SourcePath}")
-                            RestoreFile(fr.SourcePath, fr.File)
-                            If StopFlag Then
-                                PrintMsg(My.Resources.ResText_OpCancelled)
-                                SetStatusLight(LWStatus.Idle)
-                                Exit Try
-                            End If
+                        For Each node As TreeNode In Nodes
+                            If StopFlag Then Exit For
+                            Dim selectedDir As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
+                            If selectedDir Is Nothing Then Continue For
+                            Dim outputPath As String = IO.Path.Combine(selectedPath, If(selectedDir.name, String.Empty))
+                            If Not outputPath.StartsWith("\\") Then outputPath = $"\\?\{outputPath}"
+                            If Not IO.Directory.Exists(outputPath) Then IO.Directory.CreateDirectory(outputPath)
+                            Dim outputDirectory As New IO.DirectoryInfo(outputPath)
+                            TraverseRestoreFiles(selectedDir, outputDirectory,
+                                Sub(fr As FileRecord)
+                                    If StopFlag Then Return
+                                    c += 1
+                                    PrintMsg($"{My.Resources.ResText_Restoring} [{c}/{totalFiles}] {fr.File.name}", False, $"{My.Resources.ResText_Restoring} [{c}/{totalFiles}] {fr.SourcePath}")
+                                    RestoreFile(fr.SourcePath, fr.File)
+                                End Sub)
                         Next
-                        PrintMsg(My.Resources.ResText_RestFin)
-                        SetStatusLight(LWStatus.Succ)
+                        If StopFlag Then
+                            PrintMsg(My.Resources.ResText_OpCancelled)
+                            SetStatusLight(LWStatus.Idle)
+                        Else
+                            succeeded = True
+                            PrintMsg(My.Resources.ResText_RestFin)
+                            SetStatusLight(LWStatus.Succ)
+                        End If
                     Catch ex As Exception
                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString}"))
                         PrintMsg($"{My.Resources.ResText_RestoreErr}{ex.ToString}", ForceLog:=True)
@@ -4737,6 +4847,7 @@ Public Class LTFSWriter
                     UnwrittenSizeOverrideValue = 0
                     UnwrittenCountOverrideValue = 0
                     LockGUI(False)
+                    If Not succeeded AndAlso Not StopFlag Then SetStatusLight(LWStatus.Err)
                 End Sub)
         LockGUI()
         th.Start()
@@ -5071,6 +5182,9 @@ Public Class LTFSWriter
     Private Class PlannedWrite
         Public Kind As PlannedWriteKind
         Public ExistingReference As ltfsindex.file
+        Public ExistingReferenceStore As LazySchemaStore
+        Public ExistingReferenceOffset As Long = -1
+        Public ExistingReferenceLength As Long = -1
         Public NewReferenceIndex As Integer = -1
         Public ExpectedDedupeHash As String = ""
         Public SourceLength As Long = -1
@@ -5079,8 +5193,24 @@ Public Class LTFSWriter
 
     Private Class DedupeCanonical
         Public ExistingFile As ltfsindex.file
+        Public ExistingStore As LazySchemaStore
+        Public ExistingRecordOffset As Long = -1
+        Public ExistingRecordLength As Long = -1
         Public NewFileIndex As Integer = -1
     End Class
+
+    Private Function OpenPlannedExistingReference(plan As PlannedWrite) As ltfsindex.file
+        If plan Is Nothing Then Return Nothing
+        If plan.ExistingReferenceStore IsNot Nothing AndAlso
+           plan.ExistingReferenceOffset >= 0 AndAlso plan.ExistingReferenceLength > 0 Then
+            Dim result As New ltfsindex.file
+            result.AttachLazyRecord(plan.ExistingReferenceStore,
+                                    plan.ExistingReferenceOffset,
+                                    plan.ExistingReferenceLength)
+            Return result
+        End If
+        Return plan.ExistingReference
+    End Function
 
     Private Function GetFileDedupeHash(file As ltfsindex.file) As String
         If file Is Nothing Then Return ""
@@ -5165,6 +5295,35 @@ Public Class LTFSWriter
         If info.Length <> plan.SourceLength OrElse info.LastWriteTimeUtc.Ticks <> plan.SourceLastWriteUtcTicks Then
             Throw New IO.IOException($"Source file changed after dedupe pre-scan: {fr.SourcePath}")
         End If
+    End Sub
+
+    Private Sub TraverseRestoreFiles(directory As ltfsindex.directory,
+                                     outputDirectory As IO.DirectoryInfo,
+                                     onFile As Action(Of FileRecord))
+        If directory Is Nothing OrElse outputDirectory Is Nothing OrElse onFile Is Nothing Then Return
+        For Each file As ltfsindex.file In directory.EnumerateLazyFiles()
+            If StopFlag Then Exit Sub
+            file.TempObj = New ltfsindex.file.refFile() With {.FileName = ""}
+            onFile(New FileRecord With {
+                       .File = file,
+                       .SourcePath = IO.Path.Combine(outputDirectory.FullName, If(file.name, String.Empty))})
+        Next
+        For Each childDirectory As ltfsindex.directory In directory.EnumerateLazyDirectories()
+            If StopFlag Then Exit Sub
+            Dim childPath As String = IO.Path.Combine(outputDirectory.FullName, If(childDirectory.name, String.Empty))
+            Dim restoreTimeStamp As Boolean = Not IO.Directory.Exists(childPath)
+            If restoreTimeStamp Then IO.Directory.CreateDirectory(childPath)
+            Dim childOutput As New IO.DirectoryInfo(childPath)
+            TraverseRestoreFiles(childDirectory, childOutput, onFile)
+            If restoreTimeStamp Then
+                Try
+                    childOutput.CreationTimeUtc = TapeUtils.ParseTimeStamp(childDirectory.creationtime)
+                    childOutput.LastWriteTimeUtc = TapeUtils.ParseTimeStamp(childDirectory.modifytime)
+                    childOutput.LastAccessTimeUtc = TapeUtils.ParseTimeStamp(childDirectory.accesstime)
+                Catch
+                End Try
+            End If
+        Next
     End Sub
 
     Private Sub CopyDedupeMetadata(target As ltfsindex.file, source As ltfsindex.file)
@@ -5279,7 +5438,21 @@ Public Class LTFSWriter
                 byHash = New Dictionary(Of String, DedupeCanonical)(StringComparer.OrdinalIgnoreCase)
                 catalog(existing.length) = byHash
             End If
-            If Not byHash.ContainsKey(hash) Then byHash(hash) = New DedupeCanonical With {.ExistingFile = existing}
+            If Not byHash.ContainsKey(hash) Then
+                Dim canonical As New DedupeCanonical
+                If existing.HasLazyRecord Then
+                    canonical.ExistingStore = TryCast(existing.LazyStoreReference, LazySchemaStore)
+                    canonical.ExistingRecordOffset = existing.LazyRecordOffset
+                    canonical.ExistingRecordLength = existing.LazyRecordLength
+                End If
+                If canonical.ExistingStore Is Nothing OrElse canonical.ExistingRecordOffset < 0 OrElse canonical.ExistingRecordLength <= 0 Then
+                    'Small/eager schemas do not have a backing record.  Keep
+                    'the compatibility object only for that branch; large
+                    'schemas stay represented by offset/length pairs.
+                    canonical.ExistingFile = existing.GetCopy(existing.fileuid)
+                End If
+                byHash(hash) = canonical
+            End If
         Next
 
         Dim candidates As New List(Of Long)
@@ -5326,6 +5499,9 @@ Public Class LTFSWriter
             If byHash.TryGetValue(hash, canonical) Then
                 plans(index).Kind = PlannedWriteKind.Duplicate
                 plans(index).ExistingReference = canonical.ExistingFile
+                plans(index).ExistingReferenceStore = canonical.ExistingStore
+                plans(index).ExistingReferenceOffset = canonical.ExistingRecordOffset
+                plans(index).ExistingReferenceLength = canonical.ExistingRecordLength
                 plans(index).NewReferenceIndex = canonical.NewFileIndex
             Else
                 byHash(hash) = New DedupeCanonical With {.NewFileIndex = index}
@@ -5995,7 +6171,12 @@ Public Class LTFSWriter
                                     'If p.EOP Then PrintMsg(My.Resources.ResText_EWEOM.Text, True)
                                     Dim dupe As Boolean = currentPlan.Kind = PlannedWriteKind.Duplicate
                                     If dupe Then
-                                        Dim dupeFile = currentPlan.ExistingReference
+                                        'A lazy existing-file match is kept as a
+                                        'record location in the plan.  Open just
+                                        'this reference now so dedupe metadata
+                                        'and extents do not retain the entire
+                                        'schema in memory.
+                                        Dim dupeFile As ltfsindex.file = OpenPlannedExistingReference(currentPlan)
                                         If dupeFile Is Nothing AndAlso currentPlan.NewReferenceIndex >= 0 Then
                                             dupeFile = WriteList(currentPlan.NewReferenceIndex).File
                                             If dupeFile Is Nothing OrElse dupeFile.extentinfo Is Nothing OrElse dupeFile.extentinfo.Count = 0 Then
@@ -7523,12 +7704,11 @@ Public Class LTFSWriter
     Public Function ImportSHA1(schhash As ltfsindex, Overwrite As Boolean) As String
         SetStatusLight(LWStatus.Busy)
         Dim fprocessed As Integer = 0, fhash As Integer = 0
-        Dim q As New List(Of IOManager.IndexedLHashDirectory)
-        q.Add(New IOManager.IndexedLHashDirectory(schema._directory(0), schhash._directory(0)))
+        Dim q As New Stack(Of IOManager.IndexedLHashDirectory)
+        q.Push(New IOManager.IndexedLHashDirectory(schema._directory(0), schhash._directory(0)))
         While q.Count > 0
-            Dim qtmp As New List(Of IOManager.IndexedLHashDirectory)
-            For Each d As IOManager.IndexedLHashDirectory In q
-                For Each f As ltfsindex.file In d.LTFSIndexDir.contents._file
+            Dim d As IOManager.IndexedLHashDirectory = q.Pop()
+            For Each f As ltfsindex.file In d.LTFSIndexDir.EnumerateLazyFiles()
                     Try
                         Dim crc32value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.CRC32)
                         Dim sha1value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA1)
@@ -7538,7 +7718,7 @@ Public Class LTFSWriter
                         Dim blake3value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3)
                         Dim xxhash3value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3)
                         Dim xxhash128value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128)
-                        For Each flookup As ltfsindex.file In d.LHash_Dir.contents._file
+                        For Each flookup As ltfsindex.file In d.LHash_Dir.EnumerateLazyFiles()
                             If flookup.name = f.name And flookup.length = f.length Then
                                 If Not Overwrite Then
                                     If Not (crc32value0 IsNot Nothing AndAlso crc32value0 <> "" AndAlso crc32value0.Length = ltfsindex.file.xattr.HashLengthBytes.CRC32 * 2) Then
@@ -7684,16 +7864,12 @@ Public Class LTFSWriter
                         PrintMsg(ex.ToString)
                     End Try
                 Next
-                For Each sd As ltfsindex.directory In d.LTFSIndexDir.contents._directory
-                    For Each dlookup As ltfsindex.directory In d.LHash_Dir.contents._directory
-                        If dlookup.name = sd.name Then
-                            qtmp.Add(New IOManager.IndexedLHashDirectory(sd, dlookup))
-                            Exit For
-                        End If
-                    Next
-                Next
+            For Each sd As ltfsindex.directory In d.LTFSIndexDir.EnumerateLazyDirectories()
+                Dim dlookup As ltfsindex.directory = d.LHash_Dir.FindDirectoryByName(sd.name)
+                If dlookup IsNot Nothing Then
+                    q.Push(New IOManager.IndexedLHashDirectory(sd, dlookup))
+                End If
             Next
-            q = qtmp
         End While
         If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
         Return ($"{fhash}/{fprocessed}")
@@ -7704,7 +7880,7 @@ Public Class LTFSWriter
             Try
                 Dim schhash As ltfsindex
                 PrintMsg(My.Resources.ResText_RI)
-                schhash = ltfsindex.FromSchFile(OpenFileDialog1.FileName)
+                schhash = ltfsindex.FromSchemaFile(OpenFileDialog1.FileName)
                 Dim dr As DialogResult = MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_SHA1Overw, My.Resources.ResText_Hint, MessageBoxButtons.YesNoCancel)
                 PrintMsg(My.Resources.ResText_Importing)
                 Dim result As String = ""
@@ -8888,14 +9064,17 @@ Public Class LTFSWriter
     Private Sub ExecuteHashPlan(fileList As List(Of FileRecord),
                                 overwrite As Boolean,
                                 validateOnly As Boolean,
-                                darkGreen As Boolean)
+                                darkGreen As Boolean,
+                                Optional resetStopFlag As Boolean = True,
+                                Optional clearStopFlag As Boolean = True,
+                                Optional releaseGui As Boolean = True)
         Dim fileCount As Long = 0
         Dim errorCount As Long = 0
         Try
             StartTime = Now
             SetStatusLight(LWStatus.Busy)
             PrintMsg(My.Resources.ResText_Hashing)
-            StopFlag = False
+            If resetStopFlag Then StopFlag = False
             CurrentBytesProcessed = 0
             CurrentFilesProcessed = 0
             UnwrittenSizeOverrideValue = 0
@@ -8942,9 +9121,9 @@ Public Class LTFSWriter
         Finally
             UnwrittenSizeOverrideValue = 0
             UnwrittenCountOverrideValue = 0
-            StopFlag = False
+            If clearStopFlag Then StopFlag = False
             SetStatusLight(LWStatus.Idle)
-            LockGUI(False)
+            If releaseGui Then LockGUI(False)
             RefreshDisplay()
             PrintMsg($"{My.Resources.ResText_HFin} {fileCount - errorCount}/{fileCount} | {errorCount} {My.Resources.ResText_Error}")
         End Try
@@ -8972,12 +9151,12 @@ Public Class LTFSWriter
         End If
         If ListView1.Tag IsNot Nothing Then
             Dim d As ltfsindex.directory = DirectCast(ListView1.Tag, ltfsindex.directory)
-            For Each dir As ltfsindex.directory In d.contents._directory
+            For Each dir As ltfsindex.directory In d.EnumerateLazyDirectories()
                 If My.Settings.LTFSWriter_FileLabel = " " OrElse CInt(Val(dir.name)).ToString = dir.name Then
                     Dim fl As String = $".{My.Settings.LTFSWriter_FileLabel}"
                     If fl = ". " Then fl = ""
                     Dim fExist As Boolean = False
-                    For Each f As ltfsindex.file In d.contents._file
+                    For Each f As ltfsindex.file In d.EnumerateLazyFiles()
                         If f.name = $"{dir.name}{fl}" Then
                             fExist = True
                             Exit For
@@ -9092,27 +9271,24 @@ Public Class LTFSWriter
                                        Threading.Interlocked.Increment(errCount)
                                    End Sub
         hw.ShowDialog()
-        Dim q As New List(Of ltfsindex.directory)
+        Dim q As New Stack(Of ltfsindex.directory)
         Dim hcount As Integer = 0, fcount As Integer = 0
         For Each d As ltfsindex.directory In schema._directory
-            q.Add(d)
+            q.Push(d)
         Next
         For Each f As ltfsindex.file In schema._file
             Threading.Interlocked.Increment(fcount)
             If f.sha1 IsNot Nothing AndAlso f.sha1.Length = 40 Then Threading.Interlocked.Increment(hcount)
         Next
         While q.Count > 0
-            Dim q1 As New List(Of ltfsindex.directory)
-            For Each d As ltfsindex.directory In q
-                For Each f1 As ltfsindex.file In d.contents._file
-                    Threading.Interlocked.Increment(fcount)
-                    If f1.sha1 IsNot Nothing AndAlso f1.sha1.Length = 40 Then Threading.Interlocked.Increment(hcount)
-                Next
-                For Each d1 As ltfsindex.directory In d.contents._directory
-                    q1.Add(d1)
-                Next
+            Dim d As ltfsindex.directory = q.Pop()
+            For Each f1 As ltfsindex.file In d.EnumerateLazyFiles()
+                Threading.Interlocked.Increment(fcount)
+                If f1.sha1 IsNot Nothing AndAlso f1.sha1.Length = 40 Then Threading.Interlocked.Increment(hcount)
             Next
-            q = q1
+            For Each d1 As ltfsindex.directory In d.EnumerateLazyDirectories()
+                q.Push(d1)
+            Next
         End While
         PrintMsg($"{hcount}/{fcount}{If(errCount > 0, $"({errCount} mismatch)", "")}")
         SetStatusLight(LWStatus.Idle)
@@ -9163,30 +9339,68 @@ Public Class LTFSWriter
     Private Sub 仅验证ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 仅验证ToolStripMenuItem.Click
         HashSelectedFiles(False, True)
     End Sub
+
+    Private Iterator Function EnumerateDirectoryFileRecords(directory As ltfsindex.directory,
+                                                             outputPath As String) As IEnumerable(Of FileRecord)
+        If directory Is Nothing Then Exit Function
+        Dim pending As New Stack(Of Tuple(Of ltfsindex.directory, String))
+        pending.Push(Tuple.Create(directory, If(outputPath, String.Empty)))
+        While pending.Count > 0
+            Dim current As Tuple(Of ltfsindex.directory, String) = pending.Pop()
+            Dim currentPath As String = current.Item2
+            For Each file As ltfsindex.file In current.Item1.EnumerateLazyFiles()
+                Yield New FileRecord With {
+                    .File = file,
+                    .SourcePath = IO.Path.Combine(currentPath, If(file.name, String.Empty))}
+            Next
+            For Each childDirectory As ltfsindex.directory In current.Item1.EnumerateLazyDirectories()
+                For Each nestedRecord As FileRecord In EnumerateDirectoryFileRecords(childDirectory,
+                                                                                      IO.Path.Combine(currentPath, If(childDirectory.name, String.Empty)))
+                    Yield nestedRecord
+                Next
+            Next
+        End While
+    End Function
+
+    Private Sub ExecuteHashPlanBatched(selectedDir As ltfsindex.directory,
+                                       overwrite As Boolean,
+                                       validateOnly As Boolean)
+        Const BatchSize As Integer = 1024
+        Dim batch As New List(Of FileRecord)(BatchSize)
+        StopFlag = False
+        Try
+            For Each record As FileRecord In EnumerateDirectoryFileRecords(selectedDir, String.Empty)
+                If StopFlag Then Exit For
+                batch.Add(record)
+                If batch.Count >= BatchSize Then
+                    ExecuteHashPlan(batch, overwrite, validateOnly, False,
+                                    resetStopFlag:=False,
+                                    clearStopFlag:=False,
+                                    releaseGui:=False)
+                    batch.Clear()
+                End If
+            Next
+            If Not StopFlag AndAlso batch.Count > 0 Then
+                ExecuteHashPlan(batch, overwrite, validateOnly, False,
+                                resetStopFlag:=False,
+                                clearStopFlag:=False,
+                                releaseGui:=False)
+            End If
+        Finally
+            batch.Clear()
+            StopFlag = False
+            SetStatusLight(LWStatus.Idle)
+            LockGUI(False)
+            RefreshDisplay()
+        End Try
+    End Sub
+
     Public Sub HashSelectedDir(selectedDir As ltfsindex.directory, Overwrite As Boolean, ValidateOnly As Boolean)
         If selectedDir Is Nothing Then Return
 
-        Dim fileList As New List(Of FileRecord)
-        Dim collectFiles As Action(Of ltfsindex.directory, String) = Nothing
-        collectFiles =
-            Sub(tapeDir As ltfsindex.directory, outputDir As String)
-                If tapeDir Is Nothing OrElse tapeDir.contents Is Nothing Then Return
-                For Each file As ltfsindex.file In tapeDir.contents._file
-                    fileList.Add(New FileRecord With {
-                        .File = file,
-                        .SourcePath = IO.Path.Combine(outputDir, If(file.name, ""))
-                    })
-                Next
-                For Each directory As ltfsindex.directory In tapeDir.contents._directory
-                    collectFiles(directory, IO.Path.Combine(outputDir, If(directory.name, "")))
-                Next
-            End Sub
-        collectFiles(selectedDir, If(selectedDir.name, ""))
-        If fileList.Count = 0 Then Return
-
         PrintMsg(My.Resources.ResText_PrepFile)
         Dim validationThread As New Threading.Thread(
-            Sub() ExecuteHashPlan(fileList, Overwrite, ValidateOnly, False))
+            Sub() ExecuteHashPlanBatched(selectedDir, Overwrite, ValidateOnly))
         LockGUI()
         validationThread.Start()
     End Sub
@@ -9196,7 +9410,7 @@ Public Class LTFSWriter
         If nodes.Count > 0 Then
             Dim selectedDir As New ltfsindex.directory
             For Each n As TreeNode In nodes
-                selectedDir.contents._directory.Add(DirectCast(n.Tag, ltfsindex.directory))
+                selectedDir.AddDirectory(DirectCast(n.Tag, ltfsindex.directory))
             Next
             HashSelectedDir(selectedDir, True, False)
         End If
@@ -9207,7 +9421,7 @@ Public Class LTFSWriter
         If nodes.Count > 0 Then
             Dim selectedDir As New ltfsindex.directory
             For Each n As TreeNode In nodes
-                selectedDir.contents._directory.Add(DirectCast(n.Tag, ltfsindex.directory))
+                selectedDir.AddDirectory(DirectCast(n.Tag, ltfsindex.directory))
             Next
             HashSelectedDir(selectedDir, False, False)
         End If
@@ -9218,7 +9432,7 @@ Public Class LTFSWriter
         If nodes.Count > 0 Then
             Dim selectedDir As New ltfsindex.directory
             For Each n As TreeNode In nodes
-                selectedDir.contents._directory.Add(DirectCast(n.Tag, ltfsindex.directory))
+                selectedDir.AddDirectory(DirectCast(n.Tag, ltfsindex.directory))
             Next
             HashSelectedDir(selectedDir, False, True)
         End If
@@ -9249,18 +9463,17 @@ Public Class LTFSWriter
             If TypeOf n.Tag IsNot ltfsindex.directory Then Exit For
             Dim d As ltfsindex.directory = DirectCast(n.Tag, ltfsindex.directory)
             If dirNames.Length <= maxlen Then dirNames = dirNames & d.name & "; "
-            Dim q As New List(Of ltfsindex.directory)
-            q.Add(d)
+            Dim q As New Stack(Of ltfsindex.directory)
+            q.Push(d)
             While q.Count > 0
-                Dim q2 As New List(Of ltfsindex.directory)
-                For Each qd As ltfsindex.directory In q
-                    Threading.Interlocked.Add(fnum, qd.contents._file.Count)
-                    For Each qf As ltfsindex.file In qd.contents._file
-                        Threading.Interlocked.Add(fbytes, qf.length)
-                    Next
-                    q2.AddRange(qd.contents._directory)
+                Dim qd As ltfsindex.directory = q.Pop()
+                Threading.Interlocked.Add(fnum, qd.GetLazyDirectFileCount())
+                For Each qf As ltfsindex.file In qd.EnumerateLazyFiles()
+                    Threading.Interlocked.Add(fbytes, qf.length)
                 Next
-                q = q2
+                For Each childDirectory As ltfsindex.directory In qd.EnumerateLazyDirectories()
+                    q.Push(childDirectory)
+                Next
             End While
         Next
         dirNames = dirNames.Substring(0, dirNames.Length - 2)
@@ -9383,7 +9596,12 @@ Public Class LTFSWriter
             Public LTFSDirectory As ltfsindex.directory
             Public Parent As ltfsindex.directory
 
-            Public FileSystemInfos() As DictionaryEntry
+            ' Directory enumeration is intentionally kept as an iterator.  A
+            ' SortedList of every child made a single FUSE listing allocate
+            ' one object for every file in the directory.
+            Public DirectoryEnumerator As IEnumerator(Of MountedDirectoryEntry)
+            Public DirectoryEnumerationPattern As String
+            Public DirectoryEnumerationIndex As Long
 
 
             Public Enum dwFilAttributesValue As UInteger
@@ -9437,6 +9655,12 @@ Public Class LTFSWriter
             End Function
 
         End Class
+
+        Public NotInheritable Class MountedDirectoryEntry
+            Public Property Name As String
+            Public Property Value As Object
+        End Class
+
         Public Overrides Function Init(Host0 As Object) As Integer
             Dim Host As Fsp.FileSystemHost = CType(Host0, Fsp.FileSystemHost)
             Try
@@ -9464,13 +9688,6 @@ Public Class LTFSWriter
             End Try
             Return STATUS_SUCCESS
         End Function
-        Private Class DirectoryEntryComparer
-            Implements IComparer
-            Public Function Compare(ByVal x As Object, ByVal y As Object) As Integer Implements IComparer.Compare
-                Return String.Compare(CType(CType(x, DictionaryEntry).Key, String), CType(CType(y, DictionaryEntry).Key, String))
-            End Function
-        End Class
-        Dim _DirectoryEntryComparer As DirectoryEntryComparer = New DirectoryEntryComparer
         Public Sub New(path0 As String)
             TapeDrive = path0
         End Sub
@@ -9486,17 +9703,16 @@ Public Class LTFSWriter
             Catch ex As Exception
                 LW.PrintMsg(ex.ToString(), LogOnly:=True)
                 If fbytes = 0 Then
-                    Dim q As New List(Of ltfsindex.directory)
-                    q.Add(LW.schema._directory(0))
+                    Dim q As New Stack(Of ltfsindex.directory)
+                    q.Push(LW.schema._directory(0))
                     While q.Count > 0
-                        Dim q2 As New List(Of ltfsindex.directory)
-                        For Each qd As ltfsindex.directory In q
-                            For Each qf As ltfsindex.file In qd.contents._file
-                                Threading.Interlocked.Add(fbytes, qf.length)
-                            Next
-                            q2.AddRange(qd.contents._directory)
+                        Dim qd As ltfsindex.directory = q.Pop()
+                        For Each qf As ltfsindex.file In qd.EnumerateLazyFiles()
+                            Threading.Interlocked.Add(fbytes, qf.length)
                         Next
-                        q = q2
+                        For Each childDirectory As ltfsindex.directory In qd.EnumerateLazyDirectories()
+                            q.Push(childDirectory)
+                        Next
                     End While
                 End If
                 VolumeInfo.TotalSize = CULng(fbytes)
@@ -9520,31 +9736,21 @@ Public Class LTFSWriter
 
             Dim LTFSDir As ltfsindex.directory = LW.schema._directory(0)
             For i As Integer = 0 To path.Length - 2
-                Dim dirFound As Boolean = False
-                For Each d As ltfsindex.directory In LTFSDir.contents._directory
-                    If d.name = path(i) Then
-                        LTFSDir = d
-                        dirFound = True
-                        Exit For
-                    End If
-                Next
-                If Not dirFound Then Return STATUS_NOT_FOUND
+                Dim childDirectory As ltfsindex.directory = LTFSDir.FindDirectoryByName(path(i))
+                If childDirectory Is Nothing Then Return STATUS_NOT_FOUND
+                LTFSDir = childDirectory
             Next
-            For Each d As ltfsindex.directory In LTFSDir.contents._directory
-                If d.name = path(path.Length - 1) Then
-                    FileExist = True
-                    filedesc = New FileDesc With {.IsDirectory = True, .LTFSDirectory = d}
-                    Exit For
-                End If
-            Next
+            Dim foundDirectory As ltfsindex.directory = LTFSDir.FindDirectoryByName(path(path.Length - 1))
+            If foundDirectory IsNot Nothing Then
+                FileExist = True
+                filedesc = New FileDesc With {.IsDirectory = True, .LTFSDirectory = foundDirectory}
+            End If
             If Not FileExist Then
-                For Each f As ltfsindex.file In LTFSDir.contents._file
-                    If f.name = path(path.Length - 1) Then
-                        FileExist = True
-                        filedesc = New FileDesc With {.IsDirectory = False, .LTFSFile = f, .Parent = LTFSDir}
-                        Exit For
-                    End If
-                Next
+                Dim foundFile As ltfsindex.file = LTFSDir.FindFileByName(path(path.Length - 1))
+                If foundFile IsNot Nothing Then
+                    FileExist = True
+                    filedesc = New FileDesc With {.IsDirectory = False, .LTFSFile = foundFile, .Parent = LTFSDir}
+                End If
             End If
             If FileExist Then
                 filedesc.GetFileInfo(FileInfo)
@@ -9573,30 +9779,21 @@ Public Class LTFSWriter
 
                 Dim LTFSDir As ltfsindex.directory = LW.schema._directory(0)
                 For i As Integer = 0 To path.Length - 2
-                    Dim dirFound As Boolean = False
-                    For Each d As ltfsindex.directory In LTFSDir.contents._directory
-                        If d.name = path(i) Then
-                            LTFSDir = d
-                            dirFound = True
-                            Exit For
-                        End If
-                    Next
-                    If Not dirFound Then Return STATUS_NOT_FOUND
+                    Dim childDirectory As ltfsindex.directory = LTFSDir.FindDirectoryByName(path(i))
+                    If childDirectory Is Nothing Then Return STATUS_NOT_FOUND
+                    LTFSDir = childDirectory
                 Next
-                For Each d As ltfsindex.directory In LTFSDir.contents._directory
-                    If d.name = path(path.Length - 1) Then
-                        FileExist = True
-                        FileDesc = New FileDesc With {.IsDirectory = True, .LTFSDirectory = d}
-                        Exit For
-                    End If
-                Next
+                Dim foundDirectory As ltfsindex.directory = LTFSDir.FindDirectoryByName(path(path.Length - 1))
+                If foundDirectory IsNot Nothing Then
+                    FileExist = True
+                    FileDesc = New FileDesc With {.IsDirectory = True, .LTFSDirectory = foundDirectory}
+                End If
                 If Not FileExist Then
-                    For Each f As ltfsindex.file In LTFSDir.contents._file
-                        If f.name = path(path.Length - 1) Then
-                            FileExist = True
-                            FileDesc = New FileDesc With {.IsDirectory = False, .LTFSFile = f, .Parent = LTFSDir}
-                        End If
-                    Next
+                    Dim foundFile As ltfsindex.file = LTFSDir.FindFileByName(path(path.Length - 1))
+                    If foundFile IsNot Nothing Then
+                        FileExist = True
+                        FileDesc = New FileDesc With {.IsDirectory = False, .LTFSFile = foundFile, .Parent = LTFSDir}
+                    End If
                 End If
                 If FileExist Then
                     Dim status As Integer = CType(FileDesc, FileDesc).GetFileInfo(FileInfo)
@@ -9662,53 +9859,95 @@ Public Class LTFSWriter
             Return result
         End Function
 
-        Public Overrides Function ReadDirectoryEntry(FileNode As Object, FileDesc0 As Object, Pattern As String, Marker As String, ByRef Context As Object, <Out> ByRef FileName As String, <Out> ByRef FileInfo As Fsp.Interop.FileInfo) As Boolean
+        Private Iterator Function EnumerateMountedDirectoryEntries(directory As ltfsindex.directory,
+                                                                    parent As ltfsindex.directory,
+                                                                    pattern As String) As IEnumerable(Of MountedDirectoryEntry)
+            If directory Is Nothing Then Exit Function
 
+            If parent IsNot Nothing Then
+                Yield New MountedDirectoryEntry With {.Name = ".", .Value = directory}
+                Yield New MountedDirectoryEntry With {.Name = "..", .Value = parent}
+            End If
+
+            Dim matchPattern As String = If(String.IsNullOrEmpty(pattern), "*", pattern).ToLowerInvariant()
+            For Each childDirectory As ltfsindex.directory In directory.EnumerateLazyDirectories()
+                Dim childName As String = If(childDirectory.name, String.Empty)
+                If childName.ToLowerInvariant() Like matchPattern Then
+                    Yield New MountedDirectoryEntry With {.Name = childName, .Value = childDirectory}
+                End If
+            Next
+            For Each childFile As ltfsindex.file In directory.EnumerateLazyFiles()
+                Dim childName As String = If(childFile.name, String.Empty)
+                If childName.ToLowerInvariant() Like matchPattern Then
+                    Yield New MountedDirectoryEntry With {.Name = childName, .Value = childFile}
+                End If
+            Next
+        End Function
+
+        Private Function TryGetNextMountedDirectoryEntry(fileDesc As FileDesc,
+                                                          pattern As String,
+                                                          marker As String,
+                                                          ByRef context As Object,
+                                                          ByRef result As MountedDirectoryEntry) As Boolean
+            If fileDesc Is Nothing OrElse fileDesc.LTFSDirectory Is Nothing Then Return False
+
+            Dim matchPattern As String = If(String.IsNullOrEmpty(pattern), "*", pattern)
+            If context Is Nothing Then
+                If fileDesc.DirectoryEnumerator IsNot Nothing Then
+                    fileDesc.DirectoryEnumerator.Dispose()
+                End If
+                fileDesc.DirectoryEnumerationPattern = matchPattern
+                fileDesc.DirectoryEnumerationIndex = 0
+                fileDesc.DirectoryEnumerator = EnumerateMountedDirectoryEntries(fileDesc.LTFSDirectory,
+                                                                                 fileDesc.Parent,
+                                                                                 matchPattern).GetEnumerator()
+            ElseIf fileDesc.DirectoryEnumerator Is Nothing OrElse
+                   Not String.Equals(fileDesc.DirectoryEnumerationPattern, matchPattern, StringComparison.Ordinal) Then
+                ' Context is normally paired with the same FileDesc.  Rebuild
+                ' defensively if the filesystem provider resumes with a stale
+                ' context, while still consuming only one entry at a time.
+                If fileDesc.DirectoryEnumerator IsNot Nothing Then
+                    fileDesc.DirectoryEnumerator.Dispose()
+                End If
+                fileDesc.DirectoryEnumerationPattern = matchPattern
+                fileDesc.DirectoryEnumerationIndex = 0
+                fileDesc.DirectoryEnumerator = EnumerateMountedDirectoryEntries(fileDesc.LTFSDirectory,
+                                                                                 fileDesc.Parent,
+                                                                                 matchPattern).GetEnumerator()
+                Dim resumeIndex As Long = 0
+                If TypeOf context Is Long Then resumeIndex = CLng(context)
+                While resumeIndex > 0 AndAlso fileDesc.DirectoryEnumerator.MoveNext()
+                    resumeIndex -= 1
+                End While
+                fileDesc.DirectoryEnumerationIndex = CLng(context)
+            End If
+
+            Dim markerText As String = If(marker, String.Empty)
+            While fileDesc.DirectoryEnumerator.MoveNext()
+                Dim candidate As MountedDirectoryEntry = fileDesc.DirectoryEnumerator.Current
+                If context Is Nothing AndAlso markerText.Length > 0 AndAlso
+                   String.Compare(candidate.Name, markerText, StringComparison.Ordinal) <= 0 Then
+                    Continue While
+                End If
+                fileDesc.DirectoryEnumerationIndex += 1
+                context = fileDesc.DirectoryEnumerationIndex
+                result = candidate
+                Return True
+            End While
+
+            result = Nothing
+            Return False
+        End Function
+
+        Public Overrides Function ReadDirectoryEntry(FileNode As Object, FileDesc0 As Object, Pattern As String, Marker As String, ByRef Context As Object, <Out> ByRef FileName As String, <Out> ByRef FileInfo As Fsp.Interop.FileInfo) As Boolean
             Dim FileDesc As FileDesc = CType(FileDesc0, FileDesc)
-            If FileDesc.FileSystemInfos Is Nothing Then
-                If Pattern IsNot Nothing Then
-                    Pattern = Pattern.Replace("<", "*").Replace(">", "?").Replace("""", ".")
-                Else
-                    Pattern = "*"
-                End If
-                Dim lst As New SortedList()
-                If FileDesc.LTFSDirectory IsNot Nothing AndAlso FileDesc.Parent IsNot Nothing Then
-                    lst.Add(".", FileDesc.LTFSDirectory)
-                    lst.Add("..", FileDesc.Parent)
-                End If
-                For Each d As ltfsindex.directory In FileDesc.LTFSDirectory.contents._directory
-                    If d.name.ToLower() Like Pattern.ToLower() Then
-                        lst.Add(d.name, d)
-                    End If
-                Next
-                For Each f As ltfsindex.file In FileDesc.LTFSDirectory.contents._file
-                    If f.name.ToLower() Like Pattern.ToLower() Then
-                        lst.Add(f.name, f)
-                    End If
-                Next
-                ReDim FileDesc.FileSystemInfos(lst.Count - 1)
-                lst.CopyTo(FileDesc.FileSystemInfos, 0)
-            End If
-            Dim index As Long = 0
-            If Context Is Nothing Then
-                If Marker IsNot Nothing Then
-                    index = Array.BinarySearch(FileDesc.FileSystemInfos, New DictionaryEntry(Marker, Nothing), _DirectoryEntryComparer)
-                    If index >= 0 Then
-                        index += 1
-                    Else
-                        index = -index
-                    End If
-                End If
-            Else
-                index = CLng(Context)
-            End If
-            If FileDesc.FileSystemInfos.Length > index Then
-                Context = index + 1
-                FileName = CStr(FileDesc.FileSystemInfos(CInt(index)).Key)
+            Pattern = If(Pattern, "*").Replace("<", "*").Replace(">", "?").Replace("""", ".")
+            Dim entry As MountedDirectoryEntry = Nothing
+            If TryGetNextMountedDirectoryEntry(FileDesc, Pattern, Marker, Context, entry) Then
+                FileName = entry.Name
                 FileInfo = New Fsp.Interop.FileInfo()
-                With FileDesc.FileSystemInfos(CInt(index))
-                    If TypeOf FileDesc.FileSystemInfos(CInt(index)).Value Is ltfsindex.directory Then
-                        With CType(FileDesc.FileSystemInfos(CInt(index)).Value, ltfsindex.directory)
+                If TypeOf entry.Value Is ltfsindex.directory Then
+                    With CType(entry.Value, ltfsindex.directory)
                             FileInfo.FileAttributes = FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_OFFLINE Or FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_DIRECTORY
                             FileInfo.ReparseTag = 0
                             FileInfo.FileSize = 0
@@ -9719,9 +9958,9 @@ Public Class LTFSWriter
                             FileInfo.ChangeTime = CULng(TapeUtils.ParseTimeStamp(.changetime).ToFileTimeUtc)
                             FileInfo.IndexNumber = 0
                             FileInfo.HardLinks = 0
-                        End With
-                    ElseIf TypeOf FileDesc.FileSystemInfos(CInt(index)).Value Is ltfsindex.file Then
-                        With CType(FileDesc.FileSystemInfos(CInt(index)).Value, ltfsindex.file)
+                    End With
+                ElseIf TypeOf entry.Value Is ltfsindex.file Then
+                    With CType(entry.Value, ltfsindex.file)
                             FileInfo.FileAttributes = FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_OFFLINE Or FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_ARCHIVE
                             If .readonly Then FileInfo.FileAttributes = FileInfo.FileAttributes Or FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_READONLY
                             FileInfo.ReparseTag = 0
@@ -9732,15 +9971,14 @@ Public Class LTFSWriter
                             FileInfo.ChangeTime = CULng(TapeUtils.ParseTimeStamp(.changetime).ToFileTimeUtc)
                             FileInfo.IndexNumber = 0
                             FileInfo.HardLinks = 0
-                        End With
-                    End If
-                End With
+                    End With
+                End If
                 Return True
-            Else
-                FileName = ""
-                FileInfo = New Fsp.Interop.FileInfo()
-                Return False
             End If
+
+            FileName = ""
+            FileInfo = New Fsp.Interop.FileInfo()
+            Return False
         End Function
     End Class
 
@@ -9795,7 +10033,7 @@ Public Class LTFSWriter
     Private Sub 子目录列表ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 子目录列表ToolStripMenuItem.Click
         Dim result As New StringBuilder
         If ListView1.Tag IsNot Nothing AndAlso TypeOf (ListView1.Tag) Is ltfsindex.directory Then
-            For Each Dir As ltfsindex.directory In CType(ListView1.Tag, ltfsindex.directory).contents._directory
+            For Each Dir As ltfsindex.directory In CType(ListView1.Tag, ltfsindex.directory).EnumerateLazyDirectories()
                 result.AppendLine(Dir.name)
             Next
         End If
@@ -10866,156 +11104,203 @@ Public Class LTFSWriter
         DisplayHelper.ShowInputDialog("Keyword", "Search", LastSearchKW)
         Return LastSearchKW
     End Function
-    Public Sub Search(Optional ByVal KW As String = Nothing)
-        If KW Is Nothing Then KW = LastSearchKW
-        Dim SearchStart As String = ""
-        Dim result As New StringBuilder
-        Dim selectedItems As List(Of ListViewItem) = GetSelectedListViewItems()
-        If TreeView1.SelectedNode IsNot Nothing Then
-            If TreeView1.SelectedNode.Tag IsNot Nothing Then
-                If TypeOf TreeView1.SelectedNode.Tag Is ltfsindex.directory Then
-                    SearchStart = GetPath(TreeView1.SelectedNode) & "\"
-                    If ListView1.Tag IsNot Nothing AndAlso
-                                             selectedItems.Count > 0 Then
-                        SearchStart &= CType(selectedItems(0).Tag, ltfsindex.file).name
-                    End If
-                End If
-            End If
-        End If
-        SearchStart = SearchStart.TrimStart("\"c)
-        If SearchStart = "" Then SearchStart = "\"
-        Dim dirIndexStack As New List(Of Integer)
-        Dim dirStack As New List(Of ltfsindex.directory)
-        Dim fileindex As Integer = -1
-        Dim pathSeg() As String = SearchStart.Split({"\"}, StringSplitOptions.None)
-        dirIndexStack.Add(0)
-        dirStack.Add(schema._directory(0))
-        For i As Integer = 1 To pathSeg.Count - 2
-            For j As Integer = 0 To dirStack(i - 1).contents._directory.Count - 1
-                If dirStack(i - 1).contents._directory(j).name = pathSeg(i) Then
-                    dirIndexStack.Add(j)
-                    dirStack.Add(dirStack(i - 1).contents._directory(j))
-                    Exit For
-                End If
+
+    Private NotInheritable Class SearchEntry
+        Public Property Directory As ltfsindex.directory
+        Public Property File As ltfsindex.file
+        Public Property DirectoryPath As String
+        Public Property Path As String
+        Public Property FileIndex As Integer
+    End Class
+
+    Private Shared Function AppendSearchPath(parentPath As String, childName As String) As String
+        If String.IsNullOrEmpty(parentPath) Then Return If(childName, String.Empty)
+        If String.IsNullOrEmpty(childName) Then Return parentPath
+        Return parentPath & "\" & childName
+    End Function
+
+    Private Iterator Function EnumerateSearchEntries(directory As ltfsindex.directory,
+                                                      directoryPath As String) As IEnumerable(Of SearchEntry)
+        If directory Is Nothing Then Exit Function
+
+        Yield New SearchEntry With {
+            .Directory = directory,
+            .DirectoryPath = directoryPath,
+            .Path = directoryPath,
+            .FileIndex = -1}
+
+        Dim fileIndex As Integer = 0
+        For Each childFile As ltfsindex.file In directory.EnumerateLazyFiles()
+            Yield New SearchEntry With {
+                .Directory = directory,
+                .File = childFile,
+                .DirectoryPath = directoryPath,
+                .Path = AppendSearchPath(directoryPath, childFile.name),
+                .FileIndex = fileIndex}
+            fileIndex += 1
+        Next
+
+        For Each childDirectory As ltfsindex.directory In directory.EnumerateLazyDirectories()
+            Dim childPath As String = AppendSearchPath(directoryPath, childDirectory.name)
+            For Each nestedEntry As SearchEntry In EnumerateSearchEntries(childDirectory, childPath)
+                Yield nestedEntry
             Next
         Next
-        If pathSeg.Last = "" Then
-            fileindex = -1
-            While dirStack.Last.contents._directory.Count > 0
-                dirStack.Add(dirStack.Last.contents._directory(0))
-                dirIndexStack.Add(0)
-            End While
-        Else
-            For j As Integer = 0 To dirStack.Last.contents._file.Count - 1
-                If dirStack.Last.contents._file(j).name = pathSeg.Last Then
-                    fileindex = j + 1
+    End Function
+
+    Private Shared Function SameFileRecord(left As ltfsindex.file, right As ltfsindex.file) As Boolean
+        If left Is Nothing OrElse right Is Nothing Then Return False
+        If Object.ReferenceEquals(left, right) Then Return True
+        Return left.HasLazyRecord AndAlso right.HasLazyRecord AndAlso
+               left.LazyRecordOffset = right.LazyRecordOffset AndAlso
+               Object.ReferenceEquals(left.LazyStoreReference, right.LazyStoreReference)
+    End Function
+
+    Private Shared Function SearchContains(value As String, keyword As String, caseSensitive As Boolean) As Boolean
+        If String.IsNullOrEmpty(keyword) Then Return True
+        If value Is Nothing Then Return False
+        Return value.IndexOf(keyword,
+                             If(caseSensitive, StringComparison.Ordinal, StringComparison.OrdinalIgnoreCase)) >= 0
+    End Function
+
+    Private Shared Function MatchesSearchEntry(entry As SearchEntry,
+                                               keyword As String,
+                                               fidMode As Boolean,
+                                               fid As String,
+                                               caseSensitive As Boolean) As Boolean
+        If entry Is Nothing Then Return False
+        If entry.File Is Nothing Then
+            If fidMode AndAlso entry.Directory IsNot Nothing AndAlso entry.Directory.fileuid.ToString() = fid Then Return True
+            Return SearchContains(If(entry.Directory Is Nothing, Nothing, entry.Directory.name), keyword, caseSensitive)
+        End If
+
+        If fidMode AndAlso entry.File.fileuid.ToString() = fid Then Return True
+        Return SearchContains(entry.File.name, keyword, caseSensitive)
+    End Function
+
+    Private Function FindListViewFileIndex(directory As ltfsindex.directory, target As ltfsindex.file) As Integer
+        If directory Is Nothing OrElse target Is Nothing Then Return -1
+
+        For i As Integer = 0 To _listRows.Count - 1
+            Dim candidate As ltfsindex.file = TryCast(_listRows(i).Value, ltfsindex.file)
+            If SameFileRecord(candidate, target) Then Return i
+        Next
+
+        If _lazyListDirectory Is Nothing OrElse Not SameDirectoryRecord(_lazyListDirectory, directory) Then Return -1
+        Dim baseIndex As Integer = _listRows.Count
+        Dim directIndex As Integer = 0
+        For Each candidate As ltfsindex.file In directory.EnumerateLazyFiles()
+            If SameFileRecord(candidate, target) Then Return baseIndex + directIndex
+            directIndex += 1
+        Next
+        Return -1
+    End Function
+
+    Public Sub Search(Optional ByVal KW As String = Nothing)
+        If KW Is Nothing Then KW = LastSearchKW
+        Dim selectedItems As List(Of ListViewItem) = GetSelectedListViewItems()
+        Dim searchRoot As ltfsindex.directory = Nothing
+        If TreeView1.SelectedNode IsNot Nothing Then
+            searchRoot = TryCast(TreeView1.SelectedNode.Tag, ltfsindex.directory)
+        End If
+        If searchRoot Is Nothing AndAlso schema IsNot Nothing AndAlso
+           schema._directory IsNot Nothing AndAlso schema._directory.Count > 0 Then
+            searchRoot = schema._directory(0)
+        End If
+        If searchRoot Is Nothing Then Return
+
+        Dim selectedFile As ltfsindex.file = Nothing
+        If selectedItems.Count > 0 AndAlso TypeOf selectedItems(0).Tag Is ltfsindex.file AndAlso
+           TypeOf ListView1.Tag Is ltfsindex.directory AndAlso
+           SameDirectoryRecord(searchRoot, DirectCast(ListView1.Tag, ltfsindex.directory)) Then
+            selectedFile = DirectCast(selectedItems(0).Tag, ltfsindex.file)
+        End If
+
+        Dim rootPath As String = String.Empty
+        If TreeView1.SelectedNode IsNot Nothing AndAlso SameDirectoryRecord(searchRoot, TryCast(TreeView1.SelectedNode.Tag, ltfsindex.directory)) Then
+            rootPath = GetPath(TreeView1.SelectedNode).TrimStart("\"c)
+        End If
+        If String.IsNullOrEmpty(rootPath) Then rootPath = If(searchRoot.name, String.Empty)
+
+        Dim resumeAfterFile As Boolean = selectedFile Is Nothing
+        If selectedFile IsNot Nothing Then
+            ' An unwritten row is not in EnumerateLazyFiles; match the old
+            ' behavior by only advancing past a file that is actually in the
+            ' directory's persisted/direct-file sequence.
+            resumeAfterFile = False
+            For Each candidate As ltfsindex.file In searchRoot.EnumerateLazyFiles()
+                If SameFileRecord(candidate, selectedFile) Then
+                    resumeAfterFile = True
                     Exit For
                 End If
             Next
         End If
+
         LockGUI(True)
-        Dim FIDMode As Boolean = KW.ToLower.StartsWith("fid:")
-        Dim FID As String = ""
-        If FIDMode Then
-            FID = KW.Substring(4).TrimStart().TrimEnd()
-        End If
+        Dim searchKeyword As String = If(KW, String.Empty)
+        Dim fidMode As Boolean = searchKeyword.StartsWith("fid:", StringComparison.OrdinalIgnoreCase)
+        Dim fid As String = If(fidMode, searchKeyword.Substring(4).Trim(), String.Empty)
+        Dim caseSensitive As Boolean = My.Settings.Application_CaseSensitiveSearch
         Task.Run(Sub()
+                     Dim hit As SearchEntry = Nothing
+                     Try
+                         For Each entry As SearchEntry In EnumerateSearchEntries(searchRoot, rootPath)
+                             If entry.Directory Is searchRoot Then Continue For
+                             If entry.File Is Nothing Then
+                                 If MatchesSearchEntry(entry, searchKeyword, fidMode, fid, caseSensitive) Then
+                                     hit = entry
+                                     Exit For
+                                 End If
+                                 Continue For
+                             End If
 
-                     While dirStack.Count > 0
-                         Dim currpath As String = "Searching: "
-                         For Each d As ltfsindex.directory In dirStack
-                             currpath &= "\" & d.name
+                             If Not resumeAfterFile Then
+                                 If SameFileRecord(entry.File, selectedFile) Then resumeAfterFile = True
+                                 Continue For
+                             End If
+                             If MatchesSearchEntry(entry, searchKeyword, fidMode, fid, caseSensitive) Then
+                                 hit = entry
+                                 Exit For
+                             End If
                          Next
-                         PrintMsg(currpath)
-                         If dirIndexStack.Last <= dirStack(dirStack.Count - 2).contents._directory.Count - 1 Then
-                             Do
-                                 If fileindex > dirStack.Last.contents._file.Count - 1 Then Exit Do
-                                 If (FIDMode AndAlso ((fileindex = -1 AndAlso dirStack.Last.fileuid.ToString() = FID) OrElse
-                                                      (fileindex <> -1 AndAlso dirStack.Last.contents._file(fileindex).fileuid.ToString = FID))) OrElse
-                                    (fileindex = -1 AndAlso If(My.Settings.Application_CaseSensitiveSearch,
-                                                               dirStack.Last.name.Contains(KW),
-                                                               dirStack.Last.name.ToLower().Contains(KW.ToLower()))) OrElse
-                                    (fileindex <> -1 AndAlso If(My.Settings.Application_CaseSensitiveSearch,
-                                                                dirStack.Last.contents._file(fileindex).name.Contains(KW),
-                                                                dirStack.Last.contents._file(fileindex).name.ToLower().Contains(KW.ToLower))) Then
-                                     Invoke(Sub()
-                                                Dim nd As TreeNode = TreeView1.Nodes(0)
-                                                Try
-                                                    For n As Integer = 1 To dirIndexStack.Count - 1
-                                                        Invoke(Sub() nd.Expand())
-                                                        nd = nd.Nodes(dirIndexStack(n))
-                                                    Next
-                                                Catch ex As Exception
 
-                                                End Try
-                                                If nd IsNot TreeView1.SelectedNode Then
-                                                    TreeView1.SelectedNode = nd
+                         If hit IsNot Nothing Then
+                             Invoke(Sub()
+                                        Try
+                                            Dim directoryPath As String = If(hit.File Is Nothing, hit.Path, hit.DirectoryPath)
+                                            Dim node As TreeNode = FindTreeNodeByPath(directoryPath)
+                                            If node IsNot Nothing Then
+                                                If node IsNot TreeView1.SelectedNode Then
+                                                    TreeView1.SelectedNode = node
                                                     RefreshDisplay()
                                                 End If
-                                                ListView1.SelectedIndices.Clear()
-                                                If fileindex <> -1 Then
-                                                    Try
-                                                        SelectListViewIndex(fileindex)
-                                                        PrintMsg($"{currpath}\{dirStack.Last.contents._file(fileindex).name}")
-                                                    Catch ex As Exception
-
-                                                    End Try
+                                                If hit.File Is Nothing Then
+                                                    PrintMsg($"\{hit.Path}")
+                                                    SelectListViewIndex(0)
                                                 Else
-                                                    PrintMsg($"{currpath}")
-                                                    Try
-                                                        SelectListViewIndex(0)
-                                                    Catch ex As Exception
-
-                                                    End Try
+                                                    Dim rowIndex As Integer = FindListViewFileIndex(hit.Directory, hit.File)
+                                                    If rowIndex >= 0 Then SelectListViewIndex(rowIndex)
+                                                    PrintMsg($"\{hit.Path}")
                                                 End If
-                                                LockGUI(False)
-                                            End Sub)
-                                     Exit Sub
-                                 End If
-                                 fileindex += 1
-                             Loop While fileindex <= dirStack.Last.contents._file.Count - 1
+                                            End If
+                                        Finally
+                                            LockGUI(False)
+                                        End Try
+                                    End Sub)
+                             Return
                          End If
 
-                         Dim returned As Boolean = False
-                         If dirStack.Count - 2 >= 0 Then
-                             While dirIndexStack.Last > dirStack(dirStack.Count - 2).contents._directory.Count - 1
-                                 dirStack.RemoveAt(dirStack.Count - 1)
-                                 dirIndexStack.RemoveAt(dirIndexStack.Count - 1)
-                                 fileindex = -1
-                                 returned = True
-                                 If dirStack.Count <= 1 Then Exit While
-                             End While
-                             If returned Then
-                                 If dirStack.Count <= 1 Then Exit While
-                                 dirIndexStack(dirIndexStack.Count - 1) += 1
-                                 If dirIndexStack.Last <= dirStack(dirStack.Count - 2).contents._directory.Count - 1 Then
-                                     dirStack.RemoveAt(dirStack.Count - 1)
-                                     dirStack.Add(dirStack(dirStack.Count - 1).contents._directory(dirIndexStack.Last))
-                                 End If
-                                 Continue While
-                             End If
-
-                         End If
-                         If dirIndexStack.Last <= dirStack(dirStack.Count - 2).contents._directory.Count - 1 Then
-                             If dirStack(dirStack.Count - 1).contents._directory.Count > 0 Then
-                                 dirStack.Add(dirStack.Last.contents._directory(0))
-                                 dirIndexStack.Add(0)
-                                 fileindex = -1
-                             Else
-                                 If dirStack.Count <= 1 Then Exit While
-                                 dirIndexStack(dirIndexStack.Count - 1) += 1
-                                 If dirIndexStack.Last <= dirStack(dirStack.Count - 2).contents._directory.Count - 1 Then
-                                     dirStack.RemoveAt(dirStack.Count - 1)
-                                     dirStack.Add(dirStack(dirStack.Count - 1).contents._directory(dirIndexStack.Last))
-                                     fileindex = -1
-                                 End If
-                             End If
-                         End If
-                         If dirStack.Count <= 1 Then Exit While
-                     End While
-                     Invoke(Sub() LockGUI(False))
-                     PrintMsg($"""{LastSearchKW}"" not found.")
-                     Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"""{LastSearchKW}"" not found."))
+                         Invoke(Sub()
+                                    LockGUI(False)
+                                    MessageBox.Show(New Form With {.TopMost = True}, $"""{searchKeyword}"" not found.")
+                                End Sub)
+                     Catch ex As Exception
+                         PrintMsg($"Search failed: {ex}", ForceLog:=True)
+                         Try
+                             Invoke(Sub() LockGUI(False))
+                         Catch
+                         End Try
+                     End Try
                  End Sub)
     End Sub
     Private Sub LTFSWriter_KeyDown(sender As Object, e As KeyEventArgs) Handles Me.KeyDown
@@ -11088,22 +11373,15 @@ Public Class LTFSWriter
                     Dim cmp As New ExplorerUtils
                     If ListView1.Tag IsNot Nothing AndAlso TypeOf ListView1.Tag Is ltfsindex.directory Then
                         Dim dir As ltfsindex.directory = CType(ListView1.Tag, ltfsindex.directory)
-                        dir.contents._file.Sort(New Comparison(Of ltfsindex.file)(
-                                                Function(a As ltfsindex.file, b As ltfsindex.file) As Integer
-                                                    If e.Alt Then
-                                                        Return a.name.CompareTo(b.name)
-                                                    Else
-                                                        Return cmp.Compare(a.name, b.name)
-                                                    End If
-                                                End Function))
-                        dir.contents._directory.Sort(New Comparison(Of ltfsindex.directory)(
-                                                Function(a As ltfsindex.directory, b As ltfsindex.directory) As Integer
-                                                    If e.Alt Then
-                                                        Return a.name.CompareTo(b.name)
-                                                    Else
-                                                        Return cmp.Compare(a.name, b.name)
-                                                    End If
-                                                End Function))
+                        dir.SortChildrenByName(
+                            Function(a As String, b As String) As Integer
+                                If e.Alt Then Return a.CompareTo(b)
+                                Return cmp.Compare(a, b)
+                            End Function,
+                            Function(a As String, b As String) As Integer
+                                If e.Alt Then Return a.CompareTo(b)
+                                Return cmp.Compare(a, b)
+                            End Function)
                     End If
                 End If
                 RefreshDisplay()
@@ -11428,20 +11706,19 @@ Public Class LTFSWriter
                                                        matcher As Matcher,
                                                        states As Dictionary(Of String, MonitorFileState),
                                                        nowUtc As DateTime,
-                                                       token As Threading.CancellationToken,
-                                                       ByRef matchedCount As Integer) As List(Of GlobHelper.AddFile)
+        token As Threading.CancellationToken,
+                                                        ByRef matchedCount As Integer) As List(Of GlobHelper.AddFile)
         matchedCount = 0
         Dim ready As New List(Of GlobHelper.AddFile)
-        Dim plan As GlobHelper.AddPlan = GlobCollector.PlanAdd_ByFullPathInputs(sourcePaths, matcher)
-        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Const MaxReadyFiles As Integer = 4096
 
-        For Each candidate As GlobHelper.AddFile In plan.Files
+        For Each candidate As GlobHelper.AddFile In GlobCollector.EnumerateAdd_ByFullPathInputs(sourcePaths, matcher)
             token.ThrowIfCancellationRequested()
             Dim info As IO.FileInfo = Nothing
             If Not TryReadMonitorFileInfo(candidate, info) Then Continue For
 
             Dim key As String = NormalizeMonitorPath(info.FullName)
-            If String.IsNullOrEmpty(key) OrElse Not seen.Add(key) Then Continue For
+            If String.IsNullOrEmpty(key) Then Continue For
             matchedCount += 1
 
             Dim state As MonitorFileState = Nothing
@@ -11461,16 +11738,15 @@ Public Class LTFSWriter
             If state.Queued Then Continue For
             If nowUtc.Subtract(state.StableSinceUtc).TotalSeconds < 10.0 Then Continue For
 
-            ready.Add(New GlobHelper.AddFile With {
-                .SourceFullPath = info.FullName,
-                .RelativePath = candidate.RelativePath,
-                .SourceInfo = info,
-                .SourceXattrPath = candidate.SourceXattrPath})
+            If ready.Count < MaxReadyFiles Then
+                ready.Add(New GlobHelper.AddFile With {
+                    .SourceFullPath = info.FullName,
+                    .RelativePath = candidate.RelativePath,
+                    .SourceInfo = info,
+                    .SourceXattrPath = candidate.SourceXattrPath})
+            End If
         Next
 
-        For Each key As String In states.Keys.ToList()
-            If Not seen.Contains(key) Then states.Remove(key)
-        Next
         Return ready
     End Function
 
@@ -11754,11 +12030,16 @@ Public Class LTFSWriter
                                 Next
 
                                 Dim deleteList As New List(Of String)
-                                For Each fileRecord As FileRecord In UnwrittenFiles.ToList()
-                                    If batchKeys.Contains(NormalizeMonitorPath(fileRecord.SourcePath)) Then
-                                        deleteList.Add(fileRecord.SourcePath)
-                                    End If
-                                Next
+                                UFReadCount.Inc()
+                                Try
+                                    For Each fileRecord As FileRecord In UnwrittenFiles
+                                        If batchKeys.Contains(NormalizeMonitorPath(fileRecord.SourcePath)) Then
+                                            deleteList.Add(fileRecord.SourcePath)
+                                        End If
+                                    Next
+                                Finally
+                                    UFReadCount.Dec()
+                                End Try
 
                                 If UnwrittenFiles.Count > 0 Then
                                     updateStatus($"正在写入：{batch.Count} 个稳定文件")
@@ -11876,84 +12157,53 @@ Public Class LTFSWriter
         If Nodes.Count = 0 Then Exit Sub
         Dim outputDirectory As String = SelectWriterFolder()
         If String.IsNullOrEmpty(outputDirectory) Then Exit Sub
-        Dim FileList As New List(Of FileRecord)
+        Dim totalFiles As Long = 0
+        For Each node As TreeNode In Nodes
+            Dim selectedDir As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
+            If selectedDir IsNot Nothing Then totalFiles += selectedDir.TotalFiles
+        Next
         Dim th As New Threading.Thread(
                 Sub()
+                    Dim succeeded As Boolean = False
                     PrintMsg(My.Resources.ResText_Restoring)
                     SetStatusLight(LWStatus.Busy)
                     Try
                         StopFlag = False
-                        Dim IterDir As Action(Of ltfsindex.directory, IO.DirectoryInfo) =
-                            Sub(tapeDir As ltfsindex.directory, outputDir As IO.DirectoryInfo)
-                                For Each f As ltfsindex.file In tapeDir.contents._file
-                                    f.TempObj = New ltfsindex.file.refFile() With {.FileName = ""}
-                                    FileList.Add(New FileRecord With {.File = f, .SourcePath = IO.Path.Combine(outputDir.FullName, f.name)})
-                                Next
-                                For Each d As ltfsindex.directory In tapeDir.contents._directory
-                                    Dim thisDir As String = IO.Path.Combine(outputDir.FullName, d.name)
-                                    Dim dirOutput As IO.DirectoryInfo
-                                    Dim RestoreTimeStamp As Boolean = Not IO.Directory.Exists(thisDir)
-                                    If RestoreTimeStamp Then IO.Directory.CreateDirectory(thisDir)
-                                    dirOutput = New IO.DirectoryInfo(thisDir)
-                                    IterDir(d, dirOutput)
-                                    If RestoreTimeStamp Then
-                                        dirOutput.CreationTimeUtc = TapeUtils.ParseTimeStamp(d.creationtime)
-                                        dirOutput.LastWriteTimeUtc = TapeUtils.ParseTimeStamp(d.modifytime)
-                                        dirOutput.LastAccessTimeUtc = TapeUtils.ParseTimeStamp(d.accesstime)
-                                    End If
-                                Next
-                            End Sub
                         PrintMsg(My.Resources.ResText_PrepFile)
-                        For Each n As TreeNode In Nodes
-                            Dim selectedDir As ltfsindex.directory = DirectCast(n.Tag, ltfsindex.directory)
-                            Dim ODir As String = IO.Path.Combine(outputDirectory, selectedDir.name)
-                            If Not ODir.StartsWith("\\") Then ODir = $"\\?\{ODir}"
-                            If Not IO.Directory.Exists(ODir) Then IO.Directory.CreateDirectory(ODir)
-                            IterDir(selectedDir, New IO.DirectoryInfo(ODir))
-                        Next
-
-                        FileList.Sort(New Comparison(Of FileRecord)(Function(a As FileRecord, b As FileRecord) As Integer
-                                                                        If a.File.extentinfo Is Nothing And b.File.extentinfo IsNot Nothing Then Return 0.CompareTo(1)
-                                                                        If b.File.extentinfo Is Nothing And a.File.extentinfo IsNot Nothing Then Return 1.CompareTo(0)
-                                                                        If a.File.extentinfo Is Nothing And b.File.extentinfo Is Nothing Then Return 0.CompareTo(0)
-                                                                        If a.File.extentinfo.Count = 0 And b.File.extentinfo.Count <> 0 Then Return 0.CompareTo(1)
-                                                                        If b.File.extentinfo.Count = 0 And a.File.extentinfo.Count <> 0 Then Return 1.CompareTo(0)
-                                                                        If a.File.extentinfo.Count = 0 And b.File.extentinfo.Count = 0 Then Return 0.CompareTo(0)
-                                                                        If a.File.extentinfo(0).partition = ltfsindex.PartitionLabel.a And b.File.extentinfo(0).partition = ltfsindex.PartitionLabel.b Then Return 0.CompareTo(1)
-                                                                        If a.File.extentinfo(0).partition = ltfsindex.PartitionLabel.b And b.File.extentinfo(0).partition = ltfsindex.PartitionLabel.a Then Return 1.CompareTo(0)
-                                                                        Return a.File.extentinfo(0).startblock.CompareTo(b.File.extentinfo(0).startblock)
-                                                                    End Function))
-                        For i As Integer = 1 To FileList.Count - 1
-                            If FileList(i).File.length = FileList(i - 1).File.length AndAlso IOManager.ChecksumEquals(FileList(i).File, FileList(i - 1).File, My.Settings.LTFSWriter_DedupeAlgorithm) Then
-                                FileList(i).File.TempObj = FileList(i - 1).File.TempObj
-                            End If
-                        Next
                         CurrentFilesProcessed = 0
                         CurrentBytesProcessed = 0
                         UnwrittenSizeOverrideValue = 0
-                        UnwrittenCountOverrideValue = CULng(FileList.Count)
+                        UnwrittenCountOverrideValue = CULng(Math.Max(0, totalFiles))
                         StartTime = Now
-                        For Each FI As FileRecord In FileList
-                            UnwrittenSizeOverrideValue = CULng(UnwrittenSizeOverrideValue + FI.File.length)
-                            FI.File.TempObj = Nothing
-                        Next
                         PrintMsg(My.Resources.ResText_RestFile)
-                        Dim c As Integer = 0
+                        Dim c As Long = 0
                         TapeUtils.ReserveUnit(driveHandle)
                         TapeUtils.PreventMediaRemoval(driveHandle)
                         RestorePosition = New TapeUtils.PositionData(driveHandle)
-                        For Each fr As FileRecord In FileList
-                            c += 1
-                            PrintMsg($"{My.Resources.ResText_Restoring} [{c}/{FileList.Count}] {fr.File.name}", False, $"{My.Resources.ResText_Restoring} [{c}/{FileList.Count}] {fr.SourcePath}")
-                            IOManager.CreateSparceFile(fr.SourcePath, fr.File.length)
-                            If StopFlag Then
-                                PrintMsg(My.Resources.ResText_OpCancelled)
-                                SetStatusLight(LWStatus.Idle)
-                                Exit Try
-                            End If
+                        For Each node As TreeNode In Nodes
+                            If StopFlag Then Exit For
+                            Dim selectedDir As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
+                            If selectedDir Is Nothing Then Continue For
+                            Dim outputPath As String = IO.Path.Combine(outputDirectory, If(selectedDir.name, String.Empty))
+                            If Not outputPath.StartsWith("\\") Then outputPath = $"\\?\{outputPath}"
+                            If Not IO.Directory.Exists(outputPath) Then IO.Directory.CreateDirectory(outputPath)
+                            Dim output As New IO.DirectoryInfo(outputPath)
+                            TraverseRestoreFiles(selectedDir, output,
+                                Sub(fr As FileRecord)
+                                    If StopFlag Then Return
+                                    c += 1
+                                    PrintMsg($"{My.Resources.ResText_Restoring} [{c}/{totalFiles}] {fr.File.name}", False, $"{My.Resources.ResText_Restoring} [{c}/{totalFiles}] {fr.SourcePath}")
+                                    IOManager.CreateSparceFile(fr.SourcePath, fr.File.length)
+                                End Sub)
                         Next
-                        PrintMsg(My.Resources.ResText_RestFin)
-                        SetStatusLight(LWStatus.Succ)
+                        If StopFlag Then
+                            PrintMsg(My.Resources.ResText_OpCancelled)
+                            SetStatusLight(LWStatus.Idle)
+                        Else
+                            succeeded = True
+                            PrintMsg(My.Resources.ResText_RestFin)
+                            SetStatusLight(LWStatus.Succ)
+                        End If
                     Catch ex As Exception
                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString}"))
                         PrintMsg($"{My.Resources.ResText_RestoreErr}{ex.ToString}", ForceLog:=True)
@@ -11968,7 +12218,9 @@ Public Class LTFSWriter
 
                     UnwrittenSizeOverrideValue = 0
                     UnwrittenCountOverrideValue = 0
+                    StopFlag = False
                     LockGUI(False)
+                    If Not succeeded Then SetStatusLight(LWStatus.Err)
                 End Sub)
         LockGUI()
         th.Start()
@@ -11979,77 +12231,59 @@ Public Class LTFSWriter
         If Nodes.Count = 0 Then Exit Sub
         Dim outputDirectory As String = SelectWriterFolder()
         If String.IsNullOrEmpty(outputDirectory) Then Exit Sub
-        Dim FileList As New List(Of FileRecord)
+        Dim totalFiles As Long = 0
+        For Each node As TreeNode In Nodes
+            Dim selectedDir As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
+            If selectedDir IsNot Nothing Then totalFiles += selectedDir.TotalFiles
+        Next
         Dim th As New Threading.Thread(
                 Sub()
+                    Dim succeeded As Boolean = False
                     PrintMsg(My.Resources.ResText_Deleting)
                     SetStatusLight(LWStatus.Busy)
                     Try
                         StopFlag = False
-                        Dim IterDir As Action(Of ltfsindex.directory, IO.DirectoryInfo) =
-                            Sub(tapeDir As ltfsindex.directory, outputDir As IO.DirectoryInfo)
-                                For Each f As ltfsindex.file In tapeDir.contents._file
-                                    f.TempObj = New ltfsindex.file.refFile() With {.FileName = ""}
-                                    FileList.Add(New FileRecord With {.File = f, .SourcePath = IO.Path.Combine(outputDir.FullName, f.name)})
-                                Next
-                                For Each d As ltfsindex.directory In tapeDir.contents._directory
-                                    Dim thisDir As String = IO.Path.Combine(outputDir.FullName, d.name)
-                                    Dim dirOutput As IO.DirectoryInfo
-                                    Dim RestoreTimeStamp As Boolean = Not IO.Directory.Exists(thisDir)
-                                    If RestoreTimeStamp Then IO.Directory.CreateDirectory(thisDir)
-                                    dirOutput = New IO.DirectoryInfo(thisDir)
-                                    IterDir(d, dirOutput)
-                                    If RestoreTimeStamp Then
-                                        dirOutput.CreationTimeUtc = TapeUtils.ParseTimeStamp(d.creationtime)
-                                        dirOutput.LastWriteTimeUtc = TapeUtils.ParseTimeStamp(d.modifytime)
-                                        dirOutput.LastAccessTimeUtc = TapeUtils.ParseTimeStamp(d.accesstime)
-                                    End If
-                                Next
-                            End Sub
                         PrintMsg(My.Resources.ResText_PrepFile)
-                        For Each n As TreeNode In Nodes
-                            Dim selectedDir As ltfsindex.directory = DirectCast(n.Tag, ltfsindex.directory)
-                            Dim ODir As String = IO.Path.Combine(outputDirectory, selectedDir.name)
-                            If Not ODir.StartsWith("\\") Then ODir = $"\\?\{ODir}"
-                            If Not IO.Directory.Exists(ODir) Then IO.Directory.CreateDirectory(ODir)
-                            IterDir(selectedDir, New IO.DirectoryInfo(ODir))
-                        Next
-
                         CurrentFilesProcessed = 0
                         CurrentBytesProcessed = 0
                         UnwrittenSizeOverrideValue = 0
-                        UnwrittenCountOverrideValue = CULng(FileList.Count)
+                        UnwrittenCountOverrideValue = CULng(Math.Max(0, totalFiles))
                         StartTime = Now
-                        For Each FI As FileRecord In FileList
-                            UnwrittenSizeOverrideValue = CULng(UnwrittenSizeOverrideValue + FI.File.length)
-                            FI.File.TempObj = Nothing
-                        Next
                         PrintMsg(My.Resources.ResText_Deleting)
-                        Dim c As Integer = 0
+                        Dim c As Long = 0
                         TapeUtils.ReserveUnit(driveHandle)
                         TapeUtils.PreventMediaRemoval(driveHandle)
                         RestorePosition = New TapeUtils.PositionData(driveHandle)
-                        For Each fr As FileRecord In FileList
-                            c += 1
-                            PrintMsg($"{My.Resources.ResText_Deleting} [{c}/{FileList.Count}] {fr.File.name}", False, $"{My.Resources.ResText_Deleting} [{c}/{FileList.Count}] {fr.SourcePath}")
-                            Try
-                                If IO.File.Exists(fr.SourcePath) Then
-                                    If (New IO.FileInfo(fr.SourcePath)).Length = fr.File.length Then
-                                        IO.File.Delete(fr.SourcePath)
-                                    End If
-                                End If
-
-                            Catch ex As Exception
-                                PrintMsg($"[ERROR]{fr.SourcePath}>{ex.ToString()}", LogOnly:=True, ForceLog:=True)
-                            End Try
-                            If StopFlag Then
-                                PrintMsg(My.Resources.ResText_OpCancelled)
-                                SetStatusLight(LWStatus.Idle)
-                                Exit Try
-                            End If
+                        For Each node As TreeNode In Nodes
+                            If StopFlag Then Exit For
+                            Dim selectedDir As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
+                            If selectedDir Is Nothing Then Continue For
+                            Dim outputPath As String = IO.Path.Combine(outputDirectory, If(selectedDir.name, String.Empty))
+                            If Not outputPath.StartsWith("\\") Then outputPath = $"\\?\{outputPath}"
+                            If Not IO.Directory.Exists(outputPath) Then IO.Directory.CreateDirectory(outputPath)
+                            TraverseRestoreFiles(selectedDir, New IO.DirectoryInfo(outputPath),
+                                Sub(fr As FileRecord)
+                                    If StopFlag Then Return
+                                    c += 1
+                                    PrintMsg($"{My.Resources.ResText_Deleting} [{c}/{totalFiles}] {fr.File.name}", False, $"{My.Resources.ResText_Deleting} [{c}/{totalFiles}] {fr.SourcePath}")
+                                    Try
+                                        If IO.File.Exists(fr.SourcePath) AndAlso
+                                           (New IO.FileInfo(fr.SourcePath)).Length = fr.File.length Then
+                                            IO.File.Delete(fr.SourcePath)
+                                        End If
+                                    Catch ex As Exception
+                                        PrintMsg($"[ERROR]{fr.SourcePath}>{ex.ToString()}", LogOnly:=True, ForceLog:=True)
+                                    End Try
+                                End Sub)
                         Next
-                        PrintMsg(My.Resources.ResText_DeleteFin)
-                        SetStatusLight(LWStatus.Succ)
+                        If StopFlag Then
+                            PrintMsg(My.Resources.ResText_OpCancelled)
+                            SetStatusLight(LWStatus.Idle)
+                        Else
+                            succeeded = True
+                            PrintMsg(My.Resources.ResText_DeleteFin)
+                            SetStatusLight(LWStatus.Succ)
+                        End If
                     Catch ex As Exception
                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString}"))
                         PrintMsg($"{My.Resources.ResText_Error}{ex.ToString}", ForceLog:=True)
@@ -12064,7 +12298,9 @@ Public Class LTFSWriter
 
                     UnwrittenSizeOverrideValue = 0
                     UnwrittenCountOverrideValue = 0
+                    StopFlag = False
                     LockGUI(False)
+                    If Not succeeded Then SetStatusLight(LWStatus.Err)
                 End Sub)
         LockGUI()
         th.Start()
@@ -12598,29 +12834,10 @@ Public Class LTFSWriter
     End Sub
 
     Public Function FileExists(path As String) As Boolean
-        If Not path.EndsWith("\") AndAlso Not path.EndsWith("/") Then path &= "\"
-        Dim DIR() As String = path.Split({"\", "/"}, StringSplitOptions.None)
-        ReDim Preserve DIR(DIR.Length - 2)
-        Dim targetdir As TreeNode = TreeView1.TopNode
-        If DIR.Length > 1 AndAlso DIR(1) = CType(targetdir.Tag, ltfsindex.directory).name Then
-            Dim found As Boolean = False
-            For i As Integer = 2 To DIR.Length - 1
-                For j As Integer = 0 To targetdir.Nodes.Count - 1
-                    If CType(targetdir.Nodes(j).Tag, ltfsindex.directory).name = DIR(i) Then
-                        targetdir = targetdir.Nodes(j)
-                        If i = DIR.Length - 2 Then
-                            Dim file As List(Of ltfsindex.file) = CType(targetdir.Nodes(j).Tag, ltfsindex.directory).contents._file
-                            For k As Integer = 0 To file.Count - 1
-                                If file(k).name = DIR(DIR.Length - 1) Then Return True
-                            Next
-                            Return False
-                        End If
-                        Exit For
-                    End If
-                Next
-            Next
-        End If
-        Return False
+        If schema Is Nothing OrElse String.IsNullOrWhiteSpace(path) Then Return False
+        Dim normalizedPath As String = path.Trim("\"c, "/"c)
+        If normalizedPath.Length = 0 Then Return False
+        Return schema.GetFile(normalizedPath) IsNot Nothing
     End Function
     Public CurrentFocus As Object
     Private Sub TreeView1_GotFocus(sender As Object, e As EventArgs) Handles TreeView1.GotFocus

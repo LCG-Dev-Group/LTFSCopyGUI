@@ -425,6 +425,56 @@ Public Class IOManager
             End Get
         End Property
 
+        Private Shared Function JoinSchemaPath(parentPath As String, childName As String) As String
+            Dim safeName As String = If(childName, String.Empty)
+            If String.IsNullOrEmpty(parentPath) Then Return safeName
+            If String.IsNullOrEmpty(safeName) Then Return parentPath
+            Return parentPath.TrimEnd("\"c) & "\" & safeName
+        End Function
+
+        Private Iterator Function EnumerateSelectedDirectoryFiles(directory As ltfsindex.directory,
+                                                                   relativePath As String) As IEnumerable(Of ltfsindex.file)
+            If directory Is Nothing OrElse Not directory.Selected Then Exit Function
+
+            For Each file As ltfsindex.file In directory.EnumerateLazyFiles()
+                If file Is Nothing OrElse Not file.Selected Then Continue For
+                file.fullpath = JoinSchemaPath(relativePath, file.name)
+                Yield file
+            Next
+
+            For Each childDirectory As ltfsindex.directory In directory.EnumerateLazyDirectories()
+                If childDirectory Is Nothing OrElse Not childDirectory.Selected Then Continue For
+                Dim childPath As String = JoinSchemaPath(relativePath, childDirectory.name)
+                For Each file As ltfsindex.file In EnumerateSelectedDirectoryFiles(childDirectory, childPath)
+                    Yield file
+                Next
+            Next
+        End Function
+
+        Private Iterator Function EnumerateSelectedFiles() As IEnumerable(Of ltfsindex.file)
+            If schema Is Nothing Then Exit Function
+
+            If schema._file IsNot Nothing Then
+                For Each file As ltfsindex.file In schema._file
+                    If file Is Nothing OrElse Not file.Selected Then Continue For
+                    file.fullpath = If(file.name, String.Empty)
+                    Yield file
+                Next
+            End If
+
+            If schema._directory IsNot Nothing Then
+                For Each directory As ltfsindex.directory In schema._directory
+                    If directory Is Nothing OrElse Not directory.Selected Then Continue For
+                    ' The root directory is the volume container and is not
+                    ' part of the source path, matching the former name-reset
+                    ' behavior without mutating its lazy metadata.
+                    For Each file As ltfsindex.file In EnumerateSelectedDirectoryFiles(directory, String.Empty)
+                        Yield file
+                    Next
+                Next
+            End If
+        End Function
+
         Public OperationLock As New Object
         Private thHash As Thread
         Private ReadOnly pauseGate As New ManualResetEventSlim(True)
@@ -474,70 +524,23 @@ Public Class IOManager
                         End SyncLock
                         RaiseEvent ProgressReport("#max10000")
                         RaiseEvent ProgressReport("#val0")
-                        Dim q As New List(Of ltfsindex.directory)
-                        Dim flist As New List(Of ltfsindex.file)
-                        For Each f As ltfsindex.file In schema._file
-                            If Not f.Selected Then Continue For
-                            f.fullpath = f.name
-                            flist.Add(f)
-                        Next
-                        Dim dnlist As New List(Of String)
-                        For Each d As ltfsindex.directory In schema._directory
-                            If Not d.Selected Then Continue For
-                            dnlist.Add(CStr(d.name.Clone()))
-                            d.fullpath = ""
-                            d.name = ""
-                            q.Add(d)
-                        Next
-                        While q.Count > 0
-                            Dim qtmp As New List(Of ltfsindex.directory)
-                            For Each d As ltfsindex.directory In q
-                                For Each f As ltfsindex.file In d.contents._file
-                                    If Not f.Selected Then Continue For
-                                    f.fullpath = d.fullpath & "\" & d.name & "\" & f.name
-                                    f.fullpath = f.fullpath.TrimStart("\"c)
-                                    flist.Add(f)
-                                Next
-                                For Each d2 As ltfsindex.directory In d.contents._directory
-                                    If Not d2.Selected Then Continue For
-                                    d2.fullpath = d.fullpath & "\" & d.name
-                                    d2.fullpath = d2.fullpath.TrimStart("\"c)
-                                    qtmp.Add(d2)
-                                Next
-                            Next
-                            q = qtmp
-                        End While
-                        For i As Integer = 0 To schema._directory.Count - 1
-                            schema._directory(i).name = dnlist(i)
-                        Next
                         Dim totalSize As Long = 0
                         Dim hashedSize As Long = 0
-                        For Each f As ltfsindex.file In flist
+                        Dim selectedFileCount As Long = 0
+                        For Each f As ltfsindex.file In EnumerateSelectedFiles()
+                            Interlocked.Increment(selectedFileCount)
                             Interlocked.Add(totalSize, f.length)
                         Next
                         If totalSize = 0 Then totalSize = 1
                         RaiseEvent ProgressReport("#smax" & totalSize)
-                        RaiseEvent ProgressReport("Sorting")
-                        flist.Sort(
-                            New Comparison(Of ltfsindex.file)(
-                                Function(a As ltfsindex.file, b As ltfsindex.file) As Integer
-                                    If a.extentinfo.Count = 0 Then _
-                                                                 Return a.extentinfo.Count.CompareTo(b.extentinfo.Count)
-                                    If b.extentinfo.Count = 0 Then _
-                                                                 Return a.extentinfo.Count.CompareTo(b.extentinfo.Count)
-                                    If a.extentinfo(0).partition <> b.extentinfo(0).partition Then
-                                        Return a.extentinfo(0).partition.CompareTo(b.extentinfo(0).partition)
-                                    End If
-                                    If a.extentinfo(0).startblock <> b.extentinfo(0).startblock Then
-                                        Return a.extentinfo(0).startblock.CompareTo(b.extentinfo(0).startblock)
-                                    Else
-                                        Return a.name.CompareTo(b.name)
-                                    End If
-                                End Function))
+                        ' Physical sorting only changes processing order.  Keep
+                        ' the schema streaming so a large index does not retain
+                        ' one file object per selected entry.
+                        RaiseEvent ProgressReport("Streaming")
                         RaiseEvent ProgressReport("#max" & 10000)
-                        RaiseEvent ProgressReport("#tmax" & flist.Count)
-                        Dim progval As Integer = 0
-                        For Each f As ltfsindex.file In flist
+                        RaiseEvent ProgressReport("#tmax" & selectedFileCount)
+                        Dim progval As Long = 0
+                        For Each f As ltfsindex.file In EnumerateSelectedFiles()
                             pauseGate.Wait()
                             Dim SkipCurrent As Boolean = False
                             Try

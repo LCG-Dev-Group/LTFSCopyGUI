@@ -185,30 +185,28 @@ Public Class FTPService
 
         Public Function GetNameListingAsync(path As String) As Task(Of IEnumerable(Of String)) Implements IFileProvider.GetNameListingAsync
             Dim resolved As ResolvedPath = RequirePath(path)
-            Dim result As New List(Of String)
-
+            Dim result As IEnumerable(Of String)
             If resolved.File IsNot Nothing Then
-                result.Add(resolved.File.name)
+                result = EnumerateSingleName(resolved.File.name)
             Else
-                AddChildNames(resolved.Directory, result)
+                result = EnumerateChildNames(resolved.Directory)
             End If
 
-            LogDebug("FTP name listing completed. Path={Path} EntryCount={EntryCount}.", path, result.Count)
-            Return Task.FromResult(Of IEnumerable(Of String))(result)
+            LogDebug("FTP name listing opened. Path={Path}.", path)
+            Return Task.FromResult(result)
         End Function
 
         Public Function GetListingAsync(path As String) As Task(Of IEnumerable(Of FileSystemEntry)) Implements IFileProvider.GetListingAsync
             Dim resolved As ResolvedPath = RequirePath(path)
-            Dim result As New List(Of FileSystemEntry)
-
+            Dim result As IEnumerable(Of FileSystemEntry)
             If resolved.File IsNot Nothing Then
-                result.Add(ToFileSystemEntry(resolved.File))
+                result = EnumerateSingleEntry(resolved.File)
             Else
-                AddChildEntries(resolved.Directory, result)
+                result = EnumerateChildEntries(resolved.Directory)
             End If
 
-            LogDebug("FTP directory listing completed. Path={Path} EntryCount={EntryCount}.", path, result.Count)
-            Return Task.FromResult(Of IEnumerable(Of FileSystemEntry))(result)
+            LogDebug("FTP directory listing opened. Path={Path}.", path)
+            Return Task.FromResult(result)
         End Function
 
         Public Function GetItemAsync(path As String) As Task(Of FileSystemEntry) Implements IMLstFileProvider.GetItemAsync
@@ -227,9 +225,7 @@ Public Class FTPService
                 Throw New ArgumentException($"Path '{path}' is not a directory.")
             End If
 
-            Dim result As New List(Of FileSystemEntry)
-            AddChildEntries(resolved.Directory, result)
-            Return Task.FromResult(Of IEnumerable(Of FileSystemEntry))(result)
+            Return Task.FromResult(EnumerateChildEntries(resolved.Directory))
         End Function
 
         Private Function ResolvePath(path As String) As ResolvedPath
@@ -286,50 +282,43 @@ Public Class FTPService
         End Function
 
         Private Shared Function FindDirectory(parent As ltfsindex.directory, name As String) As ltfsindex.directory
-            If parent Is Nothing OrElse parent.contents Is Nothing OrElse parent.contents._directory Is Nothing Then Return Nothing
-
-            For Each child As ltfsindex.directory In parent.contents._directory
-                If String.Equals(child.name, name, StringComparison.OrdinalIgnoreCase) Then Return child
-            Next
-            Return Nothing
+            If parent Is Nothing Then Return Nothing
+            Return parent.FindDirectoryByName(name)
         End Function
 
         Private Shared Function FindFile(parent As ltfsindex.directory, name As String) As ltfsindex.file
-            If parent Is Nothing OrElse parent.contents Is Nothing OrElse parent.contents._file Is Nothing Then Return Nothing
-
-            For Each child As ltfsindex.file In parent.contents._file
-                If String.Equals(child.name, name, StringComparison.OrdinalIgnoreCase) Then Return child
-            Next
-            Return Nothing
+            If parent Is Nothing Then Return Nothing
+            Return parent.FindFileByName(name)
         End Function
 
-        Private Shared Sub AddChildNames(parent As ltfsindex.directory, result As List(Of String))
-            If parent Is Nothing OrElse parent.contents Is Nothing Then Return
-            If parent.contents._directory IsNot Nothing Then
-                For Each child As ltfsindex.directory In parent.contents._directory
-                    result.Add(child.name)
-                Next
-            End If
-            If parent.contents._file IsNot Nothing Then
-                For Each child As ltfsindex.file In parent.contents._file
-                    result.Add(child.name)
-                Next
-            End If
-        End Sub
+        Private Shared Iterator Function EnumerateSingleName(name As String) As IEnumerable(Of String)
+            Yield name
+        End Function
 
-        Private Shared Sub AddChildEntries(parent As ltfsindex.directory, result As List(Of FileSystemEntry))
-            If parent Is Nothing OrElse parent.contents Is Nothing Then Return
-            If parent.contents._directory IsNot Nothing Then
-                For Each child As ltfsindex.directory In parent.contents._directory
-                    result.Add(ToFileSystemEntry(child, False))
-                Next
-            End If
-            If parent.contents._file IsNot Nothing Then
-                For Each child As ltfsindex.file In parent.contents._file
-                    result.Add(ToFileSystemEntry(child))
-                Next
-            End If
-        End Sub
+        Private Shared Iterator Function EnumerateChildNames(parent As ltfsindex.directory) As IEnumerable(Of String)
+            If parent Is Nothing Then Exit Function
+            For Each child As ltfsindex.directory In parent.EnumerateLazyDirectories()
+                Yield child.name
+            Next
+            For Each child As ltfsindex.file In parent.EnumerateLazyFiles()
+                Yield child.name
+            Next
+        End Function
+
+        Private Shared Iterator Function EnumerateSingleEntry(fileInfo As ltfsindex.file) As IEnumerable(Of FileSystemEntry)
+            If fileInfo Is Nothing Then Exit Function
+            Yield ToFileSystemEntry(fileInfo)
+        End Function
+
+        Private Shared Iterator Function EnumerateChildEntries(parent As ltfsindex.directory) As IEnumerable(Of FileSystemEntry)
+            If parent Is Nothing Then Exit Function
+            For Each child As ltfsindex.directory In parent.EnumerateLazyDirectories()
+                Yield ToFileSystemEntry(child, False)
+            Next
+            For Each child As ltfsindex.file In parent.EnumerateLazyFiles()
+                Yield ToFileSystemEntry(child)
+            Next
+        End Function
 
         Private Shared Function ToFileSystemEntry(fileInfo As ltfsindex.file) As FileSystemEntry
             Return New FileSystemEntry With {
