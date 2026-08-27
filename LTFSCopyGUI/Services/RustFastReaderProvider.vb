@@ -198,7 +198,7 @@ Public Class RustFastReaderProvider
     Private Const SmallActiveFileLimit As UInteger = 64UI
     Private Const SmallMinimumThreshold As Long = 64L * 1024L
     Private Const SmallMaximumThreshold As Long = 4L * 1024L * 1024L
-    Private Const SmallMaximumInflightBytes As Long = 128L * 1024L * 1024L
+    Private Const SmallMaximumInflightBytes As Long = 512L * 1024L * 1024L
     Private Const NativeWaitSliceMs As UInteger = 50UI
     Private Const RefillNoChangeMs As UInteger = 10000UI
     Private Const StallWarningIntervalMs As Long = 5000L
