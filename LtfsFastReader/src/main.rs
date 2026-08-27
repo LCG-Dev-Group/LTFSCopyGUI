@@ -9,6 +9,7 @@ use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::mem::ManuallyDrop;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::AsRawHandle;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -27,8 +28,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileSizeEx, OPEN_EXISTING, ReadFile,
 };
 use windows_sys::Win32::System::IO::{
-    CancelIoEx, CreateIoCompletionPort, GetOverlappedResult, GetQueuedCompletionStatusEx,
-    OVERLAPPED, OVERLAPPED_ENTRY, PostQueuedCompletionStatus,
+    CancelIoEx, CancelSynchronousIo, CreateIoCompletionPort, GetOverlappedResult,
+    GetQueuedCompletionStatusEx, OVERLAPPED, OVERLAPPED_ENTRY, PostQueuedCompletionStatus,
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 
@@ -164,6 +165,15 @@ struct NativeShared {
     state: Mutex<NativeState>,
     changed: Condvar,
     telemetry: NativeTelemetry,
+    worker_watch: Mutex<NativeWorkerWatch>,
+}
+
+struct NativeWorkerWatch {
+    file_index: Option<u64>,
+    stage: &'static str,
+    last_progress: Instant,
+    cancel_requested_at: Option<Instant>,
+    cancel_error: Option<i32>,
 }
 
 struct NativeConfig {
@@ -204,6 +214,7 @@ pub struct LfrContext {
     config: NativeConfig,
     cancel_event: Handle,
     worker: Mutex<Option<JoinHandle<()>>>,
+    worker_watchdog: Mutex<Option<JoinHandle<()>>>,
 }
 
 fn cancelled_error() -> io::Error {
@@ -1308,10 +1319,21 @@ struct SmallOperation {
 
 unsafe impl Send for SmallOperation {}
 
+struct SmallWorkerActivity {
+    file_index: u64,
+    stage: &'static str,
+    started_at: Instant,
+    cancel_requested_at: Option<Instant>,
+    cancel_error: Option<i32>,
+    timed_out: bool,
+}
+
 struct SmallShared {
     state: Mutex<SmallFileState>,
     changed: Condvar,
     operations: Mutex<FxHashMap<usize, Box<SmallOperation>>>,
+    worker_handles: Mutex<Vec<usize>>,
+    worker_activities: Mutex<Vec<Option<SmallWorkerActivity>>>,
     completion_port: SharedHandle,
     active_limit: usize,
     inflight_byte_limit: usize,
@@ -1404,7 +1426,44 @@ fn small_failure(
     shared.changed.notify_all();
 }
 
-fn small_open_worker(shared: Arc<SmallShared>) {
+fn small_set_worker_activity(
+    shared: &SmallShared,
+    worker_id: usize,
+    file_index: u64,
+    stage: &'static str,
+) {
+    let mut activities = shared.worker_activities.lock().unwrap();
+    activities[worker_id] = Some(SmallWorkerActivity {
+        file_index,
+        stage,
+        started_at: Instant::now(),
+        cancel_requested_at: None,
+        cancel_error: None,
+        timed_out: false,
+    });
+}
+
+fn small_clear_worker_activity(shared: &SmallShared, worker_id: usize) {
+    shared.worker_activities.lock().unwrap()[worker_id] = None;
+}
+
+fn small_completion_can_exit(shared: &SmallShared) -> bool {
+    if !shared.state.lock().unwrap().shutdown {
+        return false;
+    }
+    if shared
+        .worker_activities
+        .lock()
+        .unwrap()
+        .iter()
+        .any(Option::is_some)
+    {
+        return false;
+    }
+    shared.operations.lock().unwrap().is_empty()
+}
+
+fn small_open_worker(shared: Arc<SmallShared>, worker_id: usize) {
     loop {
         let (task, reserved, buffer) = {
             let mut state = shared.state.lock().unwrap();
@@ -1447,6 +1506,7 @@ fn small_open_worker(shared: Arc<SmallShared>) {
         };
 
         let path_w = wide(&task.path);
+        small_set_worker_activity(&shared, worker_id, task.index, "CreateFileW");
         let raw_file = unsafe {
             CreateFileW(
                 path_w.as_ptr(),
@@ -1458,14 +1518,10 @@ fn small_open_worker(shared: Arc<SmallShared>) {
                 null_mut(),
             )
         };
-        if raw_file == INVALID_HANDLE_VALUE {
-            small_failure(
-                &shared,
-                task.index,
-                buffer,
-                reserved,
-                io::Error::last_os_error(),
-            );
+        let open_error = (raw_file == INVALID_HANDLE_VALUE).then(io::Error::last_os_error);
+        small_clear_worker_activity(&shared, worker_id);
+        if let Some(error) = open_error {
+            small_failure(&shared, task.index, buffer, reserved, error);
             continue;
         }
         let file = Handle(raw_file);
@@ -1495,17 +1551,14 @@ fn small_open_worker(shared: Arc<SmallShared>) {
             continue;
         }
 
+        small_set_worker_activity(&shared, worker_id, task.index, "CreateIoCompletionPort");
         let associated = unsafe {
             CreateIoCompletionPort(raw_file, shared.completion_port.0, task.index as usize, 0)
         };
-        if associated.is_null() {
-            small_failure(
-                &shared,
-                task.index,
-                buffer,
-                reserved,
-                io::Error::last_os_error(),
-            );
+        let association_error = associated.is_null().then(io::Error::last_os_error);
+        small_clear_worker_activity(&shared, worker_id);
+        if let Some(error) = association_error {
+            small_failure(&shared, task.index, buffer, reserved, error);
             continue;
         }
 
@@ -1530,6 +1583,7 @@ fn small_open_worker(shared: Arc<SmallShared>) {
         let mut operations = shared.operations.lock().unwrap();
         operations.insert(operation_key, operation);
         let operation = operations.get_mut(&operation_key).unwrap();
+        small_set_worker_activity(&shared, worker_id, task.index, "ReadFile submission");
         let ok = unsafe {
             ReadFile(
                 operation.file.0,
@@ -1539,13 +1593,14 @@ fn small_open_worker(shared: Arc<SmallShared>) {
                 &mut operation.overlapped,
             )
         };
-        if ok == 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-                let operation = operations.remove(&operation_key).unwrap();
-                drop(operations);
-                small_failure(&shared, task.index, operation.buffer, reserved, error);
-            }
+        let read_error = (ok == 0).then(io::Error::last_os_error);
+        small_clear_worker_activity(&shared, worker_id);
+        if let Some(error) = read_error
+            && error.raw_os_error() != Some(ERROR_IO_PENDING as i32)
+        {
+            let operation = operations.remove(&operation_key).unwrap();
+            drop(operations);
+            small_failure(&shared, task.index, operation.buffer, reserved, error);
         }
     }
 }
@@ -1557,7 +1612,63 @@ fn small_operation_watchdog(shared: &SmallShared) -> bool {
     let mut must_leak_and_exit = false;
 
     {
-        let mut operations = shared.operations.lock().unwrap();
+        let worker_handles = shared.worker_handles.lock().unwrap();
+        let mut activities = shared.worker_activities.lock().unwrap();
+        for (worker_id, activity) in activities.iter_mut().enumerate() {
+            let Some(activity) = activity.as_mut() else {
+                continue;
+            };
+            if let Some(cancel_requested_at) = activity.cancel_requested_at {
+                if now.duration_since(cancel_requested_at) >= shared.io_policy.cancel_grace
+                    && activity.timed_out
+                    && !shutdown
+                {
+                    fatal_error = Some(format!(
+                        "small-file synchronous call did not recover within {} ms after cancellation: file={} stage={} cancel_error={}",
+                        shared.io_policy.cancel_grace.as_millis(),
+                        activity.file_index,
+                        activity.stage,
+                        activity
+                            .cancel_error
+                            .map(|error| error.to_string())
+                            .unwrap_or_else(|| "none".into())
+                    ));
+                    break;
+                }
+                continue;
+            }
+
+            let timed_out = activity.started_at.elapsed() >= shared.io_policy.read_stall_timeout;
+            if !shutdown && !timed_out {
+                continue;
+            }
+            let Some(&worker_handle) = worker_handles.get(worker_id) else {
+                continue;
+            };
+            let cancelled = unsafe { CancelSynchronousIo(worker_handle as HANDLE) };
+            activity.cancel_requested_at = Some(now);
+            activity.timed_out = timed_out;
+            if cancelled == 0 {
+                activity.cancel_error = io::Error::last_os_error().raw_os_error();
+            }
+        }
+    }
+
+    if let Some(message) = fatal_error.take() {
+        let mut state = shared.state.lock().unwrap();
+        if state.fatal_error.is_none() {
+            state.fatal_error = Some(message);
+        }
+        shared.changed.notify_all();
+        return false;
+    }
+
+    {
+        let mut operations = match shared.operations.try_lock() {
+            Ok(operations) => operations,
+            Err(std::sync::TryLockError::WouldBlock) => return false,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        };
         for operation in operations.values_mut() {
             if let Some(cancel_requested_at) = operation.cancel_requested_at {
                 if now.duration_since(cancel_requested_at) >= shared.io_policy.cancel_grace {
@@ -1627,9 +1738,7 @@ fn small_completion_worker(shared: Arc<SmallShared>) {
                 if small_operation_watchdog(&shared) {
                     return;
                 }
-                if shared.state.lock().unwrap().shutdown
-                    && shared.operations.lock().unwrap().is_empty()
-                {
+                if small_completion_can_exit(&shared) {
                     return;
                 }
                 continue;
@@ -1658,8 +1767,7 @@ fn small_completion_worker(shared: Arc<SmallShared>) {
             if small_operation_watchdog(&shared) {
                 return;
             }
-            if shared.state.lock().unwrap().shutdown && shared.operations.lock().unwrap().is_empty()
-            {
+            if small_completion_can_exit(&shared) {
                 return;
             }
             thread::sleep(Duration::from_millis(10));
@@ -1749,7 +1857,7 @@ fn small_completion_worker(shared: Arc<SmallShared>) {
             return;
         }
 
-        if shared.state.lock().unwrap().shutdown && shared.operations.lock().unwrap().is_empty() {
+        if small_completion_can_exit(&shared) {
             return;
         }
     }
@@ -1783,6 +1891,12 @@ impl SmallFilePool {
             state: Mutex::new(SmallFileState::new()),
             changed: Condvar::new(),
             operations: Mutex::new(FxHashMap::default()),
+            worker_handles: Mutex::new(Vec::with_capacity(open_concurrency)),
+            worker_activities: Mutex::new(
+                std::iter::repeat_with(|| None)
+                    .take(open_concurrency)
+                    .collect(),
+            ),
             completion_port: SharedHandle(raw_port),
             active_limit,
             inflight_byte_limit,
@@ -1790,12 +1904,17 @@ impl SmallFilePool {
             cancel_event: SharedHandle(cancel_event),
             io_policy,
         });
-        let workers = (0..open_concurrency)
-            .map(|_| {
-                let shared = Arc::clone(&shared);
-                thread::spawn(move || small_open_worker(shared))
-            })
-            .collect();
+        let mut workers = Vec::with_capacity(open_concurrency);
+        for worker_id in 0..open_concurrency {
+            let worker_shared = Arc::clone(&shared);
+            let worker = thread::spawn(move || small_open_worker(worker_shared, worker_id));
+            shared
+                .worker_handles
+                .lock()
+                .unwrap()
+                .push(worker.as_raw_handle() as HANDLE as usize);
+            workers.push(worker);
+        }
         let completion_shared = Arc::clone(&shared);
         let completion_thread = Some(thread::spawn(move || {
             small_completion_worker(completion_shared)
@@ -2030,6 +2149,98 @@ fn native_set_error(shared: &NativeShared, error: impl ToString) {
     shared.changed.notify_all();
 }
 
+fn native_worker_progress(shared: &NativeShared, file_index: Option<u64>, stage: &'static str) {
+    let mut watch = match shared.worker_watch.lock() {
+        Ok(watch) => watch,
+        Err(poisoned) => {
+            shared.worker_watch.clear_poison();
+            poisoned.into_inner()
+        }
+    };
+    watch.file_index = file_index;
+    watch.stage = stage;
+    watch.last_progress = Instant::now();
+    watch.cancel_requested_at = None;
+    watch.cancel_error = None;
+}
+
+fn native_worker_watchdog(shared: Arc<NativeShared>, policy: ReaderIoPolicy, worker_thread: usize) {
+    loop {
+        thread::sleep(Duration::from_millis(CANCEL_POLL_MS as u64));
+        let (done, cancelled, has_error, ring_full) = {
+            let state = native_lock(&shared);
+            (
+                state.done,
+                state.cancelled,
+                !state.error.is_empty(),
+                state.occupied_slots == state.slots.len(),
+            )
+        };
+        if done || has_error {
+            return;
+        }
+        if cancelled {
+            unsafe {
+                CancelSynchronousIo(worker_thread as HANDLE);
+            }
+            return;
+        }
+        if ring_full {
+            continue;
+        }
+
+        let now = Instant::now();
+        let fatal_error = {
+            let mut watch = match shared.worker_watch.lock() {
+                Ok(watch) => watch,
+                Err(poisoned) => {
+                    shared.worker_watch.clear_poison();
+                    poisoned.into_inner()
+                }
+            };
+            if watch.stage == "wait for small file" {
+                // Small-file workers have per-call watchdogs. The native
+                // worker is only waiting on their condition variable here.
+                watch.last_progress = now;
+                watch.cancel_requested_at = None;
+                watch.cancel_error = None;
+                None
+            } else if now.duration_since(watch.last_progress) < policy.read_stall_timeout {
+                None
+            } else if let Some(cancel_requested_at) = watch.cancel_requested_at {
+                if now.duration_since(cancel_requested_at) >= policy.cancel_grace {
+                    Some(format!(
+                        "native worker made no progress for {} ms after synchronous I/O cancellation: file={} stage={} cancel_error={}",
+                        policy.cancel_grace.as_millis(),
+                        watch
+                            .file_index
+                            .map(|index| index.to_string())
+                            .unwrap_or_else(|| "none".into()),
+                        watch.stage,
+                        watch
+                            .cancel_error
+                            .map(|error| error.to_string())
+                            .unwrap_or_else(|| "none".into())
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                let cancelled = unsafe { CancelSynchronousIo(worker_thread as HANDLE) };
+                watch.cancel_requested_at = Some(now);
+                if cancelled == 0 {
+                    watch.cancel_error = io::Error::last_os_error().raw_os_error();
+                }
+                None
+            }
+        };
+        if let Some(error) = fatal_error {
+            native_set_error(&shared, error);
+            return;
+        }
+    }
+}
+
 fn native_publish(
     shared: &NativeShared,
     file_index: u64,
@@ -2074,6 +2285,7 @@ fn native_publish(
                     .fetch_add(data.len() as u64, Ordering::Relaxed);
             }
             shared.changed.notify_all();
+            native_worker_progress(shared, Some(file_index), "publish");
             return Ok(());
         }
         let wait_started = Instant::now();
@@ -2146,6 +2358,7 @@ fn native_publish_batch(
             .fetch_add(batch_bytes as u64, Ordering::Relaxed);
         consumed += batch_bytes;
         shared.changed.notify_all();
+        native_worker_progress(shared, Some(file_index), "publish batch");
     }
     Ok(())
 }
@@ -2156,6 +2369,7 @@ fn native_run_worker(
     cancel_event: HANDLE,
     files: Vec<NativeFileTask>,
 ) {
+    native_worker_progress(&shared, None, "create small-file pool");
     let enabled = native_hash_options(config.hash_mask);
     let mut small_pool = match SmallFilePool::new(
         config.small_open_concurrency,
@@ -2188,6 +2402,7 @@ fn native_run_worker(
     let run_result = (|| -> io::Result<()> {
         let mut prepared_large: Option<(u64, io::Result<AsyncSequentialReader>)> = None;
         for (position, file) in files.iter().enumerate() {
+            native_worker_progress(&shared, Some(file.index), "start file");
             if is_cancelled(cancel_event) {
                 return Err(cancelled_error());
             }
@@ -2195,6 +2410,7 @@ fn native_run_worker(
             let mut current_reader = None;
             let mut current_initial_error = None;
             if file.len > config.small_threshold {
+                native_worker_progress(&shared, Some(file.index), "prepare current large file");
                 let current_result = match prepared_large.take() {
                     Some((index, result)) if index == file.index => result,
                     Some(_) => {
@@ -2236,6 +2452,7 @@ fn native_run_worker(
                 && let Some(next) = files.get(position + 1)
                 && next.len > config.small_threshold
             {
+                native_worker_progress(&shared, Some(next.index), "prepare next large file");
                 prepared_large = Some((
                     next.index,
                     prepare_reader_once(
@@ -2255,6 +2472,7 @@ fn native_run_worker(
 
             let mut hashes = HashSet::new(&enabled)?;
             if file.len <= config.small_threshold {
+                native_worker_progress(&shared, Some(file.index), "wait for small file");
                 let task = SmallFileTask {
                     index: file.index,
                     len: file.len,
@@ -2282,6 +2500,7 @@ fn native_run_worker(
                 native_publish_batch(&shared, file.index, 0, &cached.data, config.slot_size)?;
                 small_pool.release(file.index, cached);
             } else {
+                native_worker_progress(&shared, Some(file.index), "read large file");
                 read_file_overlapped_with_depth(
                     &file.path,
                     file.len,
@@ -2321,6 +2540,7 @@ fn native_run_worker(
                     )
                 })?;
             }
+            native_worker_progress(&shared, Some(file.index), "finish hashes");
             let result = hashes.finish()?;
             {
                 let mut state = native_lock(&shared);
@@ -2454,6 +2674,13 @@ pub unsafe extern "system" fn lfr_create(
             }),
             changed: Condvar::new(),
             telemetry: NativeTelemetry::default(),
+            worker_watch: Mutex::new(NativeWorkerWatch {
+                file_index: None,
+                stage: "starting",
+                last_progress: Instant::now(),
+                cancel_requested_at: None,
+                cancel_error: None,
+            }),
         }),
         config: NativeConfig {
             slot_size,
@@ -2475,6 +2702,7 @@ pub unsafe extern "system" fn lfr_create(
         },
         cancel_event: Handle(cancel_event),
         worker: Mutex::new(None),
+        worker_watchdog: Mutex::new(None),
     });
     unsafe {
         *output = Box::into_raw(context);
@@ -2595,6 +2823,12 @@ pub unsafe extern "system" fn lfr_start(context: *mut LfrContext) -> i32 {
     let cancel_event = context.cancel_event.0 as usize;
     let worker =
         thread::spawn(move || native_run_worker(shared, config, cancel_event as HANDLE, files));
+    let worker_thread = worker.as_raw_handle() as HANDLE as usize;
+    let watchdog_shared = Arc::clone(&context.shared);
+    let watchdog_policy = context.config.io_policy;
+    let watchdog = thread::spawn(move || {
+        native_worker_watchdog(watchdog_shared, watchdog_policy, worker_thread)
+    });
     let (mut worker_slot, worker_mutex_poisoned) = match context.worker.lock() {
         Ok(worker_slot) => (worker_slot, false),
         Err(poisoned) => {
@@ -2607,7 +2841,19 @@ pub unsafe extern "system" fn lfr_start(context: *mut LfrContext) -> i32 {
         }
     };
     *worker_slot = Some(worker);
-    if worker_mutex_poisoned {
+    let (mut watchdog_slot, watchdog_mutex_poisoned) = match context.worker_watchdog.lock() {
+        Ok(watchdog_slot) => (watchdog_slot, false),
+        Err(poisoned) => {
+            native_set_error(
+                &context.shared,
+                "native fast-reader watchdog mutex poisoned during start",
+            );
+            context.worker_watchdog.clear_poison();
+            (poisoned.into_inner(), true)
+        }
+    };
+    *watchdog_slot = Some(watchdog);
+    if worker_mutex_poisoned || watchdog_mutex_poisoned {
         LFR_ERROR
     } else {
         LFR_OK
@@ -3034,6 +3280,19 @@ pub unsafe extern "system" fn lfr_destroy(context: *mut LfrContext) {
     .take();
     if let Some(worker) = worker {
         let _ = worker.join();
+    }
+    let watchdog = match context.worker_watchdog.lock() {
+        Ok(watchdog) => watchdog,
+        Err(poisoned) => {
+            eprintln!("STATE_POISON\tnative fast-reader watchdog mutex poisoned during destroy");
+            io::stderr().flush().ok();
+            context.worker_watchdog.clear_poison();
+            poisoned.into_inner()
+        }
+    }
+    .take();
+    if let Some(watchdog) = watchdog {
+        let _ = watchdog.join();
     }
 }
 
@@ -3495,6 +3754,8 @@ mod tests {
             state: Mutex::new(state),
             changed: Condvar::new(),
             operations: Mutex::new(FxHashMap::default()),
+            worker_handles: Mutex::new(Vec::new()),
+            worker_activities: Mutex::new(Vec::new()),
             completion_port: SharedHandle(null_mut()),
             active_limit: 1,
             inflight_byte_limit: reserved,
@@ -3533,6 +3794,65 @@ mod tests {
         // checking reserved_bytes + reserved would strand it permanently.
         assert_eq!(state.take_next_pending(reserved), Some((7, reserved)));
         assert_eq!(state.reserved_bytes, reserved);
+    }
+
+    #[test]
+    fn small_sync_watchdog_surfaces_a_call_stuck_after_cancellation() {
+        let state = SmallFileState::new();
+        let policy = ReaderIoPolicy {
+            read_stall_timeout: Duration::from_millis(1),
+            cancel_grace: Duration::from_millis(1),
+            ..ReaderIoPolicy::default()
+        };
+        let shared = SmallShared {
+            state: Mutex::new(state),
+            changed: Condvar::new(),
+            operations: Mutex::new(FxHashMap::default()),
+            worker_handles: Mutex::new(Vec::new()),
+            worker_activities: Mutex::new(vec![Some(SmallWorkerActivity {
+                file_index: 19,
+                stage: "CreateFileW",
+                started_at: Instant::now() - Duration::from_secs(1),
+                cancel_requested_at: Some(Instant::now() - Duration::from_secs(1)),
+                cancel_error: Some(ERROR_NOT_FOUND as i32),
+                timed_out: true,
+            })]),
+            completion_port: SharedHandle(null_mut()),
+            active_limit: 1,
+            inflight_byte_limit: 64 * 1024,
+            completion_batch: 1,
+            cancel_event: SharedHandle(null_mut()),
+            io_policy: policy,
+        };
+
+        assert!(!small_operation_watchdog(&shared));
+        let state = shared.state.lock().unwrap();
+        let error = state.fatal_error.as_deref().unwrap();
+        assert!(error.contains("file=19"));
+        assert!(error.contains("stage=CreateFileW"));
+    }
+
+    #[test]
+    fn native_worker_progress_clears_a_pending_sync_cancellation() {
+        let config = native_test_config(4096, 32 * 1024);
+        unsafe {
+            let context = create_native_test_context(&config);
+            let shared = Arc::clone(&(*context).shared);
+            {
+                let mut watch = shared.worker_watch.lock().unwrap();
+                watch.cancel_requested_at = Some(Instant::now());
+                watch.cancel_error = Some(ERROR_NOT_FOUND as i32);
+            }
+
+            native_worker_progress(&shared, Some(23), "test progress");
+            let watch = shared.worker_watch.lock().unwrap();
+            assert_eq!(watch.file_index, Some(23));
+            assert_eq!(watch.stage, "test progress");
+            assert!(watch.cancel_requested_at.is_none());
+            assert!(watch.cancel_error.is_none());
+            drop(watch);
+            lfr_destroy(context);
+        }
     }
 
     #[test]
