@@ -145,6 +145,14 @@ Public Class ltfsindex
             End Get
         End Property
 
+        ' Collection items (extentinfo/extendedattributes) are ordinary Lists, so
+        ' mutations made through the list itself cannot be observed by the lazy
+        ' record.  Writers use this hook after updating the current file's
+        ' physical extents to ensure the changed record is emitted on save.
+        Friend Sub MarkLazyRecordDirty()
+            MarkLazyDirty()
+        End Sub
+
         <Category("LTFSIndex")>
         Public Property name As String
             Get

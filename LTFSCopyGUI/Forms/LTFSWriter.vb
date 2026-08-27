@@ -1283,6 +1283,33 @@ Public Class LTFSWriter
             Return CULng(UnwrittenFiles.Count)
         End Get
     End Property
+
+    Private Sub ClearPendingWriteQueues(Optional extraDirectory As ltfsindex.directory = Nothing)
+        ' Do not walk schema._directory here.  The global write queue already
+        ' identifies every directory touched by this write; clearing only those
+        ' queues keeps abort/cleanup O(pending writes), even for a multi-million
+        ' file lazy schema.  extraDirectory covers the disk-image writer, whose
+        ' temporary FileRecord is kept only in the selected directory queue.
+        Dim touchedDirectories As New HashSet(Of ltfsindex.directory)()
+        If UnwrittenFiles IsNot Nothing Then
+            For Each fr As FileRecord In UnwrittenFiles
+                If fr IsNot Nothing AndAlso fr.ParentDirectory IsNot Nothing Then
+                    touchedDirectories.Add(fr.ParentDirectory)
+                End If
+            Next
+            UnwrittenFiles.Clear()
+        End If
+        If extraDirectory IsNot Nothing Then touchedDirectories.Add(extraDirectory)
+
+        For Each directory As ltfsindex.directory In touchedDirectories
+            If directory.UnwrittenFiles IsNot Nothing Then
+                SyncLock directory.UnwrittenFiles
+                    directory.UnwrittenFiles.Clear()
+                End SyncLock
+            End If
+        Next
+    End Sub
+
     <Category("LTFSWriter")>
     Public Property LastRefresh As Date = Now
     <Category("LTFSWriter")>
@@ -3377,7 +3404,10 @@ Public Class LTFSWriter
                     SyncLock UFReadCount
                         If UFReadCount > 0 Then Continue While
 
-                        For i As Integer = d.LastUnwrittenFilesCount - 1 To 0 Step -1
+                        ' Only inspect the pending entries of the directory being written to.
+                        ' The old LastUnwrittenFilesCount was initialized by a full-schema WSort
+                        ' before every add operation, which materialized every lazy directory.
+                        For i As Integer = d.UnwrittenFiles.Count - 1 To 0 Step -1
                             If f.Name.ToLower = d.UnwrittenFiles(i).name.ToLower Then
                                 d.UnwrittenFiles.RemoveAt(i)
                                 For j As Integer = UnwrittenFiles.Count - 1 To 0 Step -1
@@ -3763,10 +3793,6 @@ Public Class LTFSWriter
                 sequence = sequence.Where(Function(candidate) KeepPlannedSourceFile(candidate, reparseCache))
             End If
 
-            ltfsindex.WSort({d}.ToList, Nothing, Sub(d1 As ltfsindex.directory)
-                                                     d1.LastUnwrittenFilesCount = d1.UnwrittenFiles.Count
-                                                 End Sub)
-
             For Each af In sequence
                 If StopFlag Then Exit For
 
@@ -3853,9 +3879,6 @@ Public Class LTFSWriter
                     Dim numi As Integer = 0
                     Dim PList As List(Of String) = Paths.ToList()
                     'PList.Sort(ExplorerComparer)
-                    ltfsindex.WSort({d}.ToList, Nothing, Sub(d1 As ltfsindex.directory)
-                                                             d1.LastUnwrittenFilesCount = d1.UnwrittenFiles.Count
-                                                         End Sub)
                     For Each path As String In PList
                         If Not path.StartsWith("\\") Then path = $"\\?\{path}"
                         Dim i As Integer = Threading.Interlocked.Increment(numi)
@@ -5989,6 +6012,7 @@ Public Class LTFSWriter
                                         For Each ext As ltfsindex.file.extent In dupeFile.extentinfo
                                             fr.File.extentinfo.Add(ext)
                                         Next
+                                        fr.File.MarkLazyRecordDirty()
                                         If fr.fs IsNot Nothing Then fr.Close()
                                         PrintMsg($"{My.Resources.ResText_Skip} {fr.File.name}  {My.Resources.ResText_Size} {IOManager.FormatSize(fr.File.length)}", False,
                                                  $"{My.Resources.ResText_Skip}: {fr.SourcePath}{vbCrLf}{My.Resources.ResText_Size}: {IOManager.FormatSize(fr.File.length)}{vbCrLf _
@@ -6043,6 +6067,7 @@ Public Class LTFSWriter
                                             End If
                                         End If
                                         fr.File.extentinfo.Add(fileextent)
+                                        fr.File.MarkLazyRecordDirty()
                                         PrintMsg($"{My.Resources.ResText_Writing} {fr.File.name}  {My.Resources.ResText_Size} {IOManager.FormatSize(fr.File.length)}", False,
                                              $"{My.Resources.ResText_Writing}: {fr.SourcePath}{vbCrLf}{My.Resources.ResText_Size}: {IOManager.FormatSize(fr.File.length)}{vbCrLf _
                                              }{My.Resources.ResText_WrittenTotal}: {IOManager.FormatSize(TotalBytesProcessed) _
@@ -6678,10 +6703,7 @@ Public Class LTFSWriter
                             UnwrittenSizeOverrideValue = 0
                             UnwrittenCountOverrideValue = 0
                             If Not My.Settings.LTFSWriter_KeepUnwrittenFilesOnAbort Then
-                                UnwrittenFiles.Clear()
-                                ltfsindex.WSort(schema._directory, Nothing, Sub(d As ltfsindex.directory)
-                                                                                d.UnwrittenFiles.Clear()
-                                                                            End Sub)
+                                ClearPendingWriteQueues()
                             Else
                                 UnwrittenSizeOverrideValue = UnwrittenSize
                                 UnwrittenCountOverrideValue = UnwrittenCount
@@ -10135,6 +10157,7 @@ Public Class LTFSWriter
                                 If DirectCast(ListView1.Tag, ltfsindex.directory).UnwrittenFiles.Contains(FileIndex) Then
                                     FileIndex.extentinfo.Clear()
                                     FileIndex.extentinfo.Add(New ltfsindex.file.extent With {.partition = CType(IndexPartition, ltfsindex.PartitionLabel)})
+                                    FileIndex.MarkLazyRecordDirty()
                                 Else
                                     RestoreFile(tmpf, FileIndex)
                                     FileIndex.TempObj = tmpf
@@ -12514,10 +12537,7 @@ Public Class LTFSWriter
                              UnwrittenSizeOverrideValue = 0
                              UnwrittenCountOverrideValue = 0
                              If Not My.Settings.LTFSWriter_KeepUnwrittenFilesOnAbort Then
-                                 UnwrittenFiles.Clear()
-                                 ltfsindex.WSort(schema._directory, Nothing, Sub(dir As ltfsindex.directory)
-                                                                                 dir.UnwrittenFiles.Clear()
-                                                                             End Sub)
+                                 ClearPendingWriteQueues(d)
                              Else
                                  UnwrittenSizeOverrideValue = UnwrittenSize
                                  UnwrittenCountOverrideValue = UnwrittenCount
