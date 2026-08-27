@@ -2005,11 +2005,7 @@ Public Class LTFSWriter
         If node Is Nothing OrElse node.Tag Is Nothing Then Return False
         If TypeOf node.Tag Is ltfsindex.directory Then
             Dim directory As ltfsindex.directory = DirectCast(node.Tag, ltfsindex.directory)
-            If directory.contents Is Nothing Then Return False
-            SyncLock directory.contents._directory
-                Return (directory.contents._directory IsNot Nothing AndAlso directory.contents._directory.Count > 0) OrElse
-                       (directory.contents._file IsNot Nothing AndAlso directory.contents._file.Count > 0)
-            End SyncLock
+            Return directory.HasPotentialChildren()
         End If
         If TypeOf node.Tag Is TarVirtualDirectory Then
             Dim directory As TarVirtualDirectory = DirectCast(node.Tag, TarVirtualDirectory)
@@ -2053,36 +2049,54 @@ Public Class LTFSWriter
             RemoveUnloadedChildMarker(node)
             If TypeOf node.Tag Is ltfsindex.directory Then
                 Dim directory As ltfsindex.directory = DirectCast(node.Tag, ltfsindex.directory)
-                Dim directories As New List(Of ltfsindex.directory)
-                Dim files As New List(Of ltfsindex.file)
-                If directory.contents IsNot Nothing Then
-                    SyncLock directory.contents._directory
-                        If directory.contents._directory IsNot Nothing Then directories.AddRange(directory.contents._directory)
-                    End SyncLock
-                    SyncLock directory.contents._file
-                        If directory.contents._file IsNot Nothing Then files.AddRange(directory.contents._file)
-                    End SyncLock
-                End If
-
-                For Each childDirectory As ltfsindex.directory In directories
+                Dim addDirectoryNode As Action(Of ltfsindex.directory) =
+                    Sub(childDirectory As ltfsindex.directory)
                     Dim childNode As WriterTreeNode = CreateDirectoryTreeNode(childDirectory, False)
                     node.Nodes.Add(childNode)
                     AddUnloadedChildMarker(childNode)
-                Next
+                    End Sub
 
-                For Each file As ltfsindex.file In files
-                    Dim archive As String = file.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.Archive)
-                    If String.Equals(archive, "true", StringComparison.OrdinalIgnoreCase) Then
-                        node.Nodes.Add(CreateArchiveTreeNode(file))
+                Dim processFile As Action(Of ltfsindex.file) =
+                    Sub(file As ltfsindex.file)
+                        Dim archive As String = file.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.Archive)
+                        If String.Equals(archive, "true", StringComparison.OrdinalIgnoreCase) Then
+                            node.Nodes.Add(CreateArchiveTreeNode(file))
+                        End If
+
+                        Dim tarRoot As TarVirtualDirectory = Nothing
+                        If TryGetTarVirtualRoot(file, tarRoot) Then
+                            Dim tarNode As WriterTreeNode = CreateTarDirectoryTreeNode(tarRoot)
+                            node.Nodes.Add(tarNode)
+                            AddUnloadedChildMarker(tarNode)
+                        End If
+                    End Sub
+
+                If directory.HasUnmaterializedLazyContents Then
+                    For Each childDirectory As ltfsindex.directory In directory.EnumerateLazyDirectories()
+                        addDirectoryNode(childDirectory)
+                    Next
+                    For Each file As ltfsindex.file In directory.EnumerateLazyFiles()
+                        processFile(file)
+                    Next
+                Else
+                    Dim directories As New List(Of ltfsindex.directory)
+                    Dim files As New List(Of ltfsindex.file)
+                    If directory.contents IsNot Nothing Then
+                        SyncLock directory.contents._directory
+                            If directory.contents._directory IsNot Nothing Then directories.AddRange(directory.contents._directory)
+                        End SyncLock
+                        SyncLock directory.contents._file
+                            If directory.contents._file IsNot Nothing Then files.AddRange(directory.contents._file)
+                        End SyncLock
                     End If
 
-                    Dim tarRoot As TarVirtualDirectory = Nothing
-                    If TryGetTarVirtualRoot(file, tarRoot) Then
-                        Dim tarNode As WriterTreeNode = CreateTarDirectoryTreeNode(tarRoot)
-                        node.Nodes.Add(tarNode)
-                        AddUnloadedChildMarker(tarNode)
-                    End If
-                Next
+                    For Each childDirectory As ltfsindex.directory In directories
+                        addDirectoryNode(childDirectory)
+                    Next
+                    For Each file As ltfsindex.file In files
+                        processFile(file)
+                    Next
+                End If
             ElseIf TypeOf node.Tag Is TarVirtualDirectory Then
                 AddTarVirtualChildren(DirectCast(node.Tag, TarVirtualDirectory), node)
             End If
@@ -2271,6 +2285,8 @@ Public Class LTFSWriter
     Private ReadOnly _listItemCache As New Dictionary(Of Integer, ListViewItem)
     Private ReadOnly _listItemCacheOrder As New Queue(Of Integer)
     Private Const ListItemCacheCapacity As Integer = 512
+    Private _lazyListDirectory As ltfsindex.directory
+    Private _lazyListFileCount As Integer
     Private _lastListRefreshTag As Object = Nothing
     Private _treeRefreshInProgress As Boolean
     Private _listViewColumnSignature As String = Nothing
@@ -2440,12 +2456,19 @@ Public Class LTFSWriter
         _listRows.Clear()
         _listItemCache.Clear()
         _listItemCacheOrder.Clear()
+        _lazyListDirectory = Nothing
+        _lazyListFileCount = 0
     End Sub
 
-    Private Sub SetListViewRows(rows As List(Of WriterListRow))
+    Private Sub SetListViewRows(rows As List(Of WriterListRow), Optional lazyDirectory As ltfsindex.directory = Nothing)
         ClearListViewRows()
         If rows IsNot Nothing AndAlso rows.Count > 0 Then _listRows.AddRange(rows)
+        If lazyDirectory IsNot Nothing Then
+            _lazyListDirectory = lazyDirectory
+            _lazyListFileCount = lazyDirectory.GetLazyDirectFileCount()
+        End If
         Dim rowCount As Integer = _listRows.Count
+        If _lazyListDirectory IsNot Nothing Then rowCount += _lazyListFileCount
         If ListView1.VirtualListSize <> rowCount Then
             ListView1.VirtualListSize = rowCount
         Else
@@ -2454,17 +2477,24 @@ Public Class LTFSWriter
     End Sub
 
     Private Function GetListViewRowCount() As Integer
-        Return _listRows.Count
+        Return _listRows.Count + _lazyListFileCount
     End Function
 
     Private Function GetListViewItem(index As Integer) As ListViewItem
-        If index < 0 OrElse index >= _listRows.Count Then Return Nothing
+        If index < 0 OrElse index >= GetListViewRowCount() Then Return Nothing
         Dim item As ListViewItem = Nothing
         If _listItemCache.TryGetValue(index, item) Then
             Return EnsureVirtualListViewItemColumns(item)
         End If
 
-        item = EnsureVirtualListViewItemColumns(_listRows(index).GetItem(Me))
+        If _lazyListDirectory IsNot Nothing AndAlso index < _lazyListFileCount Then
+            Dim file As ltfsindex.file = _lazyListDirectory.GetLazyFileAt(index)
+            item = EnsureVirtualListViewItemColumns(New WriterListRow(WriterListRowKind.File, file).GetItem(Me))
+        Else
+            Dim rowIndex As Integer = index - _lazyListFileCount
+            If rowIndex < 0 OrElse rowIndex >= _listRows.Count Then Return Nothing
+            item = EnsureVirtualListViewItemColumns(_listRows(rowIndex).GetItem(Me))
+        End If
         _listItemCache(index) = item
         _listItemCacheOrder.Enqueue(index)
         While _listItemCache.Count > ListItemCacheCapacity
@@ -2487,7 +2517,7 @@ Public Class LTFSWriter
     End Function
 
     Private Sub SelectListViewIndex(index As Integer)
-        If index < 0 OrElse index >= _listRows.Count Then Return
+        If index < 0 OrElse index >= GetListViewRowCount() Then Return
         ListView1.SelectedIndices.Clear()
         ListView1.SelectedIndices.Add(index)
         Dim item As ListViewItem = GetListViewItem(index)
@@ -2737,16 +2767,24 @@ Public Class LTFSWriter
                     Dim d As ltfsindex.directory = DirectCast(TreeView1.SelectedNode.Tag, ltfsindex.directory)
                     ListView1.Tag = d
 
-                    SyncLock d.contents._file
-                        For Each f As ltfsindex.file In d.contents._file
-                            pendingRows.Add(New WriterListRow(WriterListRowKind.File, f))
-                        Next
-                    End SyncLock
-                    SyncLock d.UnwrittenFiles
+                    If d.HasUnmaterializedLazyContents Then
                         For Each f As ltfsindex.file In d.UnwrittenFiles
                             pendingRows.Add(New WriterListRow(WriterListRowKind.UnwrittenFile, f))
                         Next
-                    End SyncLock
+                        SetListViewRows(pendingRows, d)
+                    Else
+                        SyncLock d.contents._file
+                            For Each f As ltfsindex.file In d.contents._file
+                                pendingRows.Add(New WriterListRow(WriterListRowKind.File, f))
+                            Next
+                        End SyncLock
+                        SyncLock d.UnwrittenFiles
+                            For Each f As ltfsindex.file In d.UnwrittenFiles
+                                pendingRows.Add(New WriterListRow(WriterListRowKind.UnwrittenFile, f))
+                            Next
+                        End SyncLock
+                        SetListViewRows(pendingRows)
+                    End If
                 ElseIf TypeOf (TreeView1.SelectedNode.Tag) Is TarVirtualDirectory Then
                     Dim tarDirectory As TarVirtualDirectory = DirectCast(TreeView1.SelectedNode.Tag, TarVirtualDirectory)
                     压缩索引ToolStripMenuItem.Visible = False
@@ -2819,7 +2857,9 @@ Public Class LTFSWriter
                     'ListView1.BackgroundImage = Nothing
                 End If
 
-                SetListViewRows(pendingRows)
+                If Not TypeOf TreeView1.SelectedNode.Tag Is ltfsindex.directory Then
+                    SetListViewRows(pendingRows)
+                End If
 
             Catch ex As Exception
                 _lastListRefreshTag = Nothing
