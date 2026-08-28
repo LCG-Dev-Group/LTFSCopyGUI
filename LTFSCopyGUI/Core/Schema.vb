@@ -279,7 +279,7 @@ Public Class ltfsindex
             End Set
         End Property
         <Category("Deprecated")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property sha1 As String
             Get
                 If Searializing Then Return Nothing
@@ -294,18 +294,18 @@ Public Class ltfsindex
             End Set
         End Property
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property tag As String
         <TypeConverter(GetType(ExpandableObjectConverter))>
         Public Class refFile
             Public FileName As String
         End Class
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property fullpath As String
         Private _selected As Boolean = True
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property Selected As Boolean
             Get
                 If _lazyStore IsNot Nothing AndAlso _lazySelectionIndex >= 0 Then
@@ -324,37 +324,37 @@ Public Class ltfsindex
             End Set
         End Property
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property WrittenBytes As Long = 0
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property TempObj As Object
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property SHA1ForeColor As Color = Color.Black
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property SHA256ForeColor As Color = Color.Black
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property SHA512ForeColor As Color = Color.Black
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property CRC32ForeColor As Color = Color.Black
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property MD5ForeColor As Color = Color.Black
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property BLAKE3ForeColor As Color = Color.Black
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property XxHash3ForeColor As Color = Color.Black
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property XxHash128ForeColor As Color = Color.Black
         <Category("Internal")>
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         Public Property ItemForeColor As Color = Color.Black
         <Serializable>
         <TypeConverter(GetType(ExpandableObjectConverter))>
@@ -403,7 +403,7 @@ Public Class ltfsindex
                 Public Const XxHash128 As Integer = 16
             End Class
             Public Shared Function FromXMLList(s As String) As List(Of xattr)
-                Dim reader As New Xml.Serialization.XmlSerializer(GetType(List(Of xattr)))
+                Dim reader As New Serialization.XmlSerializer(GetType(List(Of xattr)))
                 Dim t As IO.TextReader = New IO.StringReader(s)
                 Return CType(reader.Deserialize(t), List(Of xattr))
             End Function
@@ -422,7 +422,7 @@ Public Class ltfsindex
             End Set
         End Property
         Public Function GetXAttrText() As String
-            Dim writer As New Xml.Serialization.XmlSerializer(GetType(List(Of xattr)))
+            Dim writer As New Serialization.XmlSerializer(GetType(List(Of xattr)))
             Dim sb As New Text.StringBuilder
             Dim t As New IO.StringWriter(sb)
             writer.Serialize(t, extendedattributes)
@@ -490,7 +490,7 @@ Public Class ltfsindex
             Public Property byteoffset As Long
             <Category("LTFSIndex")>
             Public Property bytecount As Long
-            <Xml.Serialization.XmlIgnore>
+            <Serialization.XmlIgnore>
             <Category("Internal")>
             Public Property TempInfo As Object
             Public Shared Function AllEquals(a As List(Of extent), b As List(Of extent)) As Boolean
@@ -520,7 +520,7 @@ Public Class ltfsindex
             End Set
         End Property
         Public Function GetSerializedText(Optional ByVal ReduceSize As Boolean = True) As String
-            Return Text.Encoding.UTF8.GetString(NativeSchemaXml.SerializeFile(Me))
+            Return Text.Encoding.UTF8.GetString(SerializeFile(Me))
         End Function
         Public Function GetCopy(fileuid1 As Long) As file
             Dim result As New file With {.accesstime = accesstime, .backuptime = backuptime,
@@ -1118,11 +1118,11 @@ Public Class ltfsindex
                 MarkLazyMetadataDirty()
             End Set
         End Property
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         <Category("Internal")>
         <TypeConverter(GetType(ListTypeDescriptor(Of List(Of file), file)))>
         Public Property UnwrittenFiles As New List(Of file)
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         <Category("Internal")>
         Public Property LastUnwrittenFilesCount As Integer
         <Category("LTFSIndex")>
@@ -1166,12 +1166,12 @@ Public Class ltfsindex
         '        Return contents._directory
         '    End Get
         'End Property
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         <Category("Internal")>
         Public Property tag As String
 
         Private _TotalFiles, _TotalDirectories, _TotalFilesUnwritten As Long
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         <Category("Internal")>
         Public ReadOnly Property TotalFiles As Long
             Get
@@ -1190,7 +1190,7 @@ Public Class ltfsindex
                 Return _TotalFiles
             End Get
         End Property
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         <Category("Internal")>
         Public ReadOnly Property TotalFilesUnwritten As Long
             Get
@@ -1212,7 +1212,7 @@ Public Class ltfsindex
                 Return _TotalFilesUnwritten
             End Get
         End Property
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         <Category("Internal")>
         Public ReadOnly Property TotalDirectories As Long
             Get
@@ -1273,11 +1273,11 @@ Public Class ltfsindex
         End Sub
 
 
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         <Category("Internal")>
         Public Property fullpath As String
         Private _selected As Boolean = True
-        <Xml.Serialization.XmlIgnore>
+        <Serialization.XmlIgnore>
         <Category("Internal")>
         Public Property Selected As Boolean
             Get
@@ -1307,7 +1307,7 @@ Public Class ltfsindex
             End If
             Dim temporaryPath As String = LazySchemaStore.CreateTempFilePath("directory-output")
             Try
-                NativeSchemaXml.WriteEagerDirectory(Me, temporaryPath, useCollectionWrappers:=True)
+                WriteEagerDirectory(Me, temporaryPath, useCollectionWrappers:=True)
                 Return IO.File.ReadAllText(temporaryPath, Text.Encoding.UTF8)
             Finally
                 Try
@@ -1326,18 +1326,18 @@ Public Class ltfsindex
                 End Try
             End If
             Try
-                NativeSchemaXml.WriteEagerDirectory(Me, FileName, useCollectionWrappers:=True)
+                WriteEagerDirectory(Me, FileName, useCollectionWrappers:=True)
                 Return True
             Catch
                 Return False
             End Try
         End Function
         Public Shared Function FromXML(s As String) As directory
-            Return NativeSchemaXml.LoadDirectoryText(s)
+            Return LoadDirectoryText(s)
         End Function
         Public Shared Function FromFile(FileName As String) As directory
             If String.IsNullOrWhiteSpace(FileName) OrElse Not IO.File.Exists(FileName) Then Return Nothing
-            Return NativeSchemaXml.LoadDirectory(FileName)
+            Return LoadDirectory(FileName)
         End Function
     End Class
     <Serializable>
@@ -1356,7 +1356,7 @@ Public Class ltfsindex
     <Category("LTFSIndex")>
     <TypeConverter(GetType(ListTypeDescriptor(Of List(Of directory), directory)))>
     Public Property _directory As New List(Of directory)
-    <Xml.Serialization.XmlIgnore>
+    <Serialization.XmlIgnore>
     Public ReadOnly Property IsLazyLoaded As Boolean
         Get
             Return _lazyStore IsNot Nothing
@@ -1368,7 +1368,7 @@ Public Class ltfsindex
         _lazyStore = store
     End Sub
 
-    <Xml.Serialization.XmlIgnore>
+    <Serialization.XmlIgnore>
     <Category("Internal")>
     Public Shared Property Searializing As Boolean = False
 
@@ -1472,7 +1472,7 @@ Public Class ltfsindex
                 If _lazyStore IsNot Nothing Then
                     _lazyStore.WriteSchemaNative(Me, temporaryPath, reduceSize)
                 Else
-                    NativeSchemaXml.WriteEagerIndex(Me, temporaryPath)
+                    WriteEagerIndex(Me, temporaryPath)
                 End If
                 output.Write(IO.File.ReadAllText(temporaryPath, Text.Encoding.UTF8))
                 output.Flush()
@@ -1496,7 +1496,7 @@ Public Class ltfsindex
             If _lazyStore IsNot Nothing Then
                 _lazyStore.WriteSchemaNative(Me, fileName, True)
             Else
-                NativeSchemaXml.WriteEagerIndex(Me, fileName)
+                WriteEagerIndex(Me, fileName)
             End If
             Return True
         Catch
@@ -1508,18 +1508,18 @@ Public Class ltfsindex
     End Function
 
     Public Shared Function FromXML(s As String) As ltfsindex
-        Return NativeSchemaXml.LoadText(s)
+        Return LoadText(s)
 
     End Function
     Public Shared Function FromSchemaText(s As String) As ltfsindex
-        Return NativeSchemaXml.LoadText(s)
+        Return LoadText(s)
 
     End Function
     Public Shared Function FromSchemaFile(FileName As String) As ltfsindex
         If String.IsNullOrWhiteSpace(FileName) OrElse Not IO.File.Exists(FileName) Then Return Nothing
 
         Try
-            Return NativeSchemaXml.LoadIndex(FileName)
+            Return LoadIndex(FileName)
         Catch ex As Exception
             MessageBox.Show(New Form With {.TopMost = True}, ex.ToString)
             Return Nothing
@@ -1529,7 +1529,7 @@ Public Class ltfsindex
 
     Public Shared Function FromSchFile(FileName As String) As ltfsindex
         Try
-            Return NativeSchemaXml.LoadIndex(FileName)
+            Return LoadIndex(FileName)
         Catch ex As Exception
             MessageBox.Show(New Form With {.TopMost = True}, ex.ToString)
             Return Nothing
@@ -1843,7 +1843,7 @@ Friend NotInheritable Class LazySchemaStore
     Friend Shared Function CreateTempFilePath(suffix As String) As String
         Dim directories As New List(Of String)
         Try
-            directories.Add(System.Windows.Forms.Application.StartupPath)
+            directories.Add(Application.StartupPath)
         Catch
         End Try
         directories.Add(IO.Path.GetTempPath())
@@ -1873,7 +1873,7 @@ Friend NotInheritable Class LazySchemaStore
     Friend Function EnsureNativeStore() As IntPtr
         SyncLock _buildLock
             If _nativeStore = IntPtr.Zero Then
-                NativeSchemaXml.OpenStore(_fileRecordsPath, _directoryRecordsPath, _fileIndexPath, _directoryIndexPath, _nativeStore)
+                OpenStore(_fileRecordsPath, _directoryRecordsPath, _fileIndexPath, _directoryIndexPath, _nativeStore)
             End If
             Return _nativeStore
         End SyncLock
@@ -1881,7 +1881,7 @@ Friend NotInheritable Class LazySchemaStore
 
     Private Sub CloseNativeStore()
         If _nativeStore <> IntPtr.Zero Then
-            NativeSchemaXml.CloseStore(_nativeStore)
+            CloseStore(_nativeStore)
             _nativeStore = IntPtr.Zero
         End If
         SyncLock _readCacheLock
@@ -1903,7 +1903,7 @@ Friend NotInheritable Class LazySchemaStore
 
     Friend Function AppendNativeFileRecord(value As ltfsindex.file) As Tuple(Of Long, Long)
         EnsureBuilding()
-        Dim bytes As Byte() = NativeSchemaXml.SerializeFile(value)
+        Dim bytes As Byte() = SerializeFile(value)
         If bytes Is Nothing OrElse bytes.Length = 0 Then Throw New IO.InvalidDataException("Native schema file serialization returned no data.")
         Dim offset As Long = _fileRecords.Position
         _fileRecords.Write(bytes, 0, bytes.Length)
@@ -2408,15 +2408,15 @@ Friend NotInheritable Class LazySchemaStore
 
     Friend Function ReadDirectoryScalars(recordOffset As Long) As LazyDirectoryScalarData
         Dim handle As IntPtr = EnsureNativeStore()
-        Dim info As NativeSchemaXml.NativeStoreDirectoryInfo = NativeSchemaXml.ReadStoreDirectoryInfo(handle, recordOffset)
+        Dim info As NativeStoreDirectoryInfo = ReadStoreDirectoryInfo(handle, recordOffset)
         Dim result As New LazyDirectoryScalarData
-        result.Name = NativeSchemaXml.CopyStoreDirectoryString(handle, recordOffset, 1UI)
+        result.Name = CopyStoreDirectoryString(handle, recordOffset, 1UI)
         result.ReadOnly = info.[ReadOnly] <> 0UI
-        result.CreationTime = NativeSchemaXml.CopyStoreDirectoryString(handle, recordOffset, 2UI)
-        result.ChangeTime = NativeSchemaXml.CopyStoreDirectoryString(handle, recordOffset, 3UI)
-        result.ModifyTime = NativeSchemaXml.CopyStoreDirectoryString(handle, recordOffset, 4UI)
-        result.AccessTime = NativeSchemaXml.CopyStoreDirectoryString(handle, recordOffset, 5UI)
-        result.BackupTime = NativeSchemaXml.CopyStoreDirectoryString(handle, recordOffset, 6UI)
+        result.CreationTime = CopyStoreDirectoryString(handle, recordOffset, 2UI)
+        result.ChangeTime = CopyStoreDirectoryString(handle, recordOffset, 3UI)
+        result.ModifyTime = CopyStoreDirectoryString(handle, recordOffset, 4UI)
+        result.AccessTime = CopyStoreDirectoryString(handle, recordOffset, 5UI)
+        result.BackupTime = CopyStoreDirectoryString(handle, recordOffset, 6UI)
         result.FileUid = info.FileUid
         Return result
     End Function
@@ -2524,7 +2524,7 @@ Friend NotInheritable Class LazySchemaStore
         SyncLock _readCacheLock
             Dim cached As Long
             If _directoryDirectFileByteCountCache.TryGetValue(recordOffset, cached) Then Return cached
-            Dim result As Long = NativeSchemaXml.ReadStoreDirectoryFileBytes(handle, recordOffset)
+            Dim result As Long = ReadStoreDirectoryFileBytes(handle, recordOffset)
             _directoryDirectFileByteCountCache(recordOffset) = result
             Return result
         End SyncLock
@@ -2588,7 +2588,7 @@ Friend NotInheritable Class LazySchemaStore
     End Sub
 
     Private Function ReadDirectoryName(recordOffset As Long) As String
-        Return NativeSchemaXml.CopyStoreDirectoryString(EnsureNativeStore(), recordOffset, 1UI)
+        Return CopyStoreDirectoryString(EnsureNativeStore(), recordOffset, 1UI)
     End Function
 
     Private Sub SortIndexChain(recordOffset As Long,
@@ -2617,19 +2617,19 @@ Friend NotInheritable Class LazySchemaStore
                 Dim childRecordOffset As Long
                 Dim childRecordLength As Long = 0L
                 If isFile Then
-                    Dim entry As NativeSchemaXml.NativeStoreFileIndexEntry = NativeSchemaXml.ReadStoreFileIndexEntry(EnsureNativeStore(), indexOffset)
+                    Dim entry As NativeStoreFileIndexEntry = ReadStoreFileIndexEntry(EnsureNativeStore(), indexOffset)
                     nextIndexOffset = entry.NextOffset
                     childRecordOffset = entry.RecordOffset
                     childRecordLength = entry.RecordLength
                 Else
-                    Dim entry As NativeSchemaXml.NativeStoreDirectoryIndexEntry = NativeSchemaXml.ReadStoreDirectoryIndexEntry(EnsureNativeStore(), indexOffset)
+                    Dim entry As NativeStoreDirectoryIndexEntry = ReadStoreDirectoryIndexEntry(EnsureNativeStore(), indexOffset)
                     nextIndexOffset = entry.NextOffset
                     childRecordOffset = entry.RecordOffset
                 End If
 
                 Dim childName As String
                 If isFile Then
-                    childName = NativeSchemaXml.CopyStoreFileName(EnsureNativeStore(), childRecordOffset, childRecordLength)
+                    childName = CopyStoreFileName(EnsureNativeStore(), childRecordOffset, childRecordLength)
                 Else
                     childName = ReadDirectoryName(childRecordOffset)
                 End If
@@ -2671,12 +2671,12 @@ Friend NotInheritable Class LazySchemaStore
                                       Dim childRecordLength As Long = 0L
                                       Dim selectionIndex As Long
                                       If isFile Then
-                                          Dim entry As NativeSchemaXml.NativeStoreFileIndexEntry = NativeSchemaXml.ReadStoreFileIndexEntry(EnsureNativeStore(), sortedIndexOffset)
+                                          Dim entry As NativeStoreFileIndexEntry = ReadStoreFileIndexEntry(EnsureNativeStore(), sortedIndexOffset)
                                           childRecordOffset = entry.RecordOffset
                                           childRecordLength = entry.RecordLength
                                           selectionIndex = entry.SelectionIndex
                                       Else
-                                          Dim entry As NativeSchemaXml.NativeStoreDirectoryIndexEntry = NativeSchemaXml.ReadStoreDirectoryIndexEntry(EnsureNativeStore(), sortedIndexOffset)
+                                          Dim entry As NativeStoreDirectoryIndexEntry = ReadStoreDirectoryIndexEntry(EnsureNativeStore(), sortedIndexOffset)
                                           childRecordOffset = entry.RecordOffset
                                           selectionIndex = entry.SelectionIndex
                                       End If
@@ -2773,10 +2773,10 @@ Friend NotInheritable Class LazySchemaStore
         End If
         For i As Integer = currentIndex To index - 1
             If entryOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema file index chain.")
-            entryOffset = NativeSchemaXml.ReadStoreFileIndexEntry(EnsureNativeStore(), entryOffset).NextOffset
+            entryOffset = ReadStoreFileIndexEntry(EnsureNativeStore(), entryOffset).NextOffset
         Next
         If entryOffset < 0 Then Throw New IO.InvalidDataException("Lazy schema file index is outside the backing file.")
-        Dim entry As NativeSchemaXml.NativeStoreFileIndexEntry = NativeSchemaXml.ReadStoreFileIndexEntry(EnsureNativeStore(), entryOffset)
+        Dim entry As NativeStoreFileIndexEntry = ReadStoreFileIndexEntry(EnsureNativeStore(), entryOffset)
         Dim result As New LazySchemaChildData With {
             .Kind = LazySchemaChildKind.FileRecord,
             .RecordOffset = entry.RecordOffset,
@@ -2803,10 +2803,10 @@ Friend NotInheritable Class LazySchemaStore
         End If
         For i As Integer = currentIndex To index - 1
             If entryOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema directory index chain.")
-            entryOffset = NativeSchemaXml.ReadStoreDirectoryIndexEntry(EnsureNativeStore(), entryOffset).NextOffset
+            entryOffset = ReadStoreDirectoryIndexEntry(EnsureNativeStore(), entryOffset).NextOffset
         Next
         If entryOffset < 0 Then Throw New IO.InvalidDataException("Lazy schema directory index is outside the backing file.")
-        Dim entry As NativeSchemaXml.NativeStoreDirectoryIndexEntry = NativeSchemaXml.ReadStoreDirectoryIndexEntry(EnsureNativeStore(), entryOffset)
+        Dim entry As NativeStoreDirectoryIndexEntry = ReadStoreDirectoryIndexEntry(EnsureNativeStore(), entryOffset)
         Dim result As New LazySchemaChildData With {
             .Kind = LazySchemaChildKind.DirectoryRecord,
             .RecordOffset = entry.RecordOffset,
@@ -2825,7 +2825,7 @@ Friend NotInheritable Class LazySchemaStore
         Dim entryOffset As Long = header.FileIndexOffset
         For i As Integer = 0 To header.FileCount - 1
             If entryOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema file index chain.")
-            Dim entry As NativeSchemaXml.NativeStoreFileIndexEntry = NativeSchemaXml.ReadStoreFileIndexEntry(EnsureNativeStore(), entryOffset)
+            Dim entry As NativeStoreFileIndexEntry = ReadStoreFileIndexEntry(EnsureNativeStore(), entryOffset)
             Dim result As New LazySchemaChildData With {
                 .Kind = LazySchemaChildKind.FileRecord,
                 .RecordOffset = entry.RecordOffset,
@@ -2844,7 +2844,7 @@ Friend NotInheritable Class LazySchemaStore
         Dim entryOffset As Long = header.DirectoryIndexOffset
         For i As Integer = 0 To header.DirectoryCount - 1
             If entryOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema directory index chain.")
-            Dim entry As NativeSchemaXml.NativeStoreDirectoryIndexEntry = NativeSchemaXml.ReadStoreDirectoryIndexEntry(EnsureNativeStore(), entryOffset)
+            Dim entry As NativeStoreDirectoryIndexEntry = ReadStoreDirectoryIndexEntry(EnsureNativeStore(), entryOffset)
             Dim result As New LazySchemaChildData With {
                 .Kind = LazySchemaChildKind.DirectoryRecord,
                 .RecordOffset = entry.RecordOffset,
@@ -2861,7 +2861,7 @@ Friend NotInheritable Class LazySchemaStore
         Dim entryOffset As Long = firstOffset
         For i As Integer = 0 To count - 1
             If entryOffset < 0 Then Throw New IO.InvalidDataException("Invalid native schema root file index chain.")
-            Dim entry As NativeSchemaXml.NativeStoreFileIndexEntry = NativeSchemaXml.ReadStoreFileIndexEntry(EnsureNativeStore(), entryOffset)
+            Dim entry As NativeStoreFileIndexEntry = ReadStoreFileIndexEntry(EnsureNativeStore(), entryOffset)
             Dim result As New LazySchemaChildData With {
                 .Kind = LazySchemaChildKind.FileRecord,
                 .RecordOffset = entry.RecordOffset,
@@ -2878,7 +2878,7 @@ Friend NotInheritable Class LazySchemaStore
         Dim entryOffset As Long = firstOffset
         For i As Integer = 0 To count - 1
             If entryOffset < 0 Then Throw New IO.InvalidDataException("Invalid native schema root directory index chain.")
-            Dim entry As NativeSchemaXml.NativeStoreDirectoryIndexEntry = NativeSchemaXml.ReadStoreDirectoryIndexEntry(EnsureNativeStore(), entryOffset)
+            Dim entry As NativeStoreDirectoryIndexEntry = ReadStoreDirectoryIndexEntry(EnsureNativeStore(), entryOffset)
             Dim result As New LazySchemaChildData With {
                 .Kind = LazySchemaChildKind.DirectoryRecord,
                 .RecordOffset = entry.RecordOffset,
@@ -2891,19 +2891,19 @@ Friend NotInheritable Class LazySchemaStore
 
     Friend Function ReadFileRecordBytes(recordOffset As Long, recordLength As Long) As Byte()
         If recordOffset < 0 OrElse recordLength <= 0 OrElse recordLength > Integer.MaxValue Then Throw New IO.InvalidDataException("Invalid lazy schema file record.")
-        Return NativeSchemaXml.ReadStoreFileRecord(EnsureNativeStore(), recordOffset, recordLength)
+        Return ReadStoreFileRecord(EnsureNativeStore(), recordOffset, recordLength)
     End Function
 
     Friend Function ReadFileScalars(recordOffset As Long, recordLength As Long) As LazyFileScalarData
-        Return NativeSchemaXml.ParseFileRecord(ReadFileRecordBytes(recordOffset, recordLength)).Scalars
+        Return ParseFileRecord(ReadFileRecordBytes(recordOffset, recordLength)).Scalars
     End Function
 
     Friend Function ReadFileExtendedAttributes(recordOffset As Long, recordLength As Long) As List(Of ltfsindex.file.xattr)
-        Return NativeSchemaXml.ParseFileRecord(ReadFileRecordBytes(recordOffset, recordLength)).ExtendedAttributes
+        Return ParseFileRecord(ReadFileRecordBytes(recordOffset, recordLength)).ExtendedAttributes
     End Function
 
     Friend Function ReadFileExtentInfo(recordOffset As Long, recordLength As Long) As List(Of ltfsindex.file.extent)
-        Return NativeSchemaXml.ParseFileRecord(ReadFileRecordBytes(recordOffset, recordLength)).Extents
+        Return ParseFileRecord(ReadFileRecordBytes(recordOffset, recordLength)).Extents
     End Function
 
     Private Structure LazyDirectoryHeader
@@ -2924,7 +2924,7 @@ Friend NotInheritable Class LazySchemaStore
             Dim cached As LazyDirectoryHeader
             If _directoryHeaderCache.TryGetValue(recordOffset, cached) Then Return cached
 
-            Dim info As NativeSchemaXml.NativeStoreDirectoryInfo = NativeSchemaXml.ReadStoreDirectoryInfo(handle, recordOffset)
+            Dim info As NativeStoreDirectoryInfo = ReadStoreDirectoryInfo(handle, recordOffset)
             If info.ScalarLength > Integer.MaxValue OrElse info.FileCount > Integer.MaxValue OrElse info.DirectoryCount > Integer.MaxValue Then
                 Throw New IO.InvalidDataException("Native schema directory metadata is too large.")
             End If
@@ -3158,13 +3158,13 @@ Friend NotInheritable Class LazySchemaBuilder
         Public ReadOnly Info As IO.DirectoryInfo
         Public ReadOnly State As LazyDirectoryBuildState
         Public ReadOnly Values As LazyDirectoryScalarData
-        Public ReadOnly Entries As System.Collections.Generic.IEnumerator(Of IO.FileSystemInfo)
+        Public ReadOnly Entries As IEnumerator(Of IO.FileSystemInfo)
 
         Public Sub New(info As IO.DirectoryInfo, state As LazyDirectoryBuildState)
             Me.Info = info
             Me.State = state
-            Me.Values = CreateDirectoryScalars(info)
-            Me.Entries = info.EnumerateFileSystemInfos().GetEnumerator()
+            Values = CreateDirectoryScalars(info)
+            Entries = info.EnumerateFileSystemInfos().GetEnumerator()
         End Sub
 
         Public Sub Dispose()
@@ -3308,11 +3308,11 @@ Public Class ltfslabel
     <Category("LTFSIndex")>
     Public Property compression As Boolean = True
     Public Function GetSerializedText(Optional ByVal ReduceSize As Boolean = True) As String
-        Dim writer As New Xml.Serialization.XmlSerializer(GetType(ltfslabel))
+        Dim writer As New Serialization.XmlSerializer(GetType(ltfslabel))
         Dim tmpf As String = $"{Application.StartupPath}\LCG_{Now.ToString("yyyyMMdd_HHmmss")}.tmp"
         Dim ms As New IO.FileStream(tmpf, IO.FileMode.Create)
         Dim t As IO.TextWriter = New IO.StreamWriter(ms, New Text.UTF8Encoding(False))
-        Dim ns As New Xml.Serialization.XmlSerializerNamespaces({New Xml.XmlQualifiedName("v", "2.4.0")})
+        Dim ns As New Serialization.XmlSerializerNamespaces({New XmlQualifiedName("v", "2.4.0")})
         writer.Serialize(t, Me, ns)
 
         ms.Close()
@@ -3346,7 +3346,7 @@ Public Class ltfslabel
         Return sout.ToString()
     End Function
     Public Shared Function FromXML(s As String) As ltfslabel
-        Dim reader As New Xml.Serialization.XmlSerializer(GetType(ltfslabel))
+        Dim reader As New Serialization.XmlSerializer(GetType(ltfslabel))
         Dim t As IO.TextReader = New IO.StringReader(s)
         Return CType(reader.Deserialize(t), ltfslabel)
     End Function

@@ -1,4 +1,4 @@
-﻿Imports System.ComponentModel
+Imports System.ComponentModel
 Imports LTFSCopyGUI
 Imports System
 Imports Serilog
@@ -158,24 +158,24 @@ Public Class FileBrowser
         End SyncLock
         Dim n As Object = e.Node.Tag
         If TypeOf n Is ltfsindex.file Then
-                Text = "File: " & DirectCast(n, ltfsindex.file).name
-                If CheckBox1.Checked Then
-                    Clipboard.SetText("File" & vbTab & DirectCast(n, ltfsindex.file).name & vbCrLf)
-                End If
+            Text = "File: " & DirectCast(n, ltfsindex.file).name
+            If CheckBox1.Checked Then
+                Clipboard.SetText("File" & vbTab & DirectCast(n, ltfsindex.file).name & vbCrLf)
+            End If
         ElseIf TypeOf n Is ltfsindex.directory Then
-                Dim directory As ltfsindex.directory = DirectCast(n, ltfsindex.directory)
-                Text = "Directory: " & directory.name & " (DirCount=" & directory.GetLazyDirectDirectoryCount() & " FileCount=" & directory.GetLazyDirectFileCount() & ")"
+            Dim directory As ltfsindex.directory = DirectCast(n, ltfsindex.directory)
+            Text = "Directory: " & directory.name & " (DirCount=" & directory.GetLazyDirectDirectoryCount() & " FileCount=" & directory.GetLazyDirectFileCount() & ")"
 
-                If CheckBox1.Checked Then
-                    Dim o As New Text.StringBuilder()
-                    For Each d As ltfsindex.directory In directory.EnumerateLazyDirectories()
-                        o.Append("Directory").Append(vbTab).Append(d.name).Append(vbCrLf)
-                    Next
-                    For Each d As ltfsindex.file In directory.EnumerateLazyFiles()
-                        o.Append("File").Append(vbTab).Append(d.name).Append(vbCrLf)
-                    Next
-                    Clipboard.SetText(o.ToString())
-                End If
+            If CheckBox1.Checked Then
+                Dim o As New Text.StringBuilder()
+                For Each d As ltfsindex.directory In directory.EnumerateLazyDirectories()
+                    o.Append("Directory").Append(vbTab).Append(d.name).Append(vbCrLf)
+                Next
+                For Each d As ltfsindex.file In directory.EnumerateLazyFiles()
+                    o.Append("File").Append(vbTab).Append(d.name).Append(vbCrLf)
+                Next
+                Clipboard.SetText(o.ToString())
+            End If
         End If
         SyncLock EventLock
             EventLock = False
@@ -496,7 +496,7 @@ Public Class FileBrowser
                 End Using
             End Using
         End Using
-        Dim matcher As New System.Text.RegularExpressions.Regex(pattern, System.Text.RegularExpressions.RegexOptions.Compiled)
+        Dim matcher As New Text.RegularExpressions.Regex(pattern, System.Text.RegularExpressions.RegexOptions.Compiled)
         ApplySelectionFilter(Function(value As ltfsindex.file)
                                  Return matcher.IsMatch(If(value.name, String.Empty))
                              End Function)

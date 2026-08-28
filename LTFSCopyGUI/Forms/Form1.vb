@@ -317,9 +317,9 @@ Public Class Form1
         'then parsed the combined XML a second time.
         Dim matched As Boolean() = New Boolean(schemaFiles.Length - 1) {}
         Dim caseSensitive As Boolean = My.Settings.Application_CaseSensitiveSearch
-        Dim parallelOptions As New Threading.Tasks.ParallelOptions With {
+        Dim parallelOptions As New ParallelOptions With {
             .MaxDegreeOfParallelism = Math.Max(1, Math.Min(Environment.ProcessorCount, 4))}
-        Threading.Tasks.Parallel.For(0, schemaFiles.Length, parallelOptions,
+        Parallel.For(0, schemaFiles.Length, parallelOptions,
             Sub(index As Integer)
                 Try
                     matched(index) = FileContainsText(schemaFiles(index).FullName, pattern, caseSensitive)
@@ -339,7 +339,7 @@ Public Class Form1
             matchingPaths.Add(schemaFiles(index).FullName)
         Next
 
-        Return NativeSchemaXml.MergeIndexes(matchingPaths, "Search_" & pattern)
+        Return MergeIndexes(matchingPaths, "Search_" & pattern)
     End Function
 
     Private Shared Sub NormalizeMergedDirectories(root As ltfsindex.directory)
@@ -985,57 +985,57 @@ Public Class Form1
 
         Dim th As New Threading.Thread(
             Sub()
-                    Parallel.ForEach(f,
-                        Sub(fl As IO.FileInfo)
-                            Dim extentRuns As New List(Of String)
-                            Try
-                                Dim extentChunk As New List(Of TapeExtentInfo)(TapeSortChunkSize)
-                                Dim sch As ltfsindex = ltfsindex.FromSchemaFile(fl.FullName)
-                                Dim collectExtents As Action(Of ltfsindex.file) =
-                                    Sub(file As ltfsindex.file)
-                                        If file Is Nothing OrElse file.extentinfo Is Nothing Then Return
-                                        For Each ext As ltfsindex.file.extent In file.extentinfo
-                                            If ext Is Nothing Then Continue For
-                                            extentChunk.Add(New TapeExtentInfo With {
-                                                .StartBlock = ext.startblock,
-                                                .ByteOffset = ext.byteoffset,
-                                                .ByteCount = ext.bytecount,
-                                                .FileUid = file.fileuid})
-                                            If extentChunk.Count >= TapeSortChunkSize Then
-                                                extentRuns.Add(CreateExtentSortRun(extentChunk))
-                                            End If
-                                        Next
-                                    End Sub
-                                If sch IsNot Nothing AndAlso sch._file IsNot Nothing Then
-                                    For Each rootFile As ltfsindex.file In sch._file
-                                        collectExtents(rootFile)
+                Parallel.ForEach(f,
+                    Sub(fl As IO.FileInfo)
+                        Dim extentRuns As New List(Of String)
+                        Try
+                            Dim extentChunk As New List(Of TapeExtentInfo)(TapeSortChunkSize)
+                            Dim sch As ltfsindex = ltfsindex.FromSchemaFile(fl.FullName)
+                            Dim collectExtents As Action(Of ltfsindex.file) =
+                                Sub(file As ltfsindex.file)
+                                    If file Is Nothing OrElse file.extentinfo Is Nothing Then Return
+                                    For Each ext As ltfsindex.file.extent In file.extentinfo
+                                        If ext Is Nothing Then Continue For
+                                        extentChunk.Add(New TapeExtentInfo With {
+                                            .StartBlock = ext.startblock,
+                                            .ByteOffset = ext.byteoffset,
+                                            .ByteCount = ext.bytecount,
+                                            .FileUid = file.fileuid})
+                                        If extentChunk.Count >= TapeSortChunkSize Then
+                                            extentRuns.Add(CreateExtentSortRun(extentChunk))
+                                        End If
                                     Next
-                                End If
-                                ltfsindex.WSort(sch._directory,
-                                            collectExtents, Nothing)
-                                If extentChunk.Count > 0 Then extentRuns.Add(CreateExtentSortRun(extentChunk))
+                                End Sub
+                            If sch IsNot Nothing AndAlso sch._file IsNot Nothing Then
+                                For Each rootFile As ltfsindex.file In sch._file
+                                    collectExtents(rootFile)
+                                Next
+                            End If
+                            ltfsindex.WSort(sch._directory,
+                                        collectExtents, Nothing)
+                            If extentChunk.Count > 0 Then extentRuns.Add(CreateExtentSortRun(extentChunk))
 
-                                Dim previous As TapeExtentInfo = Nothing
-                                For Each current As TapeExtentInfo In EnumerateExtentSortRuns(extentRuns)
-                                    If previous IsNot Nothing AndAlso
-                                       ExtentPhysicalStart(current) < ExtentPhysicalStart(previous) + CDec(previous.ByteCount) Then
-                                        SyncLock result
-                                            result.AppendLine($"Error with {fl.Name}: fid {current.FileUid}")
-                                        End SyncLock
-                                    End If
-                                    previous = current
-                                Next
-                            Catch ex As Exception
-                                LogFileOperationWarning("ExtentCheck", fl.FullName, ex)
-                                result.Append(ex.ToString)
-                            Finally
-                                For Each runPath As String In extentRuns
-                                    Try
-                                        If IO.File.Exists(runPath) Then IO.File.Delete(runPath)
-                                    Catch
-                                    End Try
-                                Next
-                            End Try
+                            Dim previous As TapeExtentInfo = Nothing
+                            For Each current As TapeExtentInfo In EnumerateExtentSortRuns(extentRuns)
+                                If previous IsNot Nothing AndAlso
+                                   ExtentPhysicalStart(current) < ExtentPhysicalStart(previous) + CDec(previous.ByteCount) Then
+                                    SyncLock result
+                                        result.AppendLine($"Error with {fl.Name}: fid {current.FileUid}")
+                                    End SyncLock
+                                End If
+                                previous = current
+                            Next
+                        Catch ex As Exception
+                            LogFileOperationWarning("ExtentCheck", fl.FullName, ex)
+                            result.Append(ex.ToString)
+                        Finally
+                            For Each runPath As String In extentRuns
+                                Try
+                                    If IO.File.Exists(runPath) Then IO.File.Delete(runPath)
+                                Catch
+                                End Try
+                            Next
+                        End Try
                         Threading.Interlocked.Increment(progval)
                     End Sub)
                 Invoke(Sub() Enabled = True)

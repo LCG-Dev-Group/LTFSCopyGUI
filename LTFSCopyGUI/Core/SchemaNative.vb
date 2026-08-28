@@ -597,7 +597,7 @@ Friend Module NativeSchemaXml
         If paths Is Nothing Then Return
         For Each path As String In paths
             Try
-                If IO.File.Exists(path) Then IO.File.Delete(path)
+                If File.Exists(path) Then File.Delete(path)
             Catch
             End Try
         Next
@@ -708,7 +708,7 @@ Friend Module NativeSchemaXml
     End Sub
 
     Friend Function LoadIndex(fileName As String) As ltfsindex
-        If String.IsNullOrWhiteSpace(fileName) OrElse Not IO.File.Exists(fileName) Then Return Nothing
+        If String.IsNullOrWhiteSpace(fileName) OrElse Not File.Exists(fileName) Then Return Nothing
         Return LoadNative(fileName)
     End Function
 
@@ -721,11 +721,11 @@ Friend Module NativeSchemaXml
     Friend Function LoadText(text As String) As ltfsindex
         Dim path As String = LazySchemaStore.CreateTempFilePath("input")
         Try
-            IO.File.WriteAllText(path, If(text, String.Empty), New UTF8Encoding(False))
+            File.WriteAllText(path, If(text, String.Empty), New UTF8Encoding(False))
             Return LoadIndex(path)
         Finally
             Try
-                If IO.File.Exists(path) Then IO.File.Delete(path)
+                If File.Exists(path) Then File.Delete(path)
             Catch
             End Try
         End Try
@@ -953,41 +953,41 @@ Friend NotInheritable Class NativeSchemaWriter
 
     Friend Shared Function Open(path As String) As NativeSchemaWriter
         Dim handle As IntPtr = IntPtr.Zero
-        NativeSchemaXml.CheckWriterOpen(path, handle)
+        CheckWriterOpen(path, handle)
         Return New NativeSchemaWriter(handle)
     End Function
 
     Friend Sub StartElement(name As String)
-        NativeSchemaXml.WriterStart(_handle, name)
+        WriterStart(_handle, name)
     End Sub
 
     Friend Sub StartElement(name As String, attributeName As String, attributeValue As String)
-        NativeSchemaXml.WriterStartAttribute(_handle, name, attributeName, attributeValue)
+        WriterStartAttribute(_handle, name, attributeName, attributeValue)
     End Sub
 
     Friend Sub EmptyElement(name As String)
-        NativeSchemaXml.WriterEmpty(_handle, name)
+        WriterEmpty(_handle, name)
     End Sub
 
     Friend Sub EndElement(name As String)
-        NativeSchemaXml.WriterEnd(_handle, name)
+        WriterEnd(_handle, name)
     End Sub
 
     Friend Sub WriteElement(name As String, value As String)
-        NativeSchemaXml.WriterElement(_handle, name, If(value, String.Empty))
+        WriterElement(_handle, name, If(value, String.Empty))
     End Sub
 
     Friend Sub WriteFile(value As ltfsindex.file)
-        NativeSchemaXml.WriterFile(_handle, value)
+        WriterFile(_handle, value)
     End Sub
 
     Friend Sub WriteRaw(value As Byte())
-        NativeSchemaXml.WriterRaw(_handle, value)
+        WriterRaw(_handle, value)
     End Sub
 
     Friend Sub Finish()
         If _finished Then Return
-        NativeSchemaXml.WriterFinish(_handle)
+        WriterFinish(_handle)
         _finished = True
     End Sub
 
@@ -995,11 +995,11 @@ Friend NotInheritable Class NativeSchemaWriter
         If _handle <> IntPtr.Zero Then
             If Not _finished Then
                 Try
-                    NativeSchemaXml.WriterFinish(_handle)
+                    WriterFinish(_handle)
                 Catch
                 End Try
             End If
-            NativeSchemaXml.WriterDestroy(_handle)
+            WriterDestroy(_handle)
         End If
     End Sub
 End Class
