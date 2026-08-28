@@ -499,6 +499,25 @@ struct StoreOutput {
     selection_count: u64,
 }
 
+struct CountingWriter<'a, W: Write> {
+    inner: &'a mut W,
+    written: usize,
+}
+
+impl<W: Write> Write for CountingWriter<'_, W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        self.written = self.written.checked_add(written).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "written byte count overflow")
+        })?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 impl StoreOutput {
     fn new(paths: &[PathBuf; 5]) -> Result<Self, String> {
         let open = |path: &Path| {
@@ -656,6 +675,66 @@ impl StoreOutput {
         Ok(())
     }
 
+    fn join_file_chains(
+        &mut self,
+        target: &mut IndexChain,
+        source: &IndexChain,
+    ) -> Result<(), String> {
+        if source.count == 0 {
+            return Ok(());
+        }
+        if target.last >= 0 {
+            let position = usize::try_from(target.last)
+                .map_err(|_| invalid("file index offset is too large"))?;
+            let end = position
+                .checked_add(8)
+                .ok_or_else(|| invalid("file index offset overflow"))?;
+            if end > self.file_index_data.len() {
+                return Err(invalid("file index chain points outside the backing data"));
+            }
+            self.file_index_data[position..end].copy_from_slice(&source.first.to_le_bytes());
+        } else {
+            target.first = source.first;
+        }
+        target.last = source.last;
+        target.count = target
+            .count
+            .checked_add(source.count)
+            .ok_or_else(|| invalid("too many files in merged schema"))?;
+        Ok(())
+    }
+
+    fn join_directory_chains(
+        &mut self,
+        target: &mut IndexChain,
+        source: &IndexChain,
+    ) -> Result<(), String> {
+        if source.count == 0 {
+            return Ok(());
+        }
+        if target.last >= 0 {
+            let position = usize::try_from(target.last)
+                .map_err(|_| invalid("directory index offset is too large"))?;
+            let end = position
+                .checked_add(8)
+                .ok_or_else(|| invalid("directory index offset overflow"))?;
+            if end > self.directory_index_data.len() {
+                return Err(invalid(
+                    "directory index chain points outside the backing data",
+                ));
+            }
+            self.directory_index_data[position..end].copy_from_slice(&source.first.to_le_bytes());
+        } else {
+            target.first = source.first;
+        }
+        target.last = source.last;
+        target.count = target
+            .count
+            .checked_add(source.count)
+            .ok_or_else(|| invalid("too many directories in merged schema"))?;
+        Ok(())
+    }
+
     fn finish_directory(
         &mut self,
         state: &DirectoryState,
@@ -707,62 +786,185 @@ impl StoreOutput {
         Ok(())
     }
 
-    fn append_file_record<R: BufRead>(
+    fn append_file_record_raw<R: BufRead>(
         &mut self,
         reader: &mut Reader<R>,
         start: BytesStart<'static>,
     ) -> Result<(i64, i64), String> {
         let offset = self.file_records_position;
-        let mut serialized = Vec::with_capacity(1024);
-        let mut writer = Writer::new(&mut serialized);
-        writer
-            .write_event(Event::Start(start))
-            .map_err(|error| error.to_string())?;
-        let mut depth = 1i32;
-        let mut buffer = Vec::new();
-        while depth > 0 {
-            let event = reader
-                .read_event_into(&mut buffer)
-                .map_err(|error| error.to_string())?
-                .into_owned();
-            buffer.clear();
-            match event {
-                Event::Start(value) => {
-                    writer
-                        .write_event(Event::Start(value))
-                        .map_err(|error| error.to_string())?;
-                    depth += 1;
+        let mut sink = CountingWriter {
+            inner: &mut self.file_records,
+            written: 0,
+        };
+        {
+            let mut writer = Writer::new(&mut sink);
+            writer
+                .write_event(Event::Start(start))
+                .map_err(|error| error.to_string())?;
+            let mut depth = 1i32;
+            let mut buffer = Vec::new();
+            while depth > 0 {
+                let event = reader
+                    .read_event_into(&mut buffer)
+                    .map_err(|error| error.to_string())?
+                    .into_owned();
+                buffer.clear();
+                match event {
+                    Event::Start(value) => {
+                        writer
+                            .write_event(Event::Start(value))
+                            .map_err(|error| error.to_string())?;
+                        depth += 1;
+                    }
+                    Event::Empty(value) => writer
+                        .write_event(Event::Empty(value))
+                        .map_err(|error| error.to_string())?,
+                    Event::End(value) => {
+                        writer
+                            .write_event(Event::End(value))
+                            .map_err(|error| error.to_string())?;
+                        depth -= 1;
+                    }
+                    Event::Text(value) => writer
+                        .write_event(Event::Text(value))
+                        .map_err(|error| error.to_string())?,
+                    Event::CData(value) => writer
+                        .write_event(Event::CData(value))
+                        .map_err(|error| error.to_string())?,
+                    Event::Comment(_) | Event::PI(_) => {}
+                    Event::Decl(_) => {
+                        return Err(invalid("XML declaration is not valid inside a file record"));
+                    }
+                    Event::DocType(_) => return Err(invalid("unsafe XML construct in schema")),
+                    Event::GeneralRef(value) => {
+                        decode_general_ref(value.as_ref())?;
+                        writer
+                            .write_event(Event::GeneralRef(value))
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Event::Eof => return Err(invalid("unexpected end of XML file record")),
                 }
-                Event::Empty(value) => writer
-                    .write_event(Event::Empty(value))
-                    .map_err(|error| error.to_string())?,
-                Event::End(value) => {
-                    writer
-                        .write_event(Event::End(value))
-                        .map_err(|error| error.to_string())?;
-                    depth -= 1;
-                }
-                Event::Text(value) => writer
-                    .write_event(Event::Text(value))
-                    .map_err(|error| error.to_string())?,
-                Event::CData(value) => writer
-                    .write_event(Event::CData(value))
-                    .map_err(|error| error.to_string())?,
-                Event::Comment(_) | Event::PI(_) => {}
-                Event::Decl(_) => {
-                    return Err(invalid("XML declaration is not valid inside a file record"));
-                }
-                Event::DocType(_) => return Err(invalid("unsafe XML construct in schema")),
-                Event::GeneralRef(value) => {
-                    decode_general_ref(value.as_ref())?;
-                    writer
-                        .write_event(Event::GeneralRef(value))
-                        .map_err(|error| error.to_string())?;
-                }
-                Event::Eof => return Err(invalid("unexpected end of XML file record")),
             }
         }
-        drop(writer);
+        let length =
+            i64::try_from(sink.written).map_err(|_| invalid("file record is too large"))?;
+        self.file_records_position += length;
+        Ok((offset, length))
+    }
+
+    fn append_file_record_with_barcode<R: BufRead>(
+        &mut self,
+        reader: &mut Reader<R>,
+        start: BytesStart<'static>,
+        barcode: &str,
+    ) -> Result<(i64, i64), String> {
+        let offset = self.file_records_position;
+        let mut sink = CountingWriter {
+            inner: &mut self.file_records,
+            written: 0,
+        };
+        {
+            let mut writer = Writer::new(&mut sink);
+            writer
+                .write_event(Event::Start(start))
+                .map_err(|error| error.to_string())?;
+
+            let mut depth = 1i32;
+            let mut has_extended_attributes = false;
+            let mut buffer = Vec::new();
+            while depth > 0 {
+                let event = reader
+                    .read_event_into(&mut buffer)
+                    .map_err(|error| error.to_string())?
+                    .into_owned();
+                buffer.clear();
+                match event {
+                    Event::Start(value) => {
+                        if depth == 1 && is_name(&value, "extendedattributes") {
+                            has_extended_attributes = true;
+                            writer
+                                .write_event(Event::Start(value.clone()))
+                                .map_err(|error| error.to_string())?;
+                            copy_extended_attributes_with_barcode(reader, &mut writer, barcode)?;
+                        } else {
+                            writer
+                                .write_event(Event::Start(value))
+                                .map_err(|error| error.to_string())?;
+                            depth += 1;
+                        }
+                    }
+                    Event::Empty(value) => {
+                        if depth == 1 && is_name(&value, "extendedattributes") {
+                            has_extended_attributes = true;
+                            let name = event_name_start(&value);
+                            writer
+                                .write_event(Event::Start(value))
+                                .map_err(|error| error.to_string())?;
+                            write_barcode_xattr(&mut writer, barcode)?;
+                            writer
+                                .write_event(Event::End(BytesEnd::new(name)))
+                                .map_err(|error| error.to_string())?;
+                        } else {
+                            writer
+                                .write_event(Event::Empty(value))
+                                .map_err(|error| error.to_string())?;
+                        }
+                    }
+                    Event::End(value) => {
+                        depth -= 1;
+                        if depth == 0 && !has_extended_attributes {
+                            write_barcode_container(&mut writer, barcode)?;
+                        }
+                        writer
+                            .write_event(Event::End(value))
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Event::Text(value) => writer
+                        .write_event(Event::Text(value))
+                        .map_err(|error| error.to_string())?,
+                    Event::CData(value) => writer
+                        .write_event(Event::CData(value))
+                        .map_err(|error| error.to_string())?,
+                    Event::Comment(_) | Event::PI(_) => {}
+                    Event::Decl(_) => {
+                        return Err(invalid("XML declaration is not valid inside a file record"));
+                    }
+                    Event::DocType(_) => return Err(invalid("unsafe XML construct in schema")),
+                    Event::GeneralRef(value) => {
+                        decode_general_ref(value.as_ref())?;
+                        writer
+                            .write_event(Event::GeneralRef(value))
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Event::Eof => return Err(invalid("unexpected end of XML file record")),
+                }
+            }
+        }
+        let length =
+            i64::try_from(sink.written).map_err(|_| invalid("file record is too large"))?;
+        self.file_records_position += length;
+        Ok((offset, length))
+    }
+
+    fn append_empty_file(&mut self, barcode: Option<&str>) -> Result<(i64, i64), String> {
+        let offset = self.file_records_position;
+        let mut serialized = Vec::with_capacity(if barcode.is_some() { 128 } else { 7 });
+        {
+            let mut writer = Writer::new(&mut serialized);
+            if let Some(barcode) = barcode {
+                writer
+                    .write_event(Event::Start(BytesStart::new("file")))
+                    .map_err(|error| error.to_string())?;
+                write_barcode_container(&mut writer, barcode)?;
+                writer
+                    .write_event(Event::End(BytesEnd::new("file")))
+                    .map_err(|error| error.to_string())?;
+            } else {
+                writer
+                    .write_event(Event::Empty(BytesStart::new("file")))
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         let length =
             i64::try_from(serialized.len()).map_err(|_| invalid("file record is too large"))?;
         self.file_records
@@ -771,6 +973,88 @@ impl StoreOutput {
         self.file_records_position += length;
         Ok((offset, length))
     }
+}
+
+fn write_barcode_xattr<W: Write>(writer: &mut Writer<W>, barcode: &str) -> Result<(), String> {
+    writer
+        .write_event(Event::Start(BytesStart::new("xattr")))
+        .map_err(|error| error.to_string())?;
+    write_xml_element(writer, "key", Some("Barcode"))?;
+    write_xml_element(writer, "value", Some(barcode))?;
+    writer
+        .write_event(Event::End(BytesEnd::new("xattr")))
+        .map_err(|error| error.to_string())
+}
+
+fn write_barcode_container<W: Write>(writer: &mut Writer<W>, barcode: &str) -> Result<(), String> {
+    writer
+        .write_event(Event::Start(BytesStart::new("extendedattributes")))
+        .map_err(|error| error.to_string())?;
+    write_barcode_xattr(writer, barcode)?;
+    writer
+        .write_event(Event::End(BytesEnd::new("extendedattributes")))
+        .map_err(|error| error.to_string())
+}
+
+fn copy_extended_attributes_with_barcode<R: BufRead, W: Write>(
+    reader: &mut Reader<R>,
+    writer: &mut Writer<W>,
+    barcode: &str,
+) -> Result<(), String> {
+    let mut depth = 1i32;
+    let mut buffer = Vec::new();
+    while depth > 0 {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| error.to_string())?
+            .into_owned();
+        buffer.clear();
+        match event {
+            Event::Start(value) => {
+                writer
+                    .write_event(Event::Start(value))
+                    .map_err(|error| error.to_string())?;
+                depth += 1;
+            }
+            Event::Empty(value) => writer
+                .write_event(Event::Empty(value))
+                .map_err(|error| error.to_string())?,
+            Event::End(value) => {
+                depth -= 1;
+                if depth == 0 {
+                    write_barcode_xattr(writer, barcode)?;
+                }
+                writer
+                    .write_event(Event::End(value))
+                    .map_err(|error| error.to_string())?;
+            }
+            Event::Text(value) => writer
+                .write_event(Event::Text(value))
+                .map_err(|error| error.to_string())?,
+            Event::CData(value) => writer
+                .write_event(Event::CData(value))
+                .map_err(|error| error.to_string())?,
+            Event::Comment(_) | Event::PI(_) => {}
+            Event::Decl(_) => {
+                return Err(invalid(
+                    "XML declaration is not valid inside extended attributes",
+                ));
+            }
+            Event::DocType(_) => return Err(invalid("unsafe XML construct in schema")),
+            Event::GeneralRef(value) => {
+                decode_general_ref(value.as_ref())?;
+                writer
+                    .write_event(Event::GeneralRef(value))
+                    .map_err(|error| error.to_string())?;
+            }
+            Event::Eof => {
+                return Err(invalid(
+                    "unexpected end of XML extended attribute container",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub struct StoreContext {
@@ -1055,6 +1339,15 @@ struct SchemaParser<R: BufRead> {
     reader: Reader<R>,
     store: StoreOutput,
     metadata: SchemaMetadata,
+    barcode: Option<String>,
+}
+
+struct MergeSourceResult {
+    store: StoreOutput,
+    files: IndexChain,
+    directories: IndexChain,
+    total_files: i64,
+    total_directories: i64,
 }
 
 impl<R: BufRead> SchemaParser<R> {
@@ -1070,7 +1363,26 @@ impl<R: BufRead> SchemaParser<R> {
                 },
                 ..Default::default()
             },
+            barcode: None,
         }
+    }
+
+    fn with_barcode(mut self, barcode: String) -> Self {
+        self.barcode = Some(barcode);
+        self
+    }
+
+    fn append_file_record(&mut self, value: BytesStart<'static>) -> Result<(i64, i64), String> {
+        if let Some(barcode) = self.barcode.as_deref() {
+            self.store
+                .append_file_record_with_barcode(&mut self.reader, value, barcode)
+        } else {
+            self.store.append_file_record_raw(&mut self.reader, value)
+        }
+    }
+
+    fn append_empty_file_record(&mut self) -> Result<(i64, i64), String> {
+        self.store.append_empty_file(self.barcode.as_deref())
     }
 
     fn next_event(&mut self, buffer: &mut Vec<u8>) -> Result<Event<'static>, String> {
@@ -1163,6 +1475,133 @@ impl<R: BufRead> SchemaParser<R> {
         })
     }
 
+    fn parse_merge_contents(mut self) -> Result<MergeSourceResult, String> {
+        let mut buffer = Vec::new();
+        let root = loop {
+            match self.next_event(&mut buffer)? {
+                Event::Start(value) => break value,
+                Event::Empty(value) => {
+                    if is_name(&value, "ltfsindex") || is_name(&value, "directory") {
+                        break value;
+                    }
+                    return Err(invalid("schema root element was not found"));
+                }
+                Event::Decl(_) | Event::Comment(_) | Event::PI(_) => continue,
+                Event::Text(value)
+                    if value
+                        .as_ref()
+                        .chars()
+                        .all(|character| character.is_ascii_whitespace()) =>
+                {
+                    continue;
+                }
+                Event::DocType(_) | Event::GeneralRef(_) => {
+                    return Err(invalid("unsafe XML construct in schema"));
+                }
+                _ => return Err(invalid("schema root element was not found")),
+            }
+        };
+
+        let mut state = DirectoryState {
+            offset: -1,
+            selection_index: -1,
+            files: IndexChain::default(),
+            directories: IndexChain::default(),
+            total_file_count: 0,
+            total_directory_count: 0,
+        };
+
+        if is_name(&root, "directory") {
+            self.parse_directory_contents(root, &mut state)?;
+        } else if is_name(&root, "ltfsindex") && !root.is_empty() {
+            // The merge operation has historically flattened the first
+            // schema directory into the generated search root.  Keep that
+            // behavior while avoiding creation of an intermediate directory
+            // record that would immediately be discarded.
+            let mut buffer = Vec::new();
+            loop {
+                match self.next_event(&mut buffer)? {
+                    Event::Start(value) if is_name(&value, "directory") => {
+                        self.parse_directory_contents(value, &mut state)?;
+                        break;
+                    }
+                    Event::Empty(value) if is_name(&value, "directory") => {
+                        self.parse_directory_contents(value, &mut state)?;
+                        break;
+                    }
+                    Event::End(value) if event_name_end(&value) == "ltfsindex" => break,
+                    Event::Decl(_) => {
+                        return Err(invalid("XML declaration is not valid inside the schema"));
+                    }
+                    Event::DocType(_) | Event::GeneralRef(_) => {
+                        return Err(invalid("unsafe XML construct in schema"));
+                    }
+                    Event::Eof => return Err(invalid("unexpected end of schema")),
+                    _ => {}
+                }
+            }
+        } else {
+            return Err(invalid(
+                "schema root element must be ltfsindex or directory",
+            ));
+        }
+
+        Ok(MergeSourceResult {
+            store: self.store,
+            files: state.files,
+            directories: state.directories,
+            total_files: state.total_file_count,
+            total_directories: state.total_directory_count,
+        })
+    }
+
+    fn parse_directory_contents(
+        &mut self,
+        start: BytesStart<'static>,
+        state: &mut DirectoryState,
+    ) -> Result<(), String> {
+        if start.is_empty() {
+            return Ok(());
+        }
+        let mut buffer = Vec::new();
+        loop {
+            match self.next_event(&mut buffer)? {
+                Event::Start(value) => match event_name_start(&value).as_str() {
+                    "contents" | "_directory" | "_file" => {
+                        self.parse_directory_container(value, state)?
+                    }
+                    "file" => {
+                        self.append_child_file(value, state)?;
+                    }
+                    "directory" => {
+                        self.append_child_directory(value, state)?;
+                    }
+                    _ => self.skip_element(value)?,
+                },
+                Event::Empty(value) => match event_name_start(&value).as_str() {
+                    "contents" | "_directory" | "_file" => {}
+                    "file" => self.append_empty_file(state)?,
+                    "directory" => self.append_empty_directory(state)?,
+                    _ => {}
+                },
+                Event::End(value) if event_name_end(&value) == "directory" => break,
+                Event::Decl(_) => {
+                    return Err(invalid("XML declaration is not valid inside a directory"));
+                }
+                Event::DocType(_) | Event::GeneralRef(_) => {
+                    return Err(invalid("unsafe XML construct in schema"));
+                }
+                Event::Eof => return Err(invalid("unexpected end of directory")),
+                Event::End(_)
+                | Event::Text(_)
+                | Event::CData(_)
+                | Event::Comment(_)
+                | Event::PI(_) => {}
+            }
+        }
+        Ok(())
+    }
+
     fn parse_index_child(
         &mut self,
         value: BytesStart<'static>,
@@ -1229,7 +1668,7 @@ impl<R: BufRead> SchemaParser<R> {
                 }
             }
             "file" => {
-                let (offset, length) = self.store.append_file_record(&mut self.reader, value)?;
+                let (offset, length) = self.append_file_record(value)?;
                 let selection = self.store.allocate_selection()?;
                 self.store
                     .append_file_index(files, offset, length, selection)?;
@@ -1302,8 +1741,7 @@ impl<R: BufRead> SchemaParser<R> {
                     let name = event_name_start(&value);
                     match name.as_str() {
                         "file" => {
-                            let (offset, length) =
-                                self.store.append_file_record(&mut self.reader, value)?;
+                            let (offset, length) = self.append_file_record(value)?;
                             let selection = self.store.allocate_selection()?;
                             self.store
                                 .append_file_index(files, offset, length, selection)?;
@@ -1469,7 +1907,7 @@ impl<R: BufRead> SchemaParser<R> {
         value: BytesStart<'static>,
         state: &mut DirectoryState,
     ) -> Result<(), String> {
-        let (offset, length) = self.store.append_file_record(&mut self.reader, value)?;
+        let (offset, length) = self.append_file_record(value)?;
         let selection = self.store.allocate_selection()?;
         self.store
             .append_file_index(&mut state.files, offset, length, selection)?;
@@ -1478,15 +1916,10 @@ impl<R: BufRead> SchemaParser<R> {
     }
 
     fn append_empty_file(&mut self, state: &mut DirectoryState) -> Result<(), String> {
-        let offset = self.store.file_records_position;
-        self.store
-            .file_records
-            .write_all(b"<file/>")
-            .map_err(|error| error.to_string())?;
-        self.store.file_records_position += 7;
+        let (offset, length) = self.append_empty_file_record()?;
         let selection = self.store.allocate_selection()?;
         self.store
-            .append_file_index(&mut state.files, offset, 7, selection)?;
+            .append_file_index(&mut state.files, offset, length, selection)?;
         state.total_file_count += 1;
         Ok(())
     }
@@ -2277,6 +2710,77 @@ fn schema_context_from_file(
     }
 }
 
+fn schema_context_from_files(
+    input_paths: Vec<PathBuf>,
+    root_name: String,
+    paths: [PathBuf; 5],
+) -> Result<Box<SchemaContext>, String> {
+    let mut store = StoreOutput::new(&paths)?;
+    let mut root_state = store.begin_directory()?;
+
+    for input_path in input_paths {
+        let input = File::open(&input_path)
+            .map_err(|error| format!("cannot open schema {}: {error}", input_path.display()))?;
+        let reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, input));
+        let barcode = input_path
+            .file_stem()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let parser = SchemaParser::new(reader, store).with_barcode(barcode);
+        let MergeSourceResult {
+            store: next_store,
+            files,
+            directories,
+            total_files,
+            total_directories,
+        } = parser.parse_merge_contents()?;
+        store = next_store;
+        store.join_file_chains(&mut root_state.files, &files)?;
+        store.join_directory_chains(&mut root_state.directories, &directories)?;
+        root_state.total_file_count = root_state
+            .total_file_count
+            .checked_add(total_files)
+            .ok_or_else(|| invalid("too many files in merged schema"))?;
+        root_state.total_directory_count = root_state
+            .total_directory_count
+            .checked_add(total_directories)
+            .ok_or_else(|| invalid("too many directories in merged schema"))?;
+    }
+
+    let root_values = DirectoryValues {
+        name: Some(root_name),
+        ..Default::default()
+    };
+    store.finish_directory(&root_state, &root_values)?;
+
+    let mut root_directories = IndexChain::default();
+    store.append_directory_index(
+        &mut root_directories,
+        root_state.offset,
+        root_state.selection_index,
+    )?;
+    store.finish()?;
+
+    let result = LscSchemaResult {
+        struct_size: std::mem::size_of::<LscSchemaResult>() as u32,
+        abi_version: 1,
+        root_file_index_offset: -1,
+        root_file_count: 0,
+        root_directory_index_offset: root_directories.first,
+        root_directory_count: root_directories.count,
+        selection_count: store.selection_count,
+    };
+    let metadata = SchemaMetadata {
+        public: LscSchemaMetadata {
+            struct_size: std::mem::size_of::<LscSchemaMetadata>() as u32,
+            abi_version: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    Ok(Box::new(SchemaContext { result, metadata }))
+}
+
 fn get_schema_string(context: &SchemaContext, field: u32) -> Option<&str> {
     match field {
         1 => Some(context.metadata.creator.as_str()),
@@ -2362,6 +2866,54 @@ pub unsafe extern "system" fn lsc_parse_schema_file(
                 PathBuf::from(unsafe { utf16_string(selection_path, selection_path_len) }?),
             ];
             Ok(Box::into_raw(schema_context_from_file(input, paths)?))
+        },
+        output,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn lsc_merge_schema_files(
+    input_paths: *const u16,
+    input_paths_len: u32,
+    root_name: *const u16,
+    root_name_len: u32,
+    file_records_path: *const u16,
+    file_records_path_len: u32,
+    directory_records_path: *const u16,
+    directory_records_path_len: u32,
+    file_index_path: *const u16,
+    file_index_path_len: u32,
+    directory_index_path: *const u16,
+    directory_index_path_len: u32,
+    selection_path: *const u16,
+    selection_path_len: u32,
+    output: *mut *mut SchemaContext,
+) -> i32 {
+    ffi_call_value(
+        || {
+            let joined_paths = unsafe { utf16_string(input_paths, input_paths_len) }?;
+            let input_paths = joined_paths
+                .split('\0')
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            let root_name = unsafe { utf16_string(root_name, root_name_len) }?;
+            let paths = [
+                PathBuf::from(unsafe { utf16_string(file_records_path, file_records_path_len) }?),
+                PathBuf::from(unsafe {
+                    utf16_string(directory_records_path, directory_records_path_len)
+                }?),
+                PathBuf::from(unsafe { utf16_string(file_index_path, file_index_path_len) }?),
+                PathBuf::from(unsafe {
+                    utf16_string(directory_index_path, directory_index_path_len)
+                }?),
+                PathBuf::from(unsafe { utf16_string(selection_path, selection_path_len) }?),
+            ];
+            Ok(Box::into_raw(schema_context_from_files(
+                input_paths,
+                root_name,
+                paths,
+            )?))
         },
         output,
     )
@@ -3089,5 +3641,74 @@ mod tests {
             parse_file_length_bytes(xml.as_bytes()).expect("parse file length"),
             4
         );
+    }
+
+    #[test]
+    fn merges_schema_roots_directly_into_one_lazy_store() {
+        let root =
+            std::env::temp_dir().join(format!("ltfscopy_schema_merge_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create merge test directory");
+        let first = root.join("first.schema");
+        let second = root.join("second.schema");
+        let paths = [
+            root.join("files.bin"),
+            root.join("directories.bin"),
+            root.join("file-index.bin"),
+            root.join("directory-index.bin"),
+            root.join("selection.bin"),
+        ];
+        let first_text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><contents><file><name>a.txt</name><length>1</length></file><directory><name>sub</name><contents><file><name>b.txt</name><length>2</length></file></contents></directory></contents></directory></ltfsindex>"#;
+        let second_text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><contents><file><name>c.txt</name><length>3</length></file></contents></directory></ltfsindex>"#;
+        std::fs::write(&first, first_text).expect("write first schema");
+        std::fs::write(&second, second_text).expect("write second schema");
+
+        let context =
+            schema_context_from_files(vec![first, second], "Search_test".to_owned(), paths.clone())
+                .expect("merge test schemas");
+        assert_eq!(context.result.root_file_count, 0);
+        assert_eq!(context.result.root_directory_count, 1);
+
+        let store = StoreContext {
+            file_records: Mutex::new(File::open(&paths[0]).expect("open file backing")),
+            directory_records: Mutex::new(File::open(&paths[1]).expect("open directory backing")),
+            file_index: Mutex::new(File::open(&paths[2]).expect("open file index backing")),
+            directory_index: Mutex::new(
+                File::open(&paths[3]).expect("open directory index backing"),
+            ),
+        };
+        let root_index =
+            store_directory_index_entry(&store, context.result.root_directory_index_offset)
+                .expect("read merged root index");
+        let root_header = read_store_directory_header(&store, root_index.record_offset)
+            .expect("read merged root header");
+        assert_eq!(root_header.file_count, 2);
+        assert_eq!(root_header.directory_count, 1);
+        assert_eq!(root_header.total_file_count, 3);
+        assert_eq!(root_header.total_directory_count, 1);
+
+        let first_file_index = store_file_index_entry(&store, root_header.file_index_offset)
+            .expect("read first merged file index");
+        let first_file_bytes = read_store_at(
+            &store.file_records,
+            first_file_index.record_offset,
+            first_file_index.record_length as usize,
+            "merged file record",
+        )
+        .expect("read first merged file");
+        let first_file = parse_file_bytes(&first_file_bytes).expect("parse first merged file");
+        assert_eq!(first_file.name, "a.txt");
+        assert_eq!(
+            first_file
+                .xattrs
+                .iter()
+                .find(|(key, _)| key == "Barcode")
+                .map(|(_, value)| value.as_str()),
+            Some("first")
+        );
+
+        drop(store);
+        drop(context);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

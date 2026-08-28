@@ -166,6 +166,25 @@ Friend Module NativeSchemaXml
     End Function
 
     <DllImport(NativeDll, CallingConvention:=CallingConvention.Winapi, ExactSpelling:=True, CharSet:=CharSet.Unicode)>
+    Private Function lsc_merge_schema_files(
+        <MarshalAs(UnmanagedType.LPWStr)> inputPaths As String,
+        inputPathsLength As UInteger,
+        <MarshalAs(UnmanagedType.LPWStr)> rootName As String,
+        rootNameLength As UInteger,
+        <MarshalAs(UnmanagedType.LPWStr)> fileRecordsPath As String,
+        fileRecordsPathLength As UInteger,
+        <MarshalAs(UnmanagedType.LPWStr)> directoryRecordsPath As String,
+        directoryRecordsPathLength As UInteger,
+        <MarshalAs(UnmanagedType.LPWStr)> fileIndexPath As String,
+        fileIndexPathLength As UInteger,
+        <MarshalAs(UnmanagedType.LPWStr)> directoryIndexPath As String,
+        directoryIndexPathLength As UInteger,
+        <MarshalAs(UnmanagedType.LPWStr)> selectionPath As String,
+        selectionPathLength As UInteger,
+        ByRef output As IntPtr) As Integer
+    End Function
+
+    <DllImport(NativeDll, CallingConvention:=CallingConvention.Winapi, ExactSpelling:=True, CharSet:=CharSet.Unicode)>
     Private Function lsc_store_open(
         <MarshalAs(UnmanagedType.LPWStr)> fileRecordsPath As String,
         fileRecordsPathLength As UInteger,
@@ -587,7 +606,6 @@ Friend Module NativeSchemaXml
     Private Function LoadNative(fileName As String) As ltfsindex
         Dim paths As String() = NewBackingPaths()
         Dim nativeContext As IntPtr = IntPtr.Zero
-        Dim store As LazySchemaStore = Nothing
         Try
             Dim status As Integer = lsc_parse_schema_file(fileName, CUInt(fileName.Length),
                                                             paths(0), CUInt(paths(0).Length),
@@ -597,6 +615,18 @@ Friend Module NativeSchemaXml
                                                             paths(4), CUInt(paths(4).Length),
                                                             nativeContext)
             Check(status, "parse schema")
+
+            Return ImportNativeContext(nativeContext, paths)
+        Finally
+            If nativeContext <> IntPtr.Zero Then lsc_schema_destroy(nativeContext)
+            DeleteBackingPaths(paths)
+        End Try
+    End Function
+
+    Private Function ImportNativeContext(nativeContext As IntPtr, ByRef paths As String()) As ltfsindex
+        Dim store As LazySchemaStore = Nothing
+        Try
+            If nativeContext = IntPtr.Zero Then Throw New InvalidDataException("native schema context is null")
 
             Dim nativeResult As New NativeSchemaResult
             Check(lsc_schema_get_result(nativeContext, nativeResult), "read schema result")
@@ -623,6 +653,34 @@ Friend Module NativeSchemaXml
         Catch
             If store IsNot Nothing Then store.AbortBuild()
             Throw
+        End Try
+    End Function
+
+    Friend Function MergeIndexes(fileNames As IList(Of String), rootName As String) As ltfsindex
+        If fileNames Is Nothing Then Return Nothing
+        Dim paths As String() = NewBackingPaths()
+        Dim nativeContext As IntPtr = IntPtr.Zero
+        Try
+            Dim joinedPaths As String = String.Join(ChrW(0), fileNames)
+            Dim safeRootName As String = If(rootName, String.Empty)
+            Dim status As Integer = lsc_merge_schema_files(
+                joinedPaths,
+                CUInt(joinedPaths.Length),
+                safeRootName,
+                CUInt(safeRootName.Length),
+                paths(0),
+                CUInt(paths(0).Length),
+                paths(1),
+                CUInt(paths(1).Length),
+                paths(2),
+                CUInt(paths(2).Length),
+                paths(3),
+                CUInt(paths(3).Length),
+                paths(4),
+                CUInt(paths(4).Length),
+                nativeContext)
+            Check(status, "merge schema files")
+            Return ImportNativeContext(nativeContext, paths)
         Finally
             If nativeContext <> IntPtr.Zero Then lsc_schema_destroy(nativeContext)
             DeleteBackingPaths(paths)
