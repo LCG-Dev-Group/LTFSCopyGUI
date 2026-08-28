@@ -262,6 +262,10 @@ Public Class LTFSWriter
     Private _activeAddFileLookup As Dictionary(Of ltfsindex.directory, Dictionary(Of String, List(Of ltfsindex.file)))
     Private _activeAddFileLookupCalls As Dictionary(Of ltfsindex.directory, Integer)
     Private _lastMessage As String = String.Empty
+    Private Const SearchProgressMaximum As Integer = 10000
+    Private _searchProgressActive As Integer
+    Private Const DirectorySortProgressMaximum As Integer = 10000
+    Private _directorySortProgressActive As Integer
     <Category("LTFSWriter")>
     Public Property SilentMode As Boolean = False
     <Category("LTFSWriter")>
@@ -997,32 +1001,35 @@ Public Class LTFSWriter
             ToolStripStatusLabel4.Text &= $"  {My.Resources.ResText_S3}{IOManager.FormatSize(TotalBytesUnindexed)}"
             ToolStripStatusLabel4.Text &= $"  {My.Resources.ResText_S5}{IOManager.FormatSize(PipeBufferLength)}"
             ToolStripStatusLabel4.ToolTipText = ToolStripStatusLabel4.Text
-            ToolStripStatusLabel6.Text = ""
-            If USize > 0 AndAlso CurrentBytesProcessed >= 0 AndAlso CurrentBytesProcessed <= USize Then
-                ToolStripProgressBar1.Value = CInt(CurrentBytesProcessed / USize * 10000)
-                With Microsoft.WindowsAPICodePack.Taskbar.TaskbarManager.Instance
-                    If ToolStripProgressBar1.Value = 0 OrElse ToolStripProgressBar1.Value = ToolStripProgressBar1.Maximum Then
-                        .SetProgressState(Microsoft.WindowsAPICodePack.Taskbar.TaskbarProgressBarState.NoProgress)
-                        .SetProgressValue(0, ToolStripProgressBar1.Maximum)
-                    Else
-                        If Not Pause Then
-                            .SetProgressState(Microsoft.WindowsAPICodePack.Taskbar.TaskbarProgressBarState.Normal)
+            If Threading.Volatile.Read(_searchProgressActive) = 0 AndAlso
+               Threading.Volatile.Read(_directorySortProgressActive) = 0 Then
+                ToolStripStatusLabel6.Text = ""
+                If USize > 0 AndAlso CurrentBytesProcessed >= 0 AndAlso CurrentBytesProcessed <= USize Then
+                    ToolStripProgressBar1.Value = CInt(CurrentBytesProcessed / USize * 10000)
+                    With Microsoft.WindowsAPICodePack.Taskbar.TaskbarManager.Instance
+                        If ToolStripProgressBar1.Value = 0 OrElse ToolStripProgressBar1.Value = ToolStripProgressBar1.Maximum Then
+                            .SetProgressState(Microsoft.WindowsAPICodePack.Taskbar.TaskbarProgressBarState.NoProgress)
+                            .SetProgressValue(0, ToolStripProgressBar1.Maximum)
+                        Else
+                            If Not Pause Then
+                                .SetProgressState(Microsoft.WindowsAPICodePack.Taskbar.TaskbarProgressBarState.Normal)
+                            End If
+                            .SetProgressValue(ToolStripProgressBar1.Value, ToolStripProgressBar1.Maximum)
                         End If
-                        .SetProgressValue(ToolStripProgressBar1.Value, ToolStripProgressBar1.Maximum)
+                    End With
+                    ToolStripProgressBar1.ToolTipText = $"{My.Resources.ResText_S4}{IOManager.FormatSize(CurrentBytesProcessed)}/{IOManager.FormatSize(USize)}"
+                    Dim CurrentTime As Date = Now
+                    Dim totalTimeCost As Long = (CurrentTime - StartTime).Ticks
+                    If totalTimeCost > 0 AndAlso CurrentBytesProcessed > 0 Then
+                        Dim eteTotalCost As Double = totalTimeCost / CurrentBytesProcessed * USize
+                        Dim RemainTicks As Long = CLng(Math.Min(Long.MaxValue, eteTotalCost) - totalTimeCost)
+                        Dim remainTime As New TimeSpan(RemainTicks)
+                        ToolStripStatusLabel6.Text = $"{My.Resources.ResText_Remaining} {Math.Truncate(remainTime.TotalHours).ToString().PadLeft(2, "0"c)}:{remainTime.Minutes.ToString().PadLeft(2, "0"c)}:{remainTime.Seconds.ToString().PadLeft(2, "0"c)}"
+                        ToolStripProgressBar1.ToolTipText &= vbCrLf & ToolStripStatusLabel6.Text
                     End If
-                End With
-                ToolStripProgressBar1.ToolTipText = $"{My.Resources.ResText_S4}{IOManager.FormatSize(CurrentBytesProcessed)}/{IOManager.FormatSize(USize)}"
-                Dim CurrentTime As Date = Now
-                Dim totalTimeCost As Long = (CurrentTime - StartTime).Ticks
-                If totalTimeCost > 0 AndAlso CurrentBytesProcessed > 0 Then
-                    Dim eteTotalCost As Double = totalTimeCost / CurrentBytesProcessed * USize
-                    Dim RemainTicks As Long = CLng(Math.Min(Long.MaxValue, eteTotalCost) - totalTimeCost)
-                    Dim remainTime As New TimeSpan(RemainTicks)
-                    ToolStripStatusLabel6.Text = $"{My.Resources.ResText_Remaining} {Math.Truncate(remainTime.TotalHours).ToString().PadLeft(2, "0"c)}:{remainTime.Minutes.ToString().PadLeft(2, "0"c)}:{remainTime.Seconds.ToString().PadLeft(2, "0"c)}"
-                    ToolStripProgressBar1.ToolTipText &= vbCrLf & ToolStripStatusLabel6.Text
                 End If
+                ToolStripStatusLabel6.ToolTipText = ToolStripStatusLabel6.Text
             End If
-            ToolStripStatusLabel6.ToolTipText = ToolStripStatusLabel6.Text
             Task.Run(Sub()
                          Try
                              Dim Loc As String = GetLocInfo()
@@ -2973,6 +2980,37 @@ Public Class LTFSWriter
         Return result
     End Function
 
+    Private Function GetSelectedListViewFile() As ltfsindex.file
+        If ListView1.SelectedIndices.Count = 0 Then Return Nothing
+
+        Dim index As Integer = ListView1.SelectedIndices(0)
+        If index < 0 OrElse index >= GetListViewRowCount() Then Return Nothing
+
+        'Search only needs the record identity.  Do not call
+        'GetListViewItem here because rendering all columns can load every
+        'xattr/checksum for a large lazy file while the user presses F3.
+        If index < _listRows.Count Then
+            Return TryCast(_listRows(index).Value, ltfsindex.file)
+        End If
+
+        If _lazyListDirectory Is Nothing Then Return Nothing
+        Dim lazyIndex As Integer = index - _listRows.Count
+        If _lazyListPendingDirectory IsNot Nothing Then
+            If lazyIndex < _lazyListPendingFileCount Then
+                SyncLock _lazyListPendingDirectory.UnwrittenFiles
+                    If lazyIndex < _lazyListPendingDirectory.UnwrittenFiles.Count Then
+                        Return _lazyListPendingDirectory.UnwrittenFiles(lazyIndex)
+                    End If
+                End SyncLock
+                Return Nothing
+            End If
+            lazyIndex -= _lazyListPendingFileCount
+        End If
+
+        If lazyIndex < 0 OrElse lazyIndex >= _lazyListFileCount Then Return Nothing
+        Return _lazyListDirectory.GetLazyFileAt(lazyIndex)
+    End Function
+
     Private Sub SelectListViewIndex(index As Integer)
         If index < 0 OrElse index >= GetListViewRowCount() Then Return
         ListView1.SelectedIndices.Clear()
@@ -3571,7 +3609,7 @@ Public Class LTFSWriter
         PrintMsg($"Position = {CurrentPos.ToString()}", LogOnly:=True)
         schema.location.startblock = CurrentPos.BlockNumber
         PrintMsg(My.Resources.ResText_GI)
-        Dim tmpf As String = $"{Application.StartupPath}\LWI_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
+        Dim tmpf As String = LazySchemaStore.CreateTempFilePath("index-write")
         schema.SaveFile(tmpf)
         'Dim sdata As Byte() = Encoding.UTF8.GetBytes(schema.GetSerializedText())
         PrintMsg(My.Resources.ResText_WI)
@@ -3623,7 +3661,7 @@ Public Class LTFSWriter
         Dim block0 As ULong = schema.location.startblock
         If ExtraPartitionCount > 0 Then
             PrintMsg(My.Resources.ResText_GI)
-            Dim tmpf As String = $"{Application.StartupPath}\LWI_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
+            Dim tmpf As String = LazySchemaStore.CreateTempFilePath("index-write")
             schema.SaveFile(tmpf)
             PrintMsg(My.Resources.ResText_WI)
             TapeUtils.Write(driveHandle, tmpf, plabel.blocksize, False)
@@ -3660,7 +3698,7 @@ Public Class LTFSWriter
             If IsFirstFile Then
                 'Dump old index
                 If Not TapeUtils.ReadFileMark(driveHandle) Then Return -1
-                tmpf = $"{Application.StartupPath}\LIT_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
+                tmpf = LazySchemaStore.CreateTempFilePath("index-read")
                 TapeUtils.ReadToFileMark(driveHandle, tmpf, plabel.blocksize)
             End If
             'Write data
@@ -3697,7 +3735,7 @@ Public Class LTFSWriter
             If tmpfile IsNot Nothing AndAlso IO.File.Exists(tmpfile) Then
                 tmpf = tmpfile
             Else
-                tmpf = $"{Application.StartupPath}\LFT_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
+                tmpf = LazySchemaStore.CreateTempFilePath("file-transfer")
                 RestoreFile(tmpf, f)
             End If
             Dim fs As New IO.FileStream(tmpf, IO.FileMode.Open)
@@ -5199,7 +5237,7 @@ Public Class LTFSWriter
             schema.location.partition = schema.previousgenerationlocation.partition
             PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
             PrintMsg(My.Resources.ResText_RI)
-            Dim tmpf As String = $"{Application.StartupPath}\LWS_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
+            Dim tmpf As String = LazySchemaStore.CreateTempFilePath("schema-read")
             TapeUtils.ReadToFileMark(driveHandle, tmpf, plabel.blocksize)
             PrintMsg(My.Resources.ResText_AI)
             'Dim sch2 As ltfsindex = ltfsindex.FromSchemaText(Encoding.UTF8.GetString(schraw))
@@ -7555,7 +7593,7 @@ Public Class LTFSWriter
                     End If
                     PrintMsg(My.Resources.ResText_RI)
                     PrintMsg($"Position = {GetPos.ToString()}", LogOnly:=True)
-                    Dim tmpf As String = $"{Application.StartupPath}\LCG_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
+                    Dim tmpf As String = LazySchemaStore.CreateTempFilePath("schema-read")
 
                     TapeUtils.ReadToFileMark(driveHandle, tmpf, plabel.blocksize)
                     PrintMsg($"Position = {GetPos.ToString()}", LogOnly:=True)
@@ -9227,7 +9265,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub CalculateChecksumsWithSpool(works As List(Of ValidationWork))
-        Dim spoolPath As String = IO.Path.GetTempFileName()
+        Dim spoolPath As String = LazySchemaStore.CreateTempFilePath("validation-spool")
         Dim blockSize As Long = GetValidationBlockSize()
         Try
             Using spool As New IO.FileStream(spoolPath,
@@ -10498,7 +10536,7 @@ Public Class LTFSWriter
             Dim d As ltfsindex.directory = DirectCast(TreeView1.SelectedNode.Tag, ltfsindex.directory)
             Dim p As ltfsindex.directory = DirectCast(TreeView1.SelectedNode.Parent.Tag, ltfsindex.directory)
             Task.Run(Sub()
-                         Dim tmpf As String = $"{Application.StartupPath}\LDS_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
+                         Dim tmpf As String = LazySchemaStore.CreateTempFilePath("index-compress")
                          d.SaveFile(tmpf)
                          Dim ms As New IO.FileStream(tmpf, IO.FileMode.Open)
                          TapeUtils.ReserveUnit(driveHandle)
@@ -10655,7 +10693,7 @@ Public Class LTFSWriter
                 Task.Run(Sub()
                              SetStatusLight(LWStatus.Busy)
                              Try
-                                 Dim tmpf As String = $"{Application.StartupPath}\LDS_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
+                                 Dim tmpf As String = LazySchemaStore.CreateTempFilePath("index-decompress")
                                  RestorePosition = New TapeUtils.PositionData(driveHandle)
                                  RestoreFile(tmpf, f)
                                  Dim dindex As ltfsindex.directory = ltfsindex.directory.FromFile(tmpf)
@@ -10722,7 +10760,7 @@ Public Class LTFSWriter
                             RestorePosition = New TapeUtils.PositionData(driveHandle)
 
                             For Each FileIndex As ltfsindex.file In flist
-                                Dim tmpf As String = $"{Application.StartupPath}\LFT_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
+                                Dim tmpf As String = LazySchemaStore.CreateTempFilePath("file-transfer")
                                 If DirectCast(ListView1.Tag, ltfsindex.directory).UnwrittenFiles.Contains(FileIndex) Then
                                     FileIndex.extentinfo.Clear()
                                     FileIndex.extentinfo.Add(New ltfsindex.file.extent With {.partition = CType(IndexPartition, ltfsindex.PartitionLabel)})
@@ -11436,6 +11474,13 @@ Public Class LTFSWriter
 
     <Category("LTFSWriter")>
     Public Property LastSearchKW As String = ""
+    Private Const SearchMatchDirectory As UInteger = 1UI
+    Private Const SearchMatchFile As UInteger = 2UI
+    Private _searchSessionActive As Boolean
+    Private _searchScope As ltfsindex.directory
+    Private _searchScopePath As String = String.Empty
+    Private _searchLastHit As SearchEntry
+
     Public Function GetSearchInput() As String
         DisplayHelper.ShowInputDialog("Keyword", "Search", LastSearchKW)
         Return LastSearchKW
@@ -11447,6 +11492,8 @@ Public Class LTFSWriter
         Public Property DirectoryPath As String
         Public Property Path As String
         Public Property FileIndex As Integer
+        Public Property MatchKind As UInteger
+        Public Property NativeRecordOffset As Long = -1L
     End Class
 
     Private Shared Function AppendSearchPath(parentPath As String, childName As String) As String
@@ -11463,7 +11510,9 @@ Public Class LTFSWriter
             .Directory = directory,
             .DirectoryPath = directoryPath,
             .Path = directoryPath,
-            .FileIndex = -1}
+            .FileIndex = -1,
+            .MatchKind = SearchMatchDirectory,
+            .NativeRecordOffset = If(directory.HasLazyRecord, directory.LazyRecordOffset, -1L)}
 
         Dim fileIndex As Integer = 0
         For Each childFile As ltfsindex.file In directory.EnumerateLazyFiles()
@@ -11472,7 +11521,9 @@ Public Class LTFSWriter
                 .File = childFile,
                 .DirectoryPath = directoryPath,
                 .Path = AppendSearchPath(directoryPath, childFile.name),
-                .FileIndex = fileIndex}
+                .FileIndex = fileIndex,
+                .MatchKind = SearchMatchFile,
+                .NativeRecordOffset = If(childFile.HasLazyRecord, childFile.LazyRecordOffset, -1L)}
             fileIndex += 1
         Next
 
@@ -11490,6 +11541,65 @@ Public Class LTFSWriter
         Return left.HasLazyRecord AndAlso right.HasLazyRecord AndAlso
                left.LazyRecordOffset = right.LazyRecordOffset AndAlso
                Object.ReferenceEquals(left.LazyStoreReference, right.LazyStoreReference)
+    End Function
+
+    Private Shared Function SameSearchEntry(left As SearchEntry, right As SearchEntry) As Boolean
+        If left Is Nothing OrElse right Is Nothing Then Return False
+
+        If left.MatchKind <> 0UI AndAlso right.MatchKind <> 0UI AndAlso
+           left.NativeRecordOffset >= 0 AndAlso right.NativeRecordOffset >= 0 Then
+            Return left.MatchKind = right.MatchKind AndAlso
+                   left.NativeRecordOffset = right.NativeRecordOffset
+        End If
+
+        If left.File IsNot Nothing OrElse right.File IsNot Nothing Then
+            Return left.File IsNot Nothing AndAlso right.File IsNot Nothing AndAlso
+                   SameFileRecord(left.File, right.File)
+        End If
+
+        Return SameDirectoryRecord(left.Directory, right.Directory)
+    End Function
+
+    Private Shared Function TryGetNativeSearchCursor(entry As SearchEntry,
+                                                     ByRef matchKind As UInteger,
+                                                     ByRef recordOffset As Long) As Boolean
+        matchKind = 0UI
+        recordOffset = -1L
+        If entry Is Nothing Then Return False
+
+        If (entry.MatchKind = SearchMatchDirectory OrElse entry.MatchKind = SearchMatchFile) AndAlso
+           entry.NativeRecordOffset >= 0 Then
+            matchKind = entry.MatchKind
+            recordOffset = entry.NativeRecordOffset
+            Return True
+        End If
+
+        If entry.File IsNot Nothing AndAlso entry.File.HasLazyRecord Then
+            matchKind = SearchMatchFile
+            recordOffset = entry.File.LazyRecordOffset
+            Return True
+        End If
+        If entry.Directory IsNot Nothing AndAlso entry.Directory.HasLazyRecord Then
+            matchKind = SearchMatchDirectory
+            recordOffset = entry.Directory.LazyRecordOffset
+            Return True
+        End If
+        Return False
+    End Function
+
+    Private Shared Function CreateNativeSearchEntry(value As NativeStoreSearchResultData) As SearchEntry
+        If value Is Nothing OrElse Not value.Found Then Return Nothing
+        Dim fileIndex As Integer = -1
+        If value.MatchKind = SearchMatchFile AndAlso value.FileIndex >= 0 AndAlso
+           value.FileIndex <= Integer.MaxValue Then
+            fileIndex = CInt(value.FileIndex)
+        End If
+        Return New SearchEntry With {
+            .DirectoryPath = If(value.DirectoryPath, String.Empty),
+            .Path = If(value.Path, String.Empty),
+            .FileIndex = fileIndex,
+            .MatchKind = value.MatchKind,
+            .NativeRecordOffset = value.RecordOffset}
     End Function
 
     Private Shared Function SearchContains(value As String, keyword As String, caseSensitive As Boolean) As Boolean
@@ -11514,7 +11624,39 @@ Public Class LTFSWriter
         Return SearchContains(entry.File.name, keyword, caseSensitive)
     End Function
 
-    Private Function FindListViewFileIndex(directory As ltfsindex.directory, target As ltfsindex.file) As Integer
+    Private Function FindFirstSearchEntry(directory As ltfsindex.directory,
+                                          directoryPath As String,
+                                          keyword As String,
+                                          fidMode As Boolean,
+                                          fid As String,
+                                          caseSensitive As Boolean,
+                                          resumeEntry As SearchEntry,
+                                          ByRef resumeEntryFound As Boolean,
+                                          progressCallback As Action) As SearchEntry
+        resumeEntryFound = resumeEntry Is Nothing
+        For Each entry As SearchEntry In EnumerateSearchEntries(directory, directoryPath)
+            If progressCallback IsNot Nothing Then progressCallback()
+            'The first yielded entry is the search root itself.  The root is
+            'the current location, so search its children without returning
+            'the same directory on every F3 press.
+            If entry.File Is Nothing AndAlso entry.Directory Is directory Then Continue For
+
+            'F3 continues after the last hit.  The hit may be a directory or
+            'a file, so compare the complete search entry instead of relying
+            'on the current ListView directory after navigation.
+            If Not resumeEntryFound Then
+                If SameSearchEntry(entry, resumeEntry) Then resumeEntryFound = True
+                Continue For
+            End If
+
+            If MatchesSearchEntry(entry, keyword, fidMode, fid, caseSensitive) Then Return entry
+        Next
+        Return Nothing
+    End Function
+
+    Private Function FindListViewFileIndex(directory As ltfsindex.directory,
+                                           target As ltfsindex.file,
+                                           Optional directFileIndex As Integer = -1) As Integer
         If directory Is Nothing OrElse target Is Nothing Then Return -1
 
         For i As Integer = 0 To _listRows.Count - 1
@@ -11523,7 +11665,15 @@ Public Class LTFSWriter
         Next
 
         If _lazyListDirectory Is Nothing OrElse Not SameDirectoryRecord(_lazyListDirectory, directory) Then Return -1
-        Dim baseIndex As Integer = _listRows.Count
+        'Lazy rows put unwritten files before persisted files.  The search
+        'entry already knows the persisted file's direct index, so avoid
+        'walking the whole directory on the UI thread and account for that
+        'prefix when selecting the virtual row.
+        If directFileIndex >= 0 AndAlso directFileIndex < _lazyListFileCount Then
+            Return _listRows.Count + _lazyListPendingFileCount + directFileIndex
+        End If
+
+        Dim baseIndex As Integer = _listRows.Count + _lazyListPendingFileCount
         Dim directIndex As Integer = 0
         For Each candidate As ltfsindex.file In directory.EnumerateLazyFiles()
             If SameFileRecord(candidate, target) Then Return baseIndex + directIndex
@@ -11532,112 +11682,429 @@ Public Class LTFSWriter
         Return -1
     End Function
 
-    Public Sub Search(Optional ByVal KW As String = Nothing)
-        If KW Is Nothing Then KW = LastSearchKW
-        Dim selectedItems As List(Of ListViewItem) = GetSelectedListViewItems()
-        Dim searchRoot As ltfsindex.directory = Nothing
-        If TreeView1.SelectedNode IsNot Nothing Then
-            searchRoot = TryCast(TreeView1.SelectedNode.Tag, ltfsindex.directory)
+    Private Shared Function GetSearchProgressValue(processed As Long, total As Long) As Integer
+        If total <= 0 Then Return 0
+        Dim scaled As Double = processed / CDbl(total) * SearchProgressMaximum
+        Return CInt(Math.Max(0.0, Math.Min(CDbl(SearchProgressMaximum), scaled)))
+    End Function
+
+    Private Sub BeginSearchProgress(total As Long)
+        Threading.Interlocked.Exchange(_searchProgressActive, 1)
+        Dim update As Action =
+            Sub()
+                If IsDisposed Then Return
+                ToolStripProgressBar1.Minimum = 0
+                ToolStripProgressBar1.Maximum = SearchProgressMaximum
+                ToolStripProgressBar1.Value = 0
+                ToolStripProgressBar1.ToolTipText = $"Search 0/{total}"
+                ToolStripStatusLabel6.Text = $"Search 0/{total}"
+                ToolStripStatusLabel6.ToolTipText = ToolStripStatusLabel6.Text
+            End Sub
+        If IsHandleCreated AndAlso InvokeRequired Then
+            Invoke(update)
+        Else
+            update()
         End If
-        If searchRoot Is Nothing AndAlso schema IsNot Nothing AndAlso
-           schema._directory IsNot Nothing AndAlso schema._directory.Count > 0 Then
-            searchRoot = schema._directory(0)
+    End Sub
+
+    Private Sub ReportSearchProgress(processed As Long, total As Long)
+        If Threading.Volatile.Read(_searchProgressActive) = 0 Then Return
+        If processed > 1 AndAlso processed < total AndAlso processed Mod 256 <> 0 Then Return
+
+        Dim value As Integer = GetSearchProgressValue(processed, total)
+        Dim update As Action =
+            Sub()
+                If Threading.Volatile.Read(_searchProgressActive) = 0 OrElse IsDisposed Then Return
+                ToolStripProgressBar1.Value = value
+                ToolStripProgressBar1.ToolTipText = $"Search {processed}/{total}"
+                ToolStripStatusLabel6.Text = $"Search {processed}/{total}"
+                ToolStripStatusLabel6.ToolTipText = ToolStripStatusLabel6.Text
+            End Sub
+        Try
+            If IsHandleCreated AndAlso InvokeRequired Then
+                BeginInvoke(update)
+            Else
+                update()
+            End If
+        Catch
+        End Try
+    End Sub
+
+    Private Sub FinishSearchProgress(success As Boolean)
+        Dim update As Action =
+            Sub()
+                If Not IsDisposed Then
+                    ToolStripProgressBar1.Value = If(success, SearchProgressMaximum, 0)
+                    ToolStripProgressBar1.ToolTipText = If(success, "Search complete", "Search failed")
+                    ToolStripStatusLabel6.Text = If(success, "Search complete", "Search failed")
+                    ToolStripStatusLabel6.ToolTipText = ToolStripStatusLabel6.Text
+                End If
+                Threading.Interlocked.Exchange(_searchProgressActive, 0)
+                LockGUI(False)
+            End Sub
+        Try
+            If IsHandleCreated AndAlso InvokeRequired Then
+                Invoke(update)
+            Else
+                update()
+            End If
+        Catch
+            Threading.Interlocked.Exchange(_searchProgressActive, 0)
+        End Try
+    End Sub
+
+    Private Shared Function GetDirectorySortProgressValue(processed As Long, total As Long) As Integer
+        If total <= 0 Then Return 0
+        Dim scaled As Double = processed / CDbl(total) * DirectorySortProgressMaximum
+        Return CInt(Math.Max(0.0, Math.Min(CDbl(DirectorySortProgressMaximum), scaled)))
+    End Function
+
+    Private Sub BeginDirectorySortProgress(total As Long)
+        Threading.Interlocked.Exchange(_directorySortProgressActive, 1)
+        Dim update As Action =
+            Sub()
+                If IsDisposed Then Return
+                ToolStripProgressBar1.Minimum = 0
+                ToolStripProgressBar1.Maximum = DirectorySortProgressMaximum
+                ToolStripProgressBar1.Value = 0
+                ToolStripProgressBar1.ToolTipText = $"Sort 0/{total}"
+                ToolStripStatusLabel6.Text = $"Sort 0/{total}"
+                ToolStripStatusLabel6.ToolTipText = ToolStripStatusLabel6.Text
+            End Sub
+        If IsHandleCreated AndAlso InvokeRequired Then
+            Invoke(update)
+        Else
+            update()
+        End If
+    End Sub
+
+    Private Sub ReportDirectorySortProgress(processed As ULong, total As ULong)
+        If Threading.Volatile.Read(_directorySortProgressActive) = 0 Then Return
+        Dim processedValue As Long = If(processed > CULng(Long.MaxValue), Long.MaxValue, CLng(processed))
+        Dim totalValue As Long = If(total > CULng(Long.MaxValue), Long.MaxValue, CLng(total))
+        Dim value As Integer = GetDirectorySortProgressValue(processedValue, totalValue)
+        Dim update As Action =
+            Sub()
+                If Threading.Volatile.Read(_directorySortProgressActive) = 0 OrElse IsDisposed Then Return
+                ToolStripProgressBar1.Value = value
+                ToolStripProgressBar1.ToolTipText = $"Sort {processedValue}/{totalValue}"
+                ToolStripStatusLabel6.Text = $"Sort {processedValue}/{totalValue}"
+                ToolStripStatusLabel6.ToolTipText = ToolStripStatusLabel6.Text
+            End Sub
+        Try
+            If IsHandleCreated AndAlso InvokeRequired Then
+                BeginInvoke(update)
+            Else
+                update()
+            End If
+        Catch
+        End Try
+    End Sub
+
+    Private Sub FinishDirectorySortProgress(success As Boolean)
+        Dim update As Action =
+            Sub()
+                If Not IsDisposed Then
+                    ToolStripProgressBar1.Value = If(success, DirectorySortProgressMaximum, 0)
+                    ToolStripProgressBar1.ToolTipText = If(success, "Sort complete", "Sort failed")
+                    ToolStripStatusLabel6.Text = If(success, "Sort complete", "Sort failed")
+                    ToolStripStatusLabel6.ToolTipText = ToolStripStatusLabel6.Text
+                End If
+                Threading.Interlocked.Exchange(_directorySortProgressActive, 0)
+                LockGUI(False)
+            End Sub
+        Try
+            If IsHandleCreated AndAlso InvokeRequired Then
+                Invoke(update)
+            Else
+                update()
+            End If
+        Catch
+            Threading.Interlocked.Exchange(_directorySortProgressActive, 0)
+            Try
+                LockGUI(False)
+            Catch
+            End Try
+        End Try
+    End Sub
+
+    Private Sub SortCurrentDirectory(directory As ltfsindex.directory, logicalSort As Boolean)
+        If directory Is Nothing OrElse Not AllowOperation Then Exit Sub
+        Dim localeName As String = Globalization.CultureInfo.CurrentCulture.Name
+        Dim total As Long
+        Try
+            total = Math.Max(0L, directory.GetDirectSortChildCount())
+        Catch
+            total = 0L
+        End Try
+
+        LockGUI(True)
+        BeginDirectorySortProgress(total)
+        Task.Run(
+            Sub()
+                Dim nativeProgressCallback As NativeDirectorySortProgressCallback =
+                    Sub(processed As ULong, nativeTotal As ULong, userData As IntPtr)
+                        ReportDirectorySortProgress(processed, nativeTotal)
+                    End Sub
+                Try
+                    Dim nativeResult As NativeStoreDirectorySortResultData = Nothing
+                    Dim nativeUsed As Boolean = False
+                    Try
+                        nativeUsed = directory.TrySortChildrenNative(logicalSort,
+                                                                      localeName,
+                                                                      nativeProgressCallback,
+                                                                      nativeResult)
+                    Catch ex As EntryPointNotFoundException
+                        'An older native DLL can still use the managed sort
+                        'path until the application is rebuilt.
+                        nativeUsed = False
+                    End Try
+
+                    If Not nativeUsed Then
+                        If logicalSort Then
+                            Dim explorerComparer As New ExplorerUtils
+                            directory.SortChildrenByName(
+                                Function(left As String, right As String) As Integer
+                                    Return explorerComparer.Compare(left, right)
+                                End Function,
+                                Function(left As String, right As String) As Integer
+                                    Return explorerComparer.Compare(left, right)
+                                End Function)
+                        Else
+                            directory.SortChildrenByName(
+                                Function(left As String, right As String) As Integer
+                                    Return String.Compare(If(left, String.Empty), If(right, String.Empty), StringComparison.CurrentCulture)
+                                End Function,
+                                Function(left As String, right As String) As Integer
+                                    Return String.Compare(If(left, String.Empty), If(right, String.Empty), StringComparison.CurrentCulture)
+                                End Function)
+                        End If
+                        If total > 0 Then ReportDirectorySortProgress(CULng(total), CULng(total))
+                    End If
+
+                    RefreshDisplay()
+                    FinishDirectorySortProgress(True)
+                Catch ex As Exception
+                    PrintMsg($"Directory sort failed: {ex}", Warning:=True, ForceLog:=True)
+                    FinishDirectorySortProgress(False)
+                Finally
+                    GC.KeepAlive(nativeProgressCallback)
+                End Try
+            End Sub)
+    End Sub
+
+    Public Sub Search(Optional ByVal KW As String = Nothing)
+        Dim continueSearch As Boolean = KW Is Nothing
+        Dim searchKeyword As String = If(continueSearch, LastSearchKW, KW)
+        Dim searchRoot As ltfsindex.directory = Nothing
+        Dim searchRootNode As TreeNode = Nothing
+        Dim rootPath As String = String.Empty
+
+        'Keep F3 inside the scope where the search started.  Selecting a
+        'result changes the visible tree node, but must not change the search
+        'scope to that result's child directory.
+        If continueSearch AndAlso _searchSessionActive AndAlso _searchScope IsNot Nothing Then
+            searchRoot = _searchScope
+            rootPath = _searchScopePath
+        Else
+            Dim selectedTreeNode As TreeNode = TreeView1.SelectedNode
+            If selectedTreeNode IsNot Nothing Then
+                searchRoot = TryCast(selectedTreeNode.Tag, ltfsindex.directory)
+                If searchRoot IsNot Nothing Then
+                    searchRootNode = selectedTreeNode
+                Else
+                    'Archive/file nodes can be selected in the tree.  Search from
+                    'their nearest LTFS directory instead of silently jumping to
+                    'the first root directory.
+                    Dim ancestor As TreeNode = selectedTreeNode.Parent
+                    While ancestor IsNot Nothing
+                        searchRoot = TryCast(ancestor.Tag, ltfsindex.directory)
+                        If searchRoot IsNot Nothing Then
+                            searchRootNode = ancestor
+                            Exit While
+                        End If
+                        ancestor = ancestor.Parent
+                    End While
+                End If
+            End If
+            If searchRoot Is Nothing AndAlso schema IsNot Nothing AndAlso
+               schema._directory IsNot Nothing AndAlso schema._directory.Count > 0 Then
+                searchRoot = schema._directory(0)
+            End If
+
+            If searchRoot IsNot Nothing Then
+                If searchRootNode IsNot Nothing Then
+                    rootPath = GetPath(searchRootNode).TrimStart("\"c)
+                End If
+                If String.IsNullOrEmpty(rootPath) Then rootPath = If(searchRoot.name, String.Empty)
+
+                _searchScope = searchRoot
+                _searchScopePath = rootPath
+                _searchLastHit = Nothing
+                _searchSessionActive = True
+            End If
         End If
         If searchRoot Is Nothing Then Return
 
-        Dim selectedFile As ltfsindex.file = Nothing
-        If selectedItems.Count > 0 AndAlso TypeOf selectedItems(0).Tag Is ltfsindex.file AndAlso
-           TypeOf ListView1.Tag Is ltfsindex.directory AndAlso
-           SameDirectoryRecord(searchRoot, DirectCast(ListView1.Tag, ltfsindex.directory)) Then
-            selectedFile = DirectCast(selectedItems(0).Tag, ltfsindex.file)
+        Dim resumeEntry As SearchEntry = Nothing
+        If continueSearch AndAlso _searchSessionActive Then resumeEntry = _searchLastHit
+
+        'For the first search (or after a session was not established), keep
+        'the old behavior of starting after the currently selected file.
+        If resumeEntry Is Nothing AndAlso TypeOf ListView1.Tag Is ltfsindex.directory Then
+            Dim selectedFile As ltfsindex.file = GetSelectedListViewFile()
+            If selectedFile IsNot Nothing Then
+                resumeEntry = New SearchEntry With {
+                    .Directory = DirectCast(ListView1.Tag, ltfsindex.directory),
+                    .File = selectedFile,
+                    .MatchKind = SearchMatchFile,
+                    .NativeRecordOffset = If(selectedFile.HasLazyRecord, selectedFile.LazyRecordOffset, -1L)}
+            End If
         End If
 
-        Dim rootPath As String = String.Empty
-        If TreeView1.SelectedNode IsNot Nothing AndAlso SameDirectoryRecord(searchRoot, TryCast(TreeView1.SelectedNode.Tag, ltfsindex.directory)) Then
-            rootPath = GetPath(TreeView1.SelectedNode).TrimStart("\"c)
-        End If
-        If String.IsNullOrEmpty(rootPath) Then rootPath = If(searchRoot.name, String.Empty)
-
-        Dim resumeAfterFile As Boolean = selectedFile Is Nothing
-        If selectedFile IsNot Nothing Then
-            ' An unwritten row is not in EnumerateLazyFiles; match the old
-            ' behavior by only advancing past a file that is actually in the
-            ' directory's persisted/direct-file sequence.
-            resumeAfterFile = False
-            For Each candidate As ltfsindex.file In searchRoot.EnumerateLazyFiles()
-                If SameFileRecord(candidate, selectedFile) Then
-                    resumeAfterFile = True
-                    Exit For
-                End If
-            Next
-        End If
-
-        LockGUI(True)
-        Dim searchKeyword As String = If(KW, String.Empty)
+        searchKeyword = If(searchKeyword, String.Empty)
         Dim fidMode As Boolean = searchKeyword.StartsWith("fid:", StringComparison.OrdinalIgnoreCase)
         Dim fid As String = If(fidMode, searchKeyword.Substring(4).Trim(), String.Empty)
         Dim caseSensitive As Boolean = My.Settings.Application_CaseSensitiveSearch
+        Dim nativeStore As LazySchemaStore = Nothing
+        Dim useNativeSearch As Boolean = False
+        If Not fidMode AndAlso searchRoot.HasLazyRecord Then
+            nativeStore = TryCast(searchRoot.LazyStoreReference, LazySchemaStore)
+            useNativeSearch = nativeStore IsNot Nothing AndAlso nativeStore.CanUseNativeSearch()
+            'The writer keeps not-yet-committed files outside the native store.
+            'Use the managed path while such rows are present so search remains
+            'complete for the current in-memory view.
+            If useNativeSearch AndAlso UnwrittenFiles IsNot Nothing AndAlso UnwrittenFiles.Count > 0 Then
+                useNativeSearch = False
+            End If
+        End If
+
+        Dim nativeResumeKind As UInteger = 0UI
+        Dim nativeResumeOffset As Long = -1L
+        If useNativeSearch AndAlso resumeEntry IsNot Nothing AndAlso
+           Not TryGetNativeSearchCursor(resumeEntry, nativeResumeKind, nativeResumeOffset) Then
+            useNativeSearch = False
+        End If
+
+        LockGUI(True)
+        Dim searchTotal As Long = 1L
+        Try
+            searchTotal = Math.Max(1L, 1L + searchRoot.TotalFiles + searchRoot.TotalDirectories)
+        Catch
+        End Try
+        If resumeEntry IsNot Nothing Then
+            If searchTotal > Long.MaxValue \ 2L Then
+                searchTotal = Long.MaxValue
+            Else
+                searchTotal *= 2L
+            End If
+        End If
+        BeginSearchProgress(searchTotal)
         Task.Run(Sub()
                      Dim hit As SearchEntry = Nothing
+                     Dim processedEntries As Long = 0
+                     Dim reportProgress As Action =
+                         Sub()
+                             Dim processed As Long = Threading.Interlocked.Increment(processedEntries)
+                             ReportSearchProgress(processed, searchTotal)
+                         End Sub
                      Try
-                         For Each entry As SearchEntry In EnumerateSearchEntries(searchRoot, rootPath)
-                             'The first yielded entry represents searchRoot itself.
-                             'Do not skip files whose parent is searchRoot: those
-                             'files are often outside the currently materialized
-                             'ListView page and still have to be searchable.
-                             If entry.File Is Nothing AndAlso entry.Directory Is searchRoot Then Continue For
-                             If entry.File Is Nothing Then
-                                 If MatchesSearchEntry(entry, searchKeyword, fidMode, fid, caseSensitive) Then
-                                     hit = entry
-                                     Exit For
-                                 End If
-                                 Continue For
-                             End If
+                         If useNativeSearch Then
+                             Dim nativeProgressCallback As NativeSearchProgressCallback =
+                                 Sub(processed As ULong, total As ULong, userData As IntPtr)
+                                     Dim progress As Long = If(processed > CULng(Long.MaxValue), Long.MaxValue, CLng(processed))
+                                     ReportSearchProgress(progress, searchTotal)
+                                 End Sub
+                             Dim nativeResult As NativeStoreSearchResultData = nativeStore.SearchNative(
+                                 searchRoot.LazyRecordOffset,
+                                 rootPath,
+                                 searchKeyword,
+                                 caseSensitive,
+                                 nativeResumeKind,
+                                 nativeResumeOffset,
+                                 nativeProgressCallback)
+                             hit = CreateNativeSearchEntry(nativeResult)
+                         Else
+                             Dim resumeEntryFound As Boolean = False
+                             hit = FindFirstSearchEntry(searchRoot,
+                                                        rootPath,
+                                                        searchKeyword,
+                                                        fidMode,
+                                                        fid,
+                                                        caseSensitive,
+                                                        resumeEntry,
+                                                        resumeEntryFound,
+                                                        reportProgress)
 
-                             If Not resumeAfterFile Then
-                                 If SameFileRecord(entry.File, selectedFile) Then resumeAfterFile = True
-                                 Continue For
+                             'If the resume entry was the last item, or is an
+                             'unwritten file that is not in the lazy chain, wrap
+                             'around and search from the beginning of the same
+                             'scope.  This also makes F3 cycle through every hit.
+                             If hit Is Nothing AndAlso resumeEntry IsNot Nothing Then
+                                 Dim ignored As Boolean = False
+                                 hit = FindFirstSearchEntry(searchRoot,
+                                                            rootPath,
+                                                            searchKeyword,
+                                                            fidMode,
+                                                            fid,
+                                                            caseSensitive,
+                                                            Nothing,
+                                                            ignored,
+                                                            reportProgress)
                              End If
-                             If MatchesSearchEntry(entry, searchKeyword, fidMode, fid, caseSensitive) Then
-                                 hit = entry
-                                 Exit For
-                             End If
-                         Next
+                         End If
 
                          If hit IsNot Nothing Then
                              Invoke(Sub()
                                         Try
-                                            Dim directoryPath As String = If(hit.File Is Nothing, hit.Path, hit.DirectoryPath)
+                                            _searchLastHit = hit
+                                            _searchSessionActive = True
+                                            Dim isFileHit As Boolean = hit.MatchKind = SearchMatchFile OrElse hit.File IsNot Nothing
+                                            Dim directoryPath As String = If(isFileHit, hit.DirectoryPath, hit.Path)
                                             Dim node As TreeNode = FindTreeNodeByPath(directoryPath)
                                             If node IsNot Nothing Then
-                                                If node IsNot TreeView1.SelectedNode Then
+                                                If Not Object.ReferenceEquals(node, TreeView1.SelectedNode) Then
                                                     TreeView1.SelectedNode = node
                                                     RefreshDisplay()
                                                 End If
-                                                If hit.File Is Nothing Then
+                                                If isFileHit Then
+                                                    If hit.File Is Nothing Then
+                                                        Dim hitDirectory As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
+                                                        If hitDirectory IsNot Nothing AndAlso hit.FileIndex >= 0 Then
+                                                            hit.Directory = hitDirectory
+                                                            hit.File = hitDirectory.GetLazyFileAt(hit.FileIndex)
+                                                        End If
+                                                    End If
+                                                    If hit.File Is Nothing Then
+                                                        PrintMsg($"Search found but file navigation failed: \{hit.Path}", ForceLog:=True)
+                                                    Else
+                                                        Dim rowIndex As Integer = FindListViewFileIndex(hit.Directory, hit.File, hit.FileIndex)
+                                                        If rowIndex >= 0 Then SelectListViewIndex(rowIndex)
+                                                        PrintMsg($"\{hit.Path}")
+                                                    End If
+                                                Else
+                                                    hit.Directory = TryCast(node.Tag, ltfsindex.directory)
                                                     PrintMsg($"\{hit.Path}")
                                                     SelectListViewIndex(0)
-                                                Else
-                                                    Dim rowIndex As Integer = FindListViewFileIndex(hit.Directory, hit.File)
-                                                    If rowIndex >= 0 Then SelectListViewIndex(rowIndex)
-                                                    PrintMsg($"\{hit.Path}")
                                                 End If
+                                            Else
+                                                PrintMsg($"Search found but navigation failed: \{hit.Path}", ForceLog:=True)
                                             End If
                                         Finally
-                                            LockGUI(False)
+                                            FinishSearchProgress(True)
                                         End Try
                                     End Sub)
                              Return
                          End If
 
                          Invoke(Sub()
-                                    LockGUI(False)
+                                    FinishSearchProgress(True)
                                     MessageBox.Show(New Form With {.TopMost = True}, $"""{searchKeyword}"" not found.")
                                 End Sub)
                      Catch ex As Exception
                          PrintMsg($"Search failed: {ex}", ForceLog:=True)
                          Try
-                             Invoke(Sub() LockGUI(False))
+                             FinishSearchProgress(False)
                          Catch
                          End Try
                      End Try
@@ -11710,19 +12177,12 @@ Public Class LTFSWriter
                 Search()
             Case Keys.F5
                 If e.Control Then
-                    Dim cmp As New ExplorerUtils
-                    If ListView1.Tag IsNot Nothing AndAlso TypeOf ListView1.Tag Is ltfsindex.directory Then
-                        Dim dir As ltfsindex.directory = CType(ListView1.Tag, ltfsindex.directory)
-                        dir.SortChildrenByName(
-                            Function(a As String, b As String) As Integer
-                                If e.Alt Then Return a.CompareTo(b)
-                                Return cmp.Compare(a, b)
-                            End Function,
-                            Function(a As String, b As String) As Integer
-                                If e.Alt Then Return a.CompareTo(b)
-                                Return cmp.Compare(a, b)
-                            End Function)
-                    End If
+                    e.SuppressKeyPress = True
+                    e.Handled = True
+                    If Not AllowOperation Then Exit Select
+                    Dim dir As ltfsindex.directory = TryCast(ListView1.Tag, ltfsindex.directory)
+                    If dir IsNot Nothing Then SortCurrentDirectory(dir, Not e.Alt)
+                    Exit Select
                 End If
                 RefreshDisplay()
             Case Keys.F8

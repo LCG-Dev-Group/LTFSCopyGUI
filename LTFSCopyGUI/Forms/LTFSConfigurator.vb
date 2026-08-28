@@ -2641,7 +2641,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                                     reader = New AudioFileReader(fname)
                                 End Try
                         End Select
-                        Dim tempfile As String = My.Computer.FileSystem.GetTempFileName()
+                        Dim tempfile As String = LazySchemaStore.CreateTempFilePath("audio")
                         WaveFileWriter.CreateWaveFile(tempfile, reader)
 
                         Dim fs As New FileStream(tempfile, FileMode.Open, FileAccess.Read, FileShare.Read)

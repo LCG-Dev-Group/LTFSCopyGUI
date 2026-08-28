@@ -73,9 +73,11 @@ Public Class ltfsindex
         Private _lazyScalarsLoaded As Boolean = True
         Private _lazyExtendedAttributesLoaded As Boolean = True
         Private _lazyExtentInfoLoaded As Boolean = True
+        Private _lazyRecordDirty As Boolean
 
         Private Sub MarkLazyDirty()
             If _lazyStore IsNot Nothing AndAlso _lazyRecordOffset >= 0 Then
+                _lazyRecordDirty = True
                 _lazyStore.RegisterModifiedFile(_lazyRecordOffset, Me)
             End If
         End Sub
@@ -123,6 +125,7 @@ Public Class ltfsindex
             _lazyScalarsLoaded = False
             _lazyExtendedAttributesLoaded = False
             _lazyExtentInfoLoaded = False
+            _lazyRecordDirty = False
             _extendedattributes = Nothing
         End Sub
 
@@ -157,6 +160,28 @@ Public Class ltfsindex
         Friend Sub MarkLazyRecordDirty()
             MarkLazyDirty()
         End Sub
+
+        'Index analysis needs only the file name, length and first tape extent.
+        'Read that compact summary directly from the native backing store so a
+        'large lazy schema does not materialize every file's full XML record.
+        Friend Function GetTapeData() As LazyFileTapeData
+            If _lazyStore IsNot Nothing AndAlso _lazyRecordOffset >= 0 AndAlso
+               _lazyRecordLength > 0 AndAlso Not _lazyRecordDirty Then
+                Return _lazyStore.ReadFileTapeData(_lazyRecordOffset, _lazyRecordLength)
+            End If
+
+            Dim firstBlock As Long = 0
+            Dim partition As PartitionLabel = PartitionLabel.a
+            If extentinfo IsNot Nothing AndAlso extentinfo.Count > 0 Then
+                firstBlock = extentinfo(0).startblock
+                partition = extentinfo(0).partition
+            End If
+            Return New LazyFileTapeData With {
+                .Name = name,
+                .Length = length,
+                .Partition = partition,
+                .StartBlock = firstBlock}
+        End Function
 
         <Category("LTFSIndex")>
         Public Property name As String
@@ -1011,6 +1036,34 @@ Public Class ltfsindex
             _totalCountsDirty = True
         End Sub
 
+        Friend Function TrySortChildrenNative(logicalSort As Boolean,
+                                              localeName As String,
+                                              progressCallback As NativeDirectorySortProgressCallback,
+                                              ByRef result As NativeStoreDirectorySortResultData) As Boolean
+            If _lazyStore Is Nothing OrElse _lazyContentsLoaded OrElse _lazyRecordOffset < 0 Then Return False
+            If Not _lazyStore.CanUseNativeDirectorySort() Then Return False
+            result = _lazyStore.SortDirectoryChildrenNative(
+                _lazyRecordOffset,
+                If(logicalSort, NativeDirectorySortModeLogical, NativeDirectorySortModeCurrentCulture),
+                localeName,
+                progressCallback)
+            _lazyFileCursorIndex = -1
+            _lazyFileCursorOffset = -1
+            _lazyDirectoryCursorIndex = -1
+            _lazyDirectoryCursorOffset = -1
+            Return True
+        End Function
+
+        Friend Function GetDirectSortChildCount() As Long
+            If _lazyStore IsNot Nothing AndAlso Not _lazyContentsLoaded Then
+                Return CLng(Math.Max(0, _lazyStore.ReadDirectoryFileCount(_lazyRecordOffset))) +
+                       CLng(Math.Max(0, _lazyStore.ReadDirectoryDirectoryCount(_lazyRecordOffset)))
+            End If
+            Dim fileCount As Long = If(_contents Is Nothing OrElse _contents._file Is Nothing, 0L, _contents._file.Count)
+            Dim directoryCount As Long = If(_contents Is Nothing OrElse _contents._directory Is Nothing, 0L, _contents._directory.Count)
+            Return fileCount + directoryCount
+        End Function
+
         Friend Sub SortMaterializedChildren(fileComparer As Comparison(Of file),
                                              directoryComparer As Comparison(Of directory))
             If _lazyStore IsNot Nothing AndAlso Not _lazyContentsLoaded Then
@@ -1368,6 +1421,24 @@ Public Class ltfsindex
         _lazyStore = store
     End Sub
 
+    Friend Function TryTapeSortNative(outputPath As String,
+                                      progressCallback As NativeTapeSortProgressCallback,
+                                      ByRef result As NativeStoreTapeSortResultData) As Boolean
+        If _lazyStore Is Nothing Then Return False
+        If Not _lazyStore.CanUseNativeTapeSort() Then Return False
+        result = _lazyStore.TapeSortNative(outputPath, progressCallback)
+        Return True
+    End Function
+
+    'Selection editing only needs an isolated view of the selection bytes.  A
+    'full Clone() serializes every file record and is prohibitively expensive
+    'for a multi-gigabyte lazy schema, so callers can edit the current lazy
+    'store inside a transaction and roll it back when the dialog is canceled.
+    Friend Function BeginSelectionTransaction() As LazySelectionTransaction
+        If _lazyStore Is Nothing Then Return Nothing
+        Return _lazyStore.BeginSelectionTransaction()
+    End Function
+
     <Serialization.XmlIgnore>
     <Category("Internal")>
     Public Shared Property Searializing As Boolean = False
@@ -1538,11 +1609,16 @@ Public Class ltfsindex
     End Function
 
     Public Function Clone() As ltfsindex
-        Dim tmpf As String = $"{Application.StartupPath}\LWI_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp"
-        SaveFile(tmpf)
-        Dim result As ltfsindex = FromSchFile(tmpf)
-        IO.File.Delete(tmpf)
-        Return result
+        Dim tmpf As String = LazySchemaStore.CreateTempFilePath("clone")
+        Try
+            SaveFile(tmpf)
+            Return FromSchFile(tmpf)
+        Finally
+            Try
+                If IO.File.Exists(tmpf) Then IO.File.Delete(tmpf)
+            Catch
+            End Try
+        End Try
     End Function
     Public Shared Sub WSort(d As List(Of directory), OnFileFound As Action(Of file), OnDirectoryFound As Action(Of directory), Optional ByRef StopFlag As Boolean = False)
         If d Is Nothing Then Exit Sub
@@ -1606,6 +1682,75 @@ Friend NotInheritable Class LazyFileScalarData
     Public Property BackupTime As String
     Public Property FileUid As Long
     Public Property Symlink As String
+End Class
+
+Friend NotInheritable Class LazyFileTapeData
+    Public Property Name As String
+    Public Property Length As Long
+    Public Property Partition As ltfsindex.PartitionLabel
+    Public Property StartBlock As Long
+End Class
+
+Friend NotInheritable Class LazySelectionTransaction
+    Implements IDisposable
+    Private ReadOnly _store As LazySchemaStore
+    Private ReadOnly _values As Byte()
+    Private _completed As Boolean
+
+    Friend Sub New(store As LazySchemaStore, stream As IO.FileStream)
+        _store = store
+        If stream Is Nothing OrElse stream.Length = 0 Then
+            _values = Array.Empty(Of Byte)()
+            Return
+        End If
+        If stream.Length > Integer.MaxValue Then
+            Throw New IO.InvalidDataException("Schema selection data is too large to edit transactionally.")
+        End If
+
+        _values = New Byte(CInt(stream.Length) - 1) {}
+        stream.Seek(0, IO.SeekOrigin.Begin)
+        Dim offset As Integer = 0
+        While offset < _values.Length
+            Dim read As Integer = stream.Read(_values, offset, _values.Length - offset)
+            If read <= 0 Then Throw New IO.IOException("Unable to read schema selection data.")
+            offset += read
+        End While
+    End Sub
+
+    Friend Function TryGet(selectionIndex As Long, ByRef selected As Boolean) As Boolean
+        If _completed OrElse selectionIndex < 0 OrElse selectionIndex >= _values.Length Then Return False
+        selected = _values(CInt(selectionIndex)) <> 0
+        Return True
+    End Function
+
+    Friend Function SetValue(selectionIndex As Long, selected As Boolean) As Boolean
+        If _completed OrElse selectionIndex < 0 OrElse selectionIndex >= _values.Length Then Return False
+        _values(CInt(selectionIndex)) = If(selected, CByte(1), CByte(0))
+        Return True
+    End Function
+
+    Friend Sub CommitTo(stream As IO.FileStream)
+        If stream Is Nothing OrElse _values.Length = 0 Then Return
+        stream.Seek(0, IO.SeekOrigin.Begin)
+        stream.Write(_values, 0, _values.Length)
+        stream.Flush()
+    End Sub
+
+    Public Sub Commit()
+        If _completed Then Return
+        _store.CompleteSelectionTransaction(Me, commit:=True)
+        _completed = True
+    End Sub
+
+    Public Sub Rollback()
+        If _completed Then Return
+        _store.CompleteSelectionTransaction(Me, commit:=False)
+        _completed = True
+    End Sub
+
+    Public Sub Dispose() Implements IDisposable.Dispose
+        If Not _completed Then Rollback()
+    End Sub
 End Class
 
 Friend Structure LazyDirectoryBuildState
@@ -1679,6 +1824,7 @@ Friend NotInheritable Class LazySchemaStore
     Private ReadOnly _buildLock As New Object
     Private ReadOnly _selectionLock As New Object
     Private ReadOnly _readCacheLock As New Object
+    Private _selectionTransaction As LazySelectionTransaction
 
     Private _fileRecords As IO.FileStream
     Private _directoryRecords As IO.FileStream
@@ -1700,6 +1846,11 @@ Friend NotInheritable Class LazySchemaStore
     Private ReadOnly _directoryTotalDeltas As New Dictionary(Of Long, Long)
     Private ReadOnly _directoryHeaderCache As New Dictionary(Of Long, LazyDirectoryHeader)
     Private ReadOnly _directoryDirectFileByteCountCache As New Dictionary(Of Long, Long)
+    Private _nativeRootFileIndexOffset As Long = -1
+    Private _nativeRootFileCount As ULong
+    Private _nativeRootDirectoryIndexOffset As Long = -1
+    Private _nativeRootDirectoryCount As ULong
+    Private _hasNativeRootIndexes As Boolean
 
     'A larger run keeps the external merge fan-in small while retaining a
     'bounded memory footprint (only one chunk is resident at a time).
@@ -1841,26 +1992,23 @@ Friend NotInheritable Class LazySchemaStore
     End Function
 
     Friend Shared Function CreateTempFilePath(suffix As String) As String
-        Dim directories As New List(Of String)
+        Dim directory As String = Nothing
         Try
-            directories.Add(Application.StartupPath)
+            directory = IO.Path.Combine(Application.StartupPath, "temp")
         Catch
         End Try
-        directories.Add(IO.Path.GetTempPath())
 
-        For Each directory As String In directories.Distinct(StringComparer.OrdinalIgnoreCase)
-            If String.IsNullOrWhiteSpace(directory) Then Continue For
-            Try
-                If Not IO.Directory.Exists(directory) Then IO.Directory.CreateDirectory(directory)
-                For i As Integer = 0 To 7
-                    Dim path As String = IO.Path.Combine(directory, $"LCG_SCHEMA_{Guid.NewGuid():N}_{suffix}.tmp")
-                    Using stream As New IO.FileStream(path, IO.FileMode.CreateNew, IO.FileAccess.Write, IO.FileShare.None, 1, IO.FileOptions.SequentialScan)
-                    End Using
-                    Return path
-                Next
-            Catch
-            End Try
-        Next
+        If String.IsNullOrWhiteSpace(directory) Then directory = IO.Path.Combine(".", "temp")
+        Try
+            If Not IO.Directory.Exists(directory) Then IO.Directory.CreateDirectory(directory)
+            For i As Integer = 0 To 7
+                Dim path As String = IO.Path.Combine(directory, $"LCG_SCHEMA_{Guid.NewGuid():N}_{suffix}.tmp")
+                Using stream As New IO.FileStream(path, IO.FileMode.CreateNew, IO.FileAccess.Write, IO.FileShare.None, 1, IO.FileOptions.SequentialScan)
+                End Using
+                Return path
+            Next
+        Catch
+        End Try
 
         Throw New IO.IOException("Unable to create a temporary schema store.")
     End Function
@@ -1870,6 +2018,17 @@ Friend NotInheritable Class LazySchemaStore
         Return New LazySchemaStore(paths(0), paths(1), paths(2), paths(3), paths(4), createFiles:=False)
     End Function
 
+    Friend Sub SetNativeRootIndexes(rootFileIndexOffset As Long,
+                                    rootFileCount As ULong,
+                                    rootDirectoryIndexOffset As Long,
+                                    rootDirectoryCount As ULong)
+        _nativeRootFileIndexOffset = rootFileIndexOffset
+        _nativeRootFileCount = rootFileCount
+        _nativeRootDirectoryIndexOffset = rootDirectoryIndexOffset
+        _nativeRootDirectoryCount = rootDirectoryCount
+        _hasNativeRootIndexes = True
+    End Sub
+
     Friend Function EnsureNativeStore() As IntPtr
         SyncLock _buildLock
             If _nativeStore = IntPtr.Zero Then
@@ -1877,6 +2036,162 @@ Friend NotInheritable Class LazySchemaStore
             End If
             Return _nativeStore
         End SyncLock
+    End Function
+
+    Friend Function CanUseNativeSearch() As Boolean
+        SyncLock _mutationLock
+            Return Not _building AndAlso
+                   _modifiedFiles.Count = 0 AndAlso
+                   _modifiedDirectories.Count = 0 AndAlso
+                   _directoryMutations.Count = 0
+        End SyncLock
+    End Function
+
+    Friend Function CanUseNativeTapeSort() As Boolean
+        If Not _hasNativeRootIndexes Then Return False
+        SyncLock _mutationLock
+            If _building OrElse _modifiedFiles.Count <> 0 OrElse
+               _modifiedDirectories.Count <> 0 OrElse _directoryMutations.Count <> 0 Then
+                Return False
+            End If
+        End SyncLock
+        SyncLock _selectionLock
+            Return _selectionTransaction Is Nothing
+        End SyncLock
+    End Function
+
+    Friend Function CanUseNativeDirectorySort() As Boolean
+        If Not _hasNativeRootIndexes Then Return False
+        SyncLock _mutationLock
+            Return Not _building AndAlso
+                   _modifiedFiles.Count = 0 AndAlso
+                   _modifiedDirectories.Count = 0 AndAlso
+                   _directoryMutations.Count = 0
+        End SyncLock
+    End Function
+
+    Friend Function TapeSortNative(outputPath As String,
+                                   progressCallback As NativeTapeSortProgressCallback) As NativeStoreTapeSortResultData
+        If Not CanUseNativeTapeSort() Then Throw New InvalidOperationException("Native tape sorting is not available for a modified schema.")
+        Return TapeSortStore(EnsureNativeStore(),
+                             _nativeRootFileIndexOffset,
+                             _nativeRootFileCount,
+                             _nativeRootDirectoryIndexOffset,
+                             _nativeRootDirectoryCount,
+                             _selectionPath,
+                             outputPath,
+                             progressCallback)
+    End Function
+
+    Private Sub AppendNativeSortedIndex(sortedPath As String,
+                                        indexPath As String,
+                                        targetIndexOffset As Long,
+                                        itemCount As ULong,
+                                        entrySize As Long)
+        If itemCount <= 1UL Then Exit Sub
+        If targetIndexOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema target index offset.")
+        If itemCount > CULng(Long.MaxValue \ entrySize) Then
+            Throw New IO.InvalidDataException("Lazy schema sorted index is too large.")
+        End If
+        Dim expectedLength As Long = CLng(itemCount * CULng(entrySize))
+        Dim sortedInfo As New IO.FileInfo(sortedPath)
+        If sortedInfo.Length <> expectedLength Then
+            Throw New IO.InvalidDataException("Lazy schema sorted index length is invalid.")
+        End If
+
+        Using target As New IO.FileStream(indexPath, IO.FileMode.Open, IO.FileAccess.ReadWrite, IO.FileShare.Read,
+                                          IoBufferSize, IO.FileOptions.SequentialScan)
+            target.Seek(0, IO.SeekOrigin.End)
+            If target.Position <> targetIndexOffset Then
+                Throw New IO.IOException("Lazy schema index file changed while sorting.")
+            End If
+            Using source As New IO.FileStream(sortedPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read,
+                                              IoBufferSize, IO.FileOptions.SequentialScan)
+                source.CopyTo(target, IoBufferSize)
+            End Using
+        End Using
+    End Sub
+
+    Private Sub PatchSortedDirectoryIndexHead(recordOffset As Long,
+                                              fieldOffset As Long,
+                                              firstIndexOffset As Long)
+        Using stream As New IO.FileStream(_directoryRecordsPath, IO.FileMode.Open, IO.FileAccess.ReadWrite, IO.FileShare.Read,
+                                          IoBufferSize, IO.FileOptions.RandomAccess)
+            Using writer As New IO.BinaryWriter(stream, StrictUtf8, leaveOpen:=True)
+                stream.Seek(recordOffset + fieldOffset, IO.SeekOrigin.Begin)
+                writer.Write(firstIndexOffset)
+                writer.Flush()
+            End Using
+        End Using
+    End Sub
+
+    Friend Function SortDirectoryChildrenNative(recordOffset As Long,
+                                                 sortMode As UInteger,
+                                                 localeName As String,
+                                                 progressCallback As NativeDirectorySortProgressCallback) As NativeStoreDirectorySortResultData
+        If Not CanUseNativeDirectorySort() Then Throw New InvalidOperationException("Native directory sorting is not available for a modified schema.")
+        SyncLock _mutationLock
+            Dim header As LazyDirectoryHeader = ReadDirectoryHeader(recordOffset)
+            Dim fileCount As ULong = CULng(Math.Max(0, header.FileCount))
+            Dim directoryCount As ULong = CULng(Math.Max(0, header.DirectoryCount))
+            Dim fileTargetIndexOffset As Long = New IO.FileInfo(_fileIndexPath).Length
+            Dim directoryTargetIndexOffset As Long = New IO.FileInfo(_directoryIndexPath).Length
+            Dim fileOutputPath As String = Nothing
+            Dim directoryOutputPath As String = Nothing
+            Try
+                fileOutputPath = CreateTempFilePath("directory-sort-files")
+                directoryOutputPath = CreateTempFilePath("directory-sort-directories")
+                Dim result As NativeStoreDirectorySortResultData =
+                    SortDirectoryChildrenStore(
+                        EnsureNativeStore(),
+                        recordOffset,
+                        sortMode,
+                        localeName,
+                        fileTargetIndexOffset,
+                        directoryTargetIndexOffset,
+                        fileOutputPath,
+                        directoryOutputPath,
+                        progressCallback)
+                If result Is Nothing OrElse result.FileCount <> fileCount OrElse result.DirectoryCount <> directoryCount Then
+                    Throw New IO.InvalidDataException("Native directory sort returned an invalid item count.")
+                End If
+
+                If fileCount > 1UL Then
+                    AppendNativeSortedIndex(fileOutputPath, _fileIndexPath, fileTargetIndexOffset, fileCount, FileIndexEntrySize)
+                    PatchSortedDirectoryIndexHead(recordOffset, 24L, fileTargetIndexOffset)
+                End If
+                If directoryCount > 1UL Then
+                    AppendNativeSortedIndex(directoryOutputPath, _directoryIndexPath, directoryTargetIndexOffset, directoryCount, DirectoryIndexEntrySize)
+                    PatchSortedDirectoryIndexHead(recordOffset, 36L, directoryTargetIndexOffset)
+                End If
+                InvalidateDirectoryReadCaches(recordOffset)
+                Return result
+            Finally
+                For Each path As String In New String() {fileOutputPath, directoryOutputPath}
+                    Try
+                        If Not String.IsNullOrEmpty(path) AndAlso IO.File.Exists(path) Then IO.File.Delete(path)
+                    Catch
+                    End Try
+                Next
+            End Try
+        End SyncLock
+    End Function
+
+    Friend Function SearchNative(rootRecordOffset As Long,
+                                 rootPath As String,
+                                 keyword As String,
+                                 caseSensitive As Boolean,
+                                 resumeKind As UInteger,
+                                 resumeRecordOffset As Long,
+                                 progressCallback As NativeSearchProgressCallback) As NativeStoreSearchResultData
+        Return SearchStore(EnsureNativeStore(),
+                           rootRecordOffset,
+                           rootPath,
+                           keyword,
+                           caseSensitive,
+                           resumeKind,
+                           resumeRecordOffset,
+                           progressCallback)
     End Function
 
     Private Sub CloseNativeStore()
@@ -1926,15 +2241,45 @@ Friend NotInheritable Class LazySchemaStore
         If selectionIndex < 0 Then Return True
         SyncLock _selectionLock
             If _selectionStream Is Nothing OrElse selectionIndex >= _selectionStream.Length Then Return True
+            If _selectionTransaction IsNot Nothing Then
+                Dim selected As Boolean
+                If _selectionTransaction.TryGet(selectionIndex, selected) Then Return selected
+            End If
             _selectionStream.Seek(selectionIndex, IO.SeekOrigin.Begin)
             Return _selectionStream.ReadByte() > 0
         End SyncLock
     End Function
 
+    Friend Function BeginSelectionTransaction() As LazySelectionTransaction
+        SyncLock _selectionLock
+            If _selectionTransaction IsNot Nothing Then
+                Throw New InvalidOperationException("A schema selection transaction is already active.")
+            End If
+            _selectionTransaction = New LazySelectionTransaction(Me, _selectionStream)
+            Return _selectionTransaction
+        End SyncLock
+    End Function
+
+    Friend Sub CompleteSelectionTransaction(transaction As LazySelectionTransaction, commit As Boolean)
+        SyncLock _selectionLock
+            If Not Object.ReferenceEquals(_selectionTransaction, transaction) Then
+                Throw New InvalidOperationException("The schema selection transaction is no longer active.")
+            End If
+
+            If commit AndAlso _selectionStream IsNot Nothing Then
+                transaction.CommitTo(_selectionStream)
+            End If
+            _selectionTransaction = Nothing
+        End SyncLock
+    End Sub
+
     Friend Sub SetSelection(selectionIndex As Long, selected As Boolean)
         If selectionIndex < 0 Then Exit Sub
         SyncLock _selectionLock
             If _selectionStream Is Nothing OrElse selectionIndex >= _selectionStream.Length Then Exit Sub
+            If _selectionTransaction IsNot Nothing Then
+                If _selectionTransaction.SetValue(selectionIndex, selected) Then Exit Sub
+            End If
             _selectionStream.Seek(selectionIndex, IO.SeekOrigin.Begin)
             _selectionStream.WriteByte(If(selected, CByte(1), CByte(0)))
         End SyncLock
@@ -2102,6 +2447,20 @@ Friend NotInheritable Class LazySchemaStore
             Dim result As ltfsindex.file = Nothing
             If _modifiedFiles.TryGetValue(recordOffset, result) Then Return result
             Return Nothing
+        End SyncLock
+    End Function
+
+    Friend Function CanWriteUnmodifiedFileChain(recordOffset As Long) As Boolean
+        SyncLock _mutationLock
+            'A modified file can belong to any directory.  Keep this check
+            'conservative so the native batch path is only used when every
+            'persisted file record is known to be unchanged.
+            If _modifiedFiles.Count > 0 Then Return False
+
+            Dim mutation As LazyDirectoryMutation = Nothing
+            If Not _directoryMutations.TryGetValue(recordOffset, mutation) Then Return True
+            Return mutation.AddedFiles.Count = 0 AndAlso
+                   mutation.RemovedFileOffsets.Count = 0
         End SyncLock
     End Function
 
@@ -2607,6 +2966,7 @@ Friend NotInheritable Class LazySchemaStore
         Dim runPaths As New List(Of String)
         Dim items As New List(Of LazySortItem)(Math.Min(SortChunkSize, itemCount))
         Dim sortedIndexPath As String = Nothing
+        Dim targetIndexBase As Long = New IO.FileInfo(indexPath).Length
         Try
             'Read all backing index entries through the native store handle.
             Dim indexOffset As Long = firstIndexOffset
@@ -2682,7 +3042,7 @@ Friend NotInheritable Class LazySchemaStore
                                       End If
 
                                       Dim newOffset As Long = sortedStream.Position
-                                      sortedWriter.Write(newOffset + entrySize)
+                                      sortedWriter.Write(targetIndexBase + newOffset + entrySize)
                                       sortedWriter.Write(childRecordOffset)
                                       If isFile Then sortedWriter.Write(childRecordLength)
                                       sortedWriter.Write(selectionIndex)
@@ -2705,7 +3065,10 @@ Friend NotInheritable Class LazySchemaStore
             Using targetIndexStream As New IO.FileStream(indexPath, IO.FileMode.Open, IO.FileAccess.ReadWrite, IO.FileShare.Read,
                                                          IoBufferSize, IO.FileOptions.RandomAccess)
                 targetIndexStream.Seek(0, IO.SeekOrigin.End)
-                firstSortedOffset = targetIndexStream.Position + firstTempOffset
+                If targetIndexStream.Position <> targetIndexBase Then
+                    Throw New IO.IOException("Lazy schema index file changed while sorting.")
+                End If
+                firstSortedOffset = targetIndexBase + firstTempOffset
                 Using sortedStream As New IO.FileStream(sortedIndexPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read,
                                                         IoBufferSize, IO.FileOptions.SequentialScan)
                     sortedStream.CopyTo(targetIndexStream, IoBufferSize)
@@ -2898,6 +3261,16 @@ Friend NotInheritable Class LazySchemaStore
         Return ParseFileRecord(ReadFileRecordBytes(recordOffset, recordLength)).Scalars
     End Function
 
+    Friend Function ReadFileTapeData(recordOffset As Long, recordLength As Long) As LazyFileTapeData
+        If recordOffset < 0 OrElse recordLength <= 0 Then Throw New IO.InvalidDataException("Invalid lazy schema file record.")
+        Dim native As NativeStoreFileSummaryData = CopyStoreFileSummary(EnsureNativeStore(), recordOffset, recordLength)
+        Return New LazyFileTapeData With {
+            .Name = native.Name,
+            .Length = native.Length,
+            .Partition = CType(native.Partition, ltfsindex.PartitionLabel),
+            .StartBlock = native.StartBlock}
+    End Function
+
     Friend Function ReadFileExtendedAttributes(recordOffset As Long, recordLength As Long) As List(Of ltfsindex.file.xattr)
         Return ParseFileRecord(ReadFileRecordBytes(recordOffset, recordLength)).ExtendedAttributes
     End Function
@@ -2989,6 +3362,7 @@ Friend NotInheritable Class LazySchemaStore
 
     Friend Sub WriteSchemaNative(index As ltfsindex, outputPath As String, reduceSize As Boolean)
         Using writer As NativeSchemaWriter = NativeSchemaWriter.Open(outputPath)
+            Dim nativeStore As IntPtr = EnsureNativeStore()
             writer.StartElement("ltfsindex", "version", "2.4.0")
             writer.WriteElement("creator", index.creator)
             writer.WriteElement("volumeuuid", index.volumeuuid.ToString())
@@ -3002,12 +3376,12 @@ Friend NotInheritable Class LazySchemaStore
             writer.WriteElement("highestfileuid", index.highestfileuid.ToString(CultureInfo.InvariantCulture))
             If index._file IsNot Nothing Then
                 For Each rootFile As ltfsindex.file In index._file
-                    writer.WriteFile(rootFile)
+                    WriteNativeFile(writer, rootFile, nativeStore)
                 Next
             End If
             If index._directory IsNot Nothing Then
                 For Each rootDirectory As ltfsindex.directory In index._directory
-                    WriteNativeDirectory(writer, rootDirectory, useCollectionWrappers:=False)
+                    WriteNativeDirectory(writer, rootDirectory, useCollectionWrappers:=False, nativeStore:=nativeStore)
                 Next
             End If
             writer.EndElement("ltfsindex")
@@ -3035,14 +3409,29 @@ Friend NotInheritable Class LazySchemaStore
                                      outputPath As String,
                                      useCollectionWrappers As Boolean)
         Using writer As NativeSchemaWriter = NativeSchemaWriter.Open(outputPath)
-            WriteNativeDirectory(writer, directory, useCollectionWrappers)
+            WriteNativeDirectory(writer, directory, useCollectionWrappers, EnsureNativeStore())
             writer.Finish()
         End Using
     End Sub
 
+    Private Sub WriteNativeFile(writer As NativeSchemaWriter,
+                                value As ltfsindex.file,
+                                nativeStore As IntPtr)
+        If value Is Nothing Then Exit Sub
+        If nativeStore <> IntPtr.Zero AndAlso
+           value.HasLazyRecord AndAlso
+           ReferenceEquals(value.LazyStoreReference, Me) AndAlso
+           GetModifiedFile(value.LazyRecordOffset) Is Nothing Then
+            writer.WriteStoreFileRecord(nativeStore, value.LazyRecordOffset, value.LazyRecordLength)
+            Return
+        End If
+        writer.WriteFile(value)
+    End Sub
+
     Private Sub WriteNativeDirectory(writer As NativeSchemaWriter,
                                       directory As ltfsindex.directory,
-                                      useCollectionWrappers As Boolean)
+                                      useCollectionWrappers As Boolean,
+                                      nativeStore As IntPtr)
         If directory Is Nothing Then Exit Sub
         writer.StartElement("directory")
 
@@ -3054,27 +3443,31 @@ Friend NotInheritable Class LazySchemaStore
             WriteNativeDirectoryScalars(writer, values)
             writer.StartElement("contents")
             If useCollectionWrappers Then writer.StartElement("_file")
-            For Each child As LazySchemaChildData In EnumerateFileReferences(directory.LazyRecordOffset)
-                If IsFileRemoved(directory.LazyRecordOffset, child.RecordOffset) Then Continue For
-                Dim modifiedFile As ltfsindex.file = GetModifiedFile(child.RecordOffset)
-                If modifiedFile Is Nothing Then
-                    writer.WriteRaw(ReadFileRecordBytes(child.RecordOffset, child.RecordLength))
-                Else
-                    writer.WriteFile(modifiedFile)
-                End If
-            Next
-            For Each addedFile As ltfsindex.file In EnumerateAddedFiles(directory.LazyRecordOffset)
-                If addedFile.HasLazyRecord AndAlso ReferenceEquals(addedFile.LazyStoreReference, Me) Then
-                    Dim modifiedFile As ltfsindex.file = GetModifiedFile(addedFile.LazyRecordOffset)
+            If CanWriteUnmodifiedFileChain(directory.LazyRecordOffset) Then
+                writer.WriteStoreDirectoryFiles(nativeStore, directory.LazyRecordOffset)
+            Else
+                For Each child As LazySchemaChildData In EnumerateFileReferences(directory.LazyRecordOffset)
+                    If IsFileRemoved(directory.LazyRecordOffset, child.RecordOffset) Then Continue For
+                    Dim modifiedFile As ltfsindex.file = GetModifiedFile(child.RecordOffset)
                     If modifiedFile Is Nothing Then
-                        writer.WriteRaw(ReadFileRecordBytes(addedFile.LazyRecordOffset, addedFile.LazyRecordLength))
+                        writer.WriteStoreFileRecord(nativeStore, child.RecordOffset, child.RecordLength)
                     Else
                         writer.WriteFile(modifiedFile)
                     End If
-                Else
-                    writer.WriteFile(addedFile)
-                End If
-            Next
+                Next
+                For Each addedFile As ltfsindex.file In EnumerateAddedFiles(directory.LazyRecordOffset)
+                    If addedFile.HasLazyRecord AndAlso ReferenceEquals(addedFile.LazyStoreReference, Me) Then
+                        Dim modifiedFile As ltfsindex.file = GetModifiedFile(addedFile.LazyRecordOffset)
+                        If modifiedFile Is Nothing Then
+                            writer.WriteStoreFileRecord(nativeStore, addedFile.LazyRecordOffset, addedFile.LazyRecordLength)
+                        Else
+                            writer.WriteFile(modifiedFile)
+                        End If
+                    Else
+                        writer.WriteFile(addedFile)
+                    End If
+                Next
+            End If
             If useCollectionWrappers Then writer.EndElement("_file")
             If useCollectionWrappers Then writer.StartElement("_directory")
             For Each child As LazySchemaChildData In EnumerateDirectoryReferences(directory.LazyRecordOffset)
@@ -3084,10 +3477,10 @@ Friend NotInheritable Class LazySchemaStore
                     childDirectory = New ltfsindex.directory
                     childDirectory.AttachLazyRecord(Me, child.RecordOffset, selectionIndex:=child.SelectionIndex)
                 End If
-                WriteNativeDirectory(writer, childDirectory, useCollectionWrappers)
+                WriteNativeDirectory(writer, childDirectory, useCollectionWrappers, nativeStore)
             Next
             For Each addedDirectory As ltfsindex.directory In EnumerateAddedDirectories(directory.LazyRecordOffset)
-                WriteNativeDirectory(writer, addedDirectory, useCollectionWrappers)
+                WriteNativeDirectory(writer, addedDirectory, useCollectionWrappers, nativeStore)
             Next
             If useCollectionWrappers Then writer.EndElement("_directory")
             writer.EndElement("contents")
@@ -3103,12 +3496,12 @@ Friend NotInheritable Class LazySchemaStore
             writer.StartElement("contents")
             If useCollectionWrappers Then writer.StartElement("_file")
             For Each childFile As ltfsindex.file In directory.EnumerateLazyFiles()
-                writer.WriteFile(childFile)
+                WriteNativeFile(writer, childFile, nativeStore)
             Next
             If useCollectionWrappers Then writer.EndElement("_file")
             If useCollectionWrappers Then writer.StartElement("_directory")
             For Each childDirectory As ltfsindex.directory In directory.EnumerateLazyDirectories()
-                WriteNativeDirectory(writer, childDirectory, useCollectionWrappers)
+                WriteNativeDirectory(writer, childDirectory, useCollectionWrappers, nativeStore)
             Next
             If useCollectionWrappers Then writer.EndElement("_directory")
             writer.EndElement("contents")
@@ -3309,7 +3702,7 @@ Public Class ltfslabel
     Public Property compression As Boolean = True
     Public Function GetSerializedText(Optional ByVal ReduceSize As Boolean = True) As String
         Dim writer As New Serialization.XmlSerializer(GetType(ltfslabel))
-        Dim tmpf As String = $"{Application.StartupPath}\LCG_{Now.ToString("yyyyMMdd_HHmmss")}.tmp"
+        Dim tmpf As String = LazySchemaStore.CreateTempFilePath("label")
         Dim ms As New IO.FileStream(tmpf, IO.FileMode.Create)
         Dim t As IO.TextWriter = New IO.StreamWriter(ms, New Text.UTF8Encoding(False))
         Dim ns As New Serialization.XmlSerializerNamespaces({New XmlQualifiedName("v", "2.4.0")})

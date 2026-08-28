@@ -5,6 +5,37 @@ Imports System.Globalization
 Imports System.Runtime.InteropServices
 Imports System.Text
 
+Friend NotInheritable Class NativeStoreFileSummaryData
+    Public Property Name As String
+    Public Property Length As Long
+    Public Property Partition As UInteger
+    Public Property StartBlock As Long
+    Public Property ByteOffset As Long
+    Public Property ByteCount As Long
+End Class
+
+Friend NotInheritable Class NativeStoreSearchResultData
+    Public Property Found As Boolean
+    Public Property MatchKind As UInteger
+    Public Property ParentDirectoryRecordOffset As Long
+    Public Property RecordOffset As Long
+    Public Property RecordLength As Long
+    Public Property FileIndex As Long
+    Public Property Path As String
+    Public Property DirectoryPath As String
+End Class
+
+Friend NotInheritable Class NativeStoreTapeSortResultData
+    Public Property FileCount As ULong
+    Public Property PartitionAFileCount As ULong
+    Public Property PartitionBFileCount As ULong
+End Class
+
+Friend NotInheritable Class NativeStoreDirectorySortResultData
+    Public Property FileCount As ULong
+    Public Property DirectoryCount As ULong
+End Class
+
 Friend Module NativeSchemaXml
     Private Const NativeDll As String = "ltfscopy_schema.dll"
     Friend Const StatusOk As Integer = 0
@@ -12,6 +43,8 @@ Friend Module NativeSchemaXml
     Friend Const StatusInvalidArgument As Integer = -2
     Friend Const StatusInvalidData As Integer = -3
     Friend Const StatusBufferTooSmall As Integer = -4
+    Friend Const NativeDirectorySortModeLogical As UInteger = 1UI
+    Friend Const NativeDirectorySortModeCurrentCulture As UInteger = 2UI
 
     Friend Const SchemaStringCreator As UInteger = 1
     Friend Const SchemaStringVolumeUuid As UInteger = 2
@@ -140,6 +173,18 @@ Friend Module NativeSchemaXml
     End Structure
 
     <StructLayout(LayoutKind.Sequential, Pack:=8)>
+    Friend Structure NativeStoreFileSummary
+        Public StructSize As UInteger
+        Public AbiVersion As UInteger
+        Public Length As Long
+        Public Partition As UInteger
+        Public Reserved As UInteger
+        Public StartBlock As Long
+        Public ByteOffset As Long
+        Public ByteCount As Long
+    End Structure
+
+    <StructLayout(LayoutKind.Sequential, Pack:=8)>
     Friend Structure NativeStoreDirectoryIndexEntry
         Public StructSize As UInteger
         Public AbiVersion As UInteger
@@ -147,6 +192,44 @@ Friend Module NativeSchemaXml
         Public RecordOffset As Long
         Public SelectionIndex As Long
     End Structure
+
+    <StructLayout(LayoutKind.Sequential, Pack:=8)>
+    Friend Structure NativeStoreSearchResult
+        Public StructSize As UInteger
+        Public AbiVersion As UInteger
+        Public Found As UInteger
+        Public MatchKind As UInteger
+        Public ParentDirectoryRecordOffset As Long
+        Public RecordOffset As Long
+        Public RecordLength As Long
+        Public FileIndex As Long
+    End Structure
+
+    <StructLayout(LayoutKind.Sequential, Pack:=8)>
+    Friend Structure NativeStoreTapeSortResult
+        Public StructSize As UInteger
+        Public AbiVersion As UInteger
+        Public FileCount As ULong
+        Public PartitionAFileCount As ULong
+        Public PartitionBFileCount As ULong
+    End Structure
+
+    <StructLayout(LayoutKind.Sequential, Pack:=8)>
+    Friend Structure NativeStoreDirectorySortResult
+        Public StructSize As UInteger
+        Public AbiVersion As UInteger
+        Public FileCount As ULong
+        Public DirectoryCount As ULong
+    End Structure
+
+    <UnmanagedFunctionPointer(CallingConvention.Winapi)>
+    Friend Delegate Sub NativeSearchProgressCallback(processed As ULong, total As ULong, userData As IntPtr)
+
+    <UnmanagedFunctionPointer(CallingConvention.Winapi)>
+    Friend Delegate Sub NativeTapeSortProgressCallback(processed As ULong, total As ULong, userData As IntPtr)
+
+    <UnmanagedFunctionPointer(CallingConvention.Winapi)>
+    Friend Delegate Sub NativeDirectorySortProgressCallback(processed As ULong, total As ULong, userData As IntPtr)
 
     <DllImport(NativeDll, CallingConvention:=CallingConvention.Winapi, ExactSpelling:=True, CharSet:=CharSet.Unicode)>
     Private Function lsc_parse_schema_file(
@@ -239,6 +322,62 @@ Friend Module NativeSchemaXml
         ByRef output As NativeStoreDirectoryIndexEntry) As Integer
     End Function
 
+    <DllImport(NativeDll, CallingConvention:=CallingConvention.Winapi, ExactSpelling:=True, CharSet:=CharSet.Unicode)>
+    Private Function lsc_store_search(
+        context As IntPtr,
+        rootRecordOffset As Long,
+        <MarshalAs(UnmanagedType.LPWStr)> rootPath As String,
+        rootPathLength As UInteger,
+        <MarshalAs(UnmanagedType.LPWStr)> keyword As String,
+        keywordLength As UInteger,
+        caseSensitive As UInteger,
+        resumeKind As UInteger,
+        resumeRecordOffset As Long,
+        callback As NativeSearchProgressCallback,
+        userData As IntPtr,
+        ByRef output As NativeStoreSearchResult,
+        <Out> pathBuffer As StringBuilder,
+        pathCapacity As UInteger,
+        ByRef pathRequired As UInteger,
+        <Out> directoryPathBuffer As StringBuilder,
+        directoryPathCapacity As UInteger,
+        ByRef directoryPathRequired As UInteger) As Integer
+    End Function
+
+    <DllImport(NativeDll, CallingConvention:=CallingConvention.Winapi, ExactSpelling:=True, CharSet:=CharSet.Unicode)>
+    Private Function lsc_store_tape_sort(
+        context As IntPtr,
+        rootFileIndexOffset As Long,
+        rootFileCount As ULong,
+        rootDirectoryIndexOffset As Long,
+        rootDirectoryCount As ULong,
+        <MarshalAs(UnmanagedType.LPWStr)> selectionPath As String,
+        selectionPathLength As UInteger,
+        <MarshalAs(UnmanagedType.LPWStr)> outputPath As String,
+        outputPathLength As UInteger,
+        callback As NativeTapeSortProgressCallback,
+        userData As IntPtr,
+        ByRef output As NativeStoreTapeSortResult) As Integer
+    End Function
+
+    <DllImport(NativeDll, CallingConvention:=CallingConvention.Winapi, ExactSpelling:=True, CharSet:=CharSet.Unicode)>
+    Private Function lsc_store_sort_directory_children(
+        context As IntPtr,
+        directoryRecordOffset As Long,
+        sortMode As UInteger,
+        <MarshalAs(UnmanagedType.LPWStr)> localeName As String,
+        localeNameLength As UInteger,
+        fileTargetIndexOffset As Long,
+        directoryTargetIndexOffset As Long,
+        <MarshalAs(UnmanagedType.LPWStr)> fileOutputPath As String,
+        fileOutputPathLength As UInteger,
+        <MarshalAs(UnmanagedType.LPWStr)> directoryOutputPath As String,
+        directoryOutputPathLength As UInteger,
+        callback As NativeDirectorySortProgressCallback,
+        userData As IntPtr,
+        ByRef output As NativeStoreDirectorySortResult) As Integer
+    End Function
+
     <DllImport(NativeDll, CallingConvention:=CallingConvention.Winapi, ExactSpelling:=True)>
     Private Function lsc_store_copy_file_record(
         context As IntPtr,
@@ -257,6 +396,17 @@ Friend Module NativeSchemaXml
         <Out> buffer As StringBuilder,
         capacity As UInteger,
         ByRef required As UInteger) As Integer
+    End Function
+
+    <DllImport(NativeDll, CallingConvention:=CallingConvention.Winapi, ExactSpelling:=True, CharSet:=CharSet.Unicode)>
+    Private Function lsc_store_copy_file_summary(
+        context As IntPtr,
+        recordOffset As Long,
+        recordLength As ULong,
+        <Out> nameBuffer As StringBuilder,
+        nameCapacity As UInteger,
+        ByRef nameRequired As UInteger,
+        ByRef output As NativeStoreFileSummary) As Integer
     End Function
 
     <DllImport(NativeDll, CallingConvention:=CallingConvention.Winapi, ExactSpelling:=True)>
@@ -371,6 +521,21 @@ Friend Module NativeSchemaXml
     End Function
 
     <DllImport(NativeDll, CallingConvention:=CallingConvention.Winapi, ExactSpelling:=True)>
+    Private Function lsc_writer_store_file_record(
+        writer As IntPtr,
+        store As IntPtr,
+        recordOffset As Long,
+        recordLength As ULong) As Integer
+    End Function
+
+    <DllImport(NativeDll, CallingConvention:=CallingConvention.Winapi, ExactSpelling:=True)>
+    Private Function lsc_writer_store_directory_files(
+        writer As IntPtr,
+        store As IntPtr,
+        directoryRecordOffset As Long) As Integer
+    End Function
+
+    <DllImport(NativeDll, CallingConvention:=CallingConvention.Winapi, ExactSpelling:=True)>
     Private Function lsc_writer_finish(writer As IntPtr) As Integer
     End Function
 
@@ -453,6 +618,152 @@ Friend Module NativeSchemaXml
         Return result
     End Function
 
+    Friend Function SearchStore(handle As IntPtr,
+                                rootRecordOffset As Long,
+                                rootPath As String,
+                                keyword As String,
+                                caseSensitive As Boolean,
+                                resumeKind As UInteger,
+                                resumeRecordOffset As Long,
+                                progressCallback As NativeSearchProgressCallback) As NativeStoreSearchResultData
+        If handle = IntPtr.Zero Then Throw New ArgumentNullException(NameOf(handle))
+
+        Dim pathCapacity As UInteger = 32768UI
+        Dim directoryPathCapacity As UInteger = 32768UI
+        Dim pathBuffer As New StringBuilder(CInt(pathCapacity))
+        Dim directoryPathBuffer As New StringBuilder(CInt(directoryPathCapacity))
+        Dim pathRequired As UInteger = 0UI
+        Dim directoryPathRequired As UInteger = 0UI
+        Dim native As New NativeStoreSearchResult
+        Dim status As Integer = lsc_store_search(
+            handle,
+            rootRecordOffset,
+            If(rootPath, String.Empty),
+            CUInt(If(rootPath, String.Empty).Length),
+            If(keyword, String.Empty),
+            CUInt(If(keyword, String.Empty).Length),
+            If(caseSensitive, 1UI, 0UI),
+            resumeKind,
+            resumeRecordOffset,
+            progressCallback,
+            IntPtr.Zero,
+            native,
+            pathBuffer,
+            pathCapacity,
+            pathRequired,
+            directoryPathBuffer,
+            directoryPathCapacity,
+            directoryPathRequired)
+
+        If status = StatusBufferTooSmall Then
+            If pathRequired > Integer.MaxValue OrElse directoryPathRequired > Integer.MaxValue Then
+                Throw New InvalidDataException("Native schema search path is too long.")
+            End If
+            If pathRequired > pathCapacity Then pathCapacity = pathRequired
+            If directoryPathRequired > directoryPathCapacity Then directoryPathCapacity = directoryPathRequired
+            pathBuffer = New StringBuilder(CInt(pathCapacity))
+            directoryPathBuffer = New StringBuilder(CInt(directoryPathCapacity))
+            pathRequired = 0UI
+            directoryPathRequired = 0UI
+            status = lsc_store_search(
+                handle,
+                rootRecordOffset,
+                If(rootPath, String.Empty),
+                CUInt(If(rootPath, String.Empty).Length),
+                If(keyword, String.Empty),
+                CUInt(If(keyword, String.Empty).Length),
+                If(caseSensitive, 1UI, 0UI),
+                resumeKind,
+                resumeRecordOffset,
+                progressCallback,
+                IntPtr.Zero,
+                native,
+                pathBuffer,
+                pathCapacity,
+                pathRequired,
+                directoryPathBuffer,
+                directoryPathCapacity,
+                directoryPathRequired)
+        End If
+        Check(status, "search schema store")
+
+        Return New NativeStoreSearchResultData With {
+            .Found = native.Found <> 0UI,
+            .MatchKind = native.MatchKind,
+            .ParentDirectoryRecordOffset = native.ParentDirectoryRecordOffset,
+            .RecordOffset = native.RecordOffset,
+            .RecordLength = native.RecordLength,
+            .FileIndex = native.FileIndex,
+            .Path = pathBuffer.ToString(),
+            .DirectoryPath = directoryPathBuffer.ToString()}
+    End Function
+
+    Friend Function TapeSortStore(handle As IntPtr,
+                                  rootFileIndexOffset As Long,
+                                  rootFileCount As ULong,
+                                  rootDirectoryIndexOffset As Long,
+                                  rootDirectoryCount As ULong,
+                                  selectionPath As String,
+                                  outputPath As String,
+                                  progressCallback As NativeTapeSortProgressCallback) As NativeStoreTapeSortResultData
+        If handle = IntPtr.Zero Then Throw New ArgumentNullException(NameOf(handle))
+        If String.IsNullOrWhiteSpace(selectionPath) Then Throw New ArgumentException("Selection path is required.", NameOf(selectionPath))
+        If String.IsNullOrWhiteSpace(outputPath) Then Throw New ArgumentException("Output path is required.", NameOf(outputPath))
+
+        Dim native As New NativeStoreTapeSortResult
+        Check(lsc_store_tape_sort(
+                  handle,
+                  rootFileIndexOffset,
+                  rootFileCount,
+                  rootDirectoryIndexOffset,
+                  rootDirectoryCount,
+                  selectionPath,
+                  CUInt(selectionPath.Length),
+                  outputPath,
+                  CUInt(outputPath.Length),
+                  progressCallback,
+                  IntPtr.Zero,
+                  native), "sort schema files by tape position")
+        Return New NativeStoreTapeSortResultData With {
+            .FileCount = native.FileCount,
+            .PartitionAFileCount = native.PartitionAFileCount,
+            .PartitionBFileCount = native.PartitionBFileCount}
+    End Function
+
+    Friend Function SortDirectoryChildrenStore(handle As IntPtr,
+                                                directoryRecordOffset As Long,
+                                                sortMode As UInteger,
+                                                localeName As String,
+                                                fileTargetIndexOffset As Long,
+                                                directoryTargetIndexOffset As Long,
+                                                fileOutputPath As String,
+                                                directoryOutputPath As String,
+                                                progressCallback As NativeDirectorySortProgressCallback) As NativeStoreDirectorySortResultData
+        If handle = IntPtr.Zero Then Throw New ArgumentNullException(NameOf(handle))
+        If String.IsNullOrWhiteSpace(fileOutputPath) Then Throw New ArgumentException("File sort output path is required.", NameOf(fileOutputPath))
+        If String.IsNullOrWhiteSpace(directoryOutputPath) Then Throw New ArgumentException("Directory sort output path is required.", NameOf(directoryOutputPath))
+
+        Dim native As New NativeStoreDirectorySortResult
+        Check(lsc_store_sort_directory_children(
+                  handle,
+                  directoryRecordOffset,
+                  sortMode,
+                  If(localeName, String.Empty),
+                  CUInt(If(localeName, String.Empty).Length),
+                  fileTargetIndexOffset,
+                  directoryTargetIndexOffset,
+                  fileOutputPath,
+                  CUInt(fileOutputPath.Length),
+                  directoryOutputPath,
+                  CUInt(directoryOutputPath.Length),
+                  progressCallback,
+                  IntPtr.Zero,
+                  native), "sort lazy directory children")
+        Return New NativeStoreDirectorySortResultData With {
+            .FileCount = native.FileCount,
+            .DirectoryCount = native.DirectoryCount}
+    End Function
+
     Friend Function ReadStoreFileRecord(handle As IntPtr, recordOffset As Long, recordLength As Long) As Byte()
         If recordOffset < 0 OrElse recordLength < 0 Then Throw New InvalidDataException("Invalid native schema file record.")
         Dim required As ULong = 0
@@ -490,6 +801,43 @@ Friend Module NativeSchemaXml
         builder = New StringBuilder(CInt(required))
         Check(lsc_store_copy_file_name(handle, recordOffset, CULng(recordLength), builder, required, required), "copy schema file name")
         Return builder.ToString()
+    End Function
+
+    Friend Function CopyStoreFileSummary(handle As IntPtr, recordOffset As Long, recordLength As Long) As NativeStoreFileSummaryData
+        If recordOffset < 0 OrElse recordLength < 0 Then Throw New InvalidDataException("Invalid native schema file record.")
+
+        'The usual LTFS file name fits in this buffer, so the common path only
+        'reads and parses the lazy record once.
+        Dim initialCapacity As UInteger = 512UI
+        Dim required As UInteger = 0UI
+        Dim native As New NativeStoreFileSummary
+        Dim builder As New StringBuilder(CInt(initialCapacity))
+        Dim status As Integer = lsc_store_copy_file_summary(
+            handle, recordOffset, CULng(recordLength), builder, initialCapacity, required, native)
+        If status = StatusBufferTooSmall Then
+            If required = 0UI Then Return New NativeStoreFileSummaryData With {
+                .Name = String.Empty,
+                .Length = native.Length,
+                .Partition = native.Partition,
+                .StartBlock = native.StartBlock,
+                .ByteOffset = native.ByteOffset,
+                .ByteCount = native.ByteCount}
+            If required > Integer.MaxValue Then Throw New InvalidDataException("Schema file name is too long.")
+            builder = New StringBuilder(CInt(required))
+            Check(lsc_store_copy_file_summary(
+                      handle, recordOffset, CULng(recordLength), builder, required, required, native),
+                  "copy schema file summary")
+        Else
+            Check(status, "copy schema file summary")
+        End If
+
+        Return New NativeStoreFileSummaryData With {
+            .Name = builder.ToString(),
+            .Length = native.Length,
+            .Partition = native.Partition,
+            .StartBlock = native.StartBlock,
+            .ByteOffset = native.ByteOffset,
+            .ByteCount = native.ByteCount}
     End Function
 
     Private Function CopySchemaString(context As IntPtr, field As UInteger) As String
@@ -633,6 +981,10 @@ Friend Module NativeSchemaXml
             Dim metadata As New NativeSchemaMetadata
             Check(lsc_schema_get_metadata(nativeContext, metadata), "read schema metadata")
             store = LazySchemaStore.CreateForNativeImport(paths)
+            store.SetNativeRootIndexes(nativeResult.RootFileIndexOffset,
+                                       nativeResult.RootFileCount,
+                                       nativeResult.RootDirectoryIndexOffset,
+                                       nativeResult.RootDirectoryCount)
             paths = Nothing
 
             Dim result As New ltfsindex
@@ -854,6 +1206,30 @@ Friend Module NativeSchemaXml
         End Try
     End Sub
 
+    Friend Sub WriterStoreFileRecord(handle As IntPtr,
+                                     store As IntPtr,
+                                     recordOffset As Long,
+                                     recordLength As Long)
+        If store = IntPtr.Zero Then Throw New ArgumentNullException(NameOf(store))
+        If recordOffset < 0 OrElse recordLength <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(recordLength))
+        Check(lsc_writer_store_file_record(handle,
+                                           store,
+                                           recordOffset,
+                                           CULng(recordLength)),
+              "write raw schema file record")
+    End Sub
+
+    Friend Sub WriterStoreDirectoryFiles(handle As IntPtr,
+                                          store As IntPtr,
+                                          directoryRecordOffset As Long)
+        If store = IntPtr.Zero Then Throw New ArgumentNullException(NameOf(store))
+        If directoryRecordOffset < 0 Then Throw New ArgumentOutOfRangeException(NameOf(directoryRecordOffset))
+        Check(lsc_writer_store_directory_files(handle,
+                                               store,
+                                               directoryRecordOffset),
+              "write raw schema directory files")
+    End Sub
+
     Friend Sub WriterFinish(handle As IntPtr)
         Check(lsc_writer_finish(handle), "finish schema writer")
     End Sub
@@ -983,6 +1359,14 @@ Friend NotInheritable Class NativeSchemaWriter
 
     Friend Sub WriteRaw(value As Byte())
         WriterRaw(_handle, value)
+    End Sub
+
+    Friend Sub WriteStoreFileRecord(store As IntPtr, recordOffset As Long, recordLength As Long)
+        WriterStoreFileRecord(_handle, store, recordOffset, recordLength)
+    End Sub
+
+    Friend Sub WriteStoreDirectoryFiles(store As IntPtr, directoryRecordOffset As Long)
+        WriterStoreDirectoryFiles(_handle, store, directoryRecordOffset)
     End Sub
 
     Friend Sub Finish()

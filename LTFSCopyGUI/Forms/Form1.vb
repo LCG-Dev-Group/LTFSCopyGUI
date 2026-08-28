@@ -8,6 +8,27 @@ Public Class Form1
     Public schema As ltfsindex
     Public contents As ltfsindex.contentsDef
     Public filelist As New List(Of String)
+    Private Const AnalyzerPreviewLimit As Integer = 1024 * 1024
+    Private _generatedOutputPath As String
+    Private _updatingGeneratedPreview As Boolean
+
+    Private Sub ClearGeneratedOutput()
+        Dim path As String = _generatedOutputPath
+        _generatedOutputPath = Nothing
+        If String.IsNullOrEmpty(path) Then Return
+        Try
+            If IO.File.Exists(path) Then IO.File.Delete(path)
+        Catch
+        End Try
+    End Sub
+
+    Private Sub TextBox2_TextChanged(sender As Object, e As EventArgs) Handles TextBox2.TextChanged
+        If Not _updatingGeneratedPreview Then ClearGeneratedOutput()
+    End Sub
+
+    Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
+        ClearGeneratedOutput()
+    End Sub
 
     Public Class TapeFileInfo
         Public Property Path As String
@@ -90,9 +111,9 @@ Public Class Form1
                        If result <> 0 Then Return result
                        Return left.FileUid.CompareTo(right.FileUid)
                    End Function)
-        Dim path As String = IO.Path.Combine(IO.Path.GetTempPath(), $"LCG_EXTENT_SORT_{Guid.NewGuid():N}.tmp")
+        Dim path As String = LazySchemaStore.CreateTempFilePath("extent-sort")
         Try
-            Using stream As New IO.FileStream(path, IO.FileMode.CreateNew, IO.FileAccess.Write, IO.FileShare.Read,
+            Using stream As New IO.FileStream(path, IO.FileMode.Create, IO.FileAccess.Write, IO.FileShare.Read,
                                               1 << 16, IO.FileOptions.SequentialScan)
                 Using writer As New IO.BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen:=False)
                     For Each item As TapeExtentInfo In items
@@ -142,7 +163,10 @@ Public Class Form1
         Return CDec(value.StartBlock) * 524288D + CDec(value.ByteOffset)
     End Function
 
-    Private Const TapeSortChunkSize As Integer = 8192
+    'Native tape sorting is used for an untouched lazy schema.  Keep the
+    'managed fallback reasonably coarse as well so a modified/eager schema
+    'does not create thousands of tiny external runs.
+    Private Const TapeSortChunkSize As Integer = 65536
 
     Private NotInheritable Class TapeFileRunCursor
         Implements IDisposable
@@ -203,9 +227,9 @@ Public Class Form1
     Private Shared Function CreateTapeSortRun(items As List(Of TapeFileInfo)) As String
         If items Is Nothing OrElse items.Count = 0 Then Return Nothing
         items.Sort(AddressOf CompareTapeFileInfo)
-        Dim path As String = IO.Path.Combine(IO.Path.GetTempPath(), $"LCG_TAPE_SORT_{Guid.NewGuid():N}.tmp")
+        Dim path As String = LazySchemaStore.CreateTempFilePath("tape-sort")
         Try
-            Using stream As New IO.FileStream(path, IO.FileMode.CreateNew, IO.FileAccess.Write, IO.FileShare.Read,
+            Using stream As New IO.FileStream(path, IO.FileMode.Create, IO.FileAccess.Write, IO.FileShare.Read,
                                               1 << 16, IO.FileOptions.SequentialScan)
                 Using writer As New IO.BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen:=False)
                     For Each item As TapeFileInfo In items
@@ -229,6 +253,14 @@ Public Class Form1
 
     Private Shared Iterator Function EnumerateTapeSortRuns(runPaths As List(Of String)) As IEnumerable(Of TapeFileInfo)
         If runPaths Is Nothing OrElse runPaths.Count = 0 Then Exit Function
+        If runPaths.Count = 1 Then
+            Using cursor As New TapeFileRunCursor(runPaths(0), 0)
+                While cursor.MoveNext()
+                    Yield cursor.Current
+                End While
+            End Using
+            Exit Function
+        End If
         Dim cursors As New List(Of TapeFileRunCursor)
         Dim active As New SortedSet(Of TapeFileRunCursor)(New TapeFileRunComparer())
         Try
@@ -339,7 +371,12 @@ Public Class Form1
             matchingPaths.Add(schemaFiles(index).FullName)
         Next
 
-        Return MergeIndexes(matchingPaths, "Search_" & pattern)
+        SyncLock infoText
+            infoText.AppendLine($"Merging {matchingPaths.Count} schema files...")
+        End SyncLock
+        Dim merged As ltfsindex = MergeIndexes(matchingPaths, "Search_" & pattern)
+        If progressCallback IsNot Nothing Then progressCallback()
+        Return merged
     End Function
 
     Private Shared Sub NormalizeMergedDirectories(root As ltfsindex.directory)
@@ -435,16 +472,32 @@ Public Class Form1
                 End Using
             End Using
         End Using
+        Dim schemaPath As String = TextBox1.Text
+        Dim sourceDirectory As String = TextBox3.Text
+        Dim targetDirectory As String = TextBox4.Text
+        Dim generateCommands As Boolean = CheckBox1.Checked
+        Dim useRobocopy As Boolean = CheckBox2.Checked
+        ClearGeneratedOutput()
+        _updatingGeneratedPreview = True
+        Try
+            TextBox2.Clear()
+        Finally
+            _updatingGeneratedPreview = False
+        End Try
         Dim th As New Threading.Thread(
             Sub()
                 Dim sortRunPaths As New List(Of String)
+                Dim generatedOutputPath As String = Nothing
+                Dim generatedOutputPublished As Boolean = False
+                Dim nativeTapeSortPath As String = Nothing
+                Dim nativeTapeSortUsed As Boolean = False
                 Try
                     Invoke(Sub() Label4.Text = CStr(SchemaLoadText.Items(0)))
                     Invoke(Sub() Label4.Text = CStr(SchemaLoadText.Items(1)))
                     Invoke(Sub() Label4.Text = CStr(SchemaLoadText.Items(2)))
 
                     If ReloadFile Or schema Is Nothing Then
-                        schema = ltfsindex.FromSchemaFile(TextBox1.Text)
+                        schema = ltfsindex.FromSchemaFile(schemaPath)
                     End If
                     Dim aRuns As New List(Of String)
                     Dim bRuns As New List(Of String)
@@ -455,26 +508,70 @@ Public Class Form1
                     Dim bCount As Long = 0
                     Invoke(Sub() Label4.Text = CStr(SchemaLoadText.Items(3)))
                     If schema IsNot Nothing Then
-                        For Each info As TapeFileInfo In EnumerateSchemaTapeFiles(schema)
-                            total += 1
-                            If info.Partition = ltfsindex.PartitionLabel.a Then
-                                aChunk.Add(info)
-                                aCount += 1
-                                If aChunk.Count >= TapeSortChunkSize Then
-                                    Dim runPath As String = CreateTapeSortRun(aChunk)
-                                    aRuns.Add(runPath)
-                                    sortRunPaths.Add(runPath)
-                                End If
-                            Else
-                                bChunk.Add(info)
-                                bCount += 1
-                                If bChunk.Count >= TapeSortChunkSize Then
-                                    Dim runPath As String = CreateTapeSortRun(bChunk)
-                                    bRuns.Add(runPath)
-                                    sortRunPaths.Add(runPath)
-                                End If
+                        Dim nativeTapeSortResult As NativeStoreTapeSortResultData = Nothing
+                        Dim nativeProgressCallback As NativeTapeSortProgressCallback =
+                            Sub(processed As ULong, rawTotal As ULong, userData As IntPtr)
+                                If processed <> rawTotal AndAlso processed Mod CULng(8192) <> CULng(0) Then Return
+                                Try
+                                    If IsDisposed Then Return
+                                    Invoke(Sub() Label4.Text = CStr(SchemaLoadText.Items(3)) & processed.ToString() & "/" & rawTotal.ToString())
+                                Catch ex As InvalidOperationException
+                                End Try
+                            End Sub
+                        Try
+                            nativeTapeSortPath = LazySchemaStore.CreateTempFilePath("tape-sort-native")
+                            nativeTapeSortUsed = schema.TryTapeSortNative(nativeTapeSortPath,
+                                                                         nativeProgressCallback,
+                                                                         nativeTapeSortResult)
+                        Catch ex As EntryPointNotFoundException
+                            'Allow an older native DLL to use the managed
+                            'fallback until the application is rebuilt.
+                            nativeTapeSortUsed = False
+                        Finally
+                            GC.KeepAlive(nativeProgressCallback)
+                        End Try
+
+                        If nativeTapeSortUsed Then
+                            If nativeTapeSortResult Is Nothing Then Throw New IO.InvalidDataException("Native tape sort returned no result.")
+                            If nativeTapeSortResult.FileCount > CULng(Long.MaxValue) OrElse
+                               nativeTapeSortResult.PartitionAFileCount > CULng(Long.MaxValue) OrElse
+                               nativeTapeSortResult.PartitionBFileCount > CULng(Long.MaxValue) Then
+                                Throw New IO.InvalidDataException("Native tape sort result is too large.")
                             End If
-                        Next
+                            total = CLng(nativeTapeSortResult.FileCount)
+                            aCount = CLng(nativeTapeSortResult.PartitionAFileCount)
+                            bCount = CLng(nativeTapeSortResult.PartitionBFileCount)
+                            sortRunPaths.Add(nativeTapeSortPath)
+                        Else
+                            Try
+                                If Not String.IsNullOrEmpty(nativeTapeSortPath) AndAlso IO.File.Exists(nativeTapeSortPath) Then
+                                    IO.File.Delete(nativeTapeSortPath)
+                                End If
+                            Catch
+                            End Try
+                            nativeTapeSortPath = Nothing
+
+                            For Each info As TapeFileInfo In EnumerateSchemaTapeFiles(schema)
+                                total += 1
+                                If info.Partition = ltfsindex.PartitionLabel.a Then
+                                    aChunk.Add(info)
+                                    aCount += 1
+                                    If aChunk.Count >= TapeSortChunkSize Then
+                                        Dim runPath As String = CreateTapeSortRun(aChunk)
+                                        aRuns.Add(runPath)
+                                        sortRunPaths.Add(runPath)
+                                    End If
+                                Else
+                                    bChunk.Add(info)
+                                    bCount += 1
+                                    If bChunk.Count >= TapeSortChunkSize Then
+                                        Dim runPath As String = CreateTapeSortRun(bChunk)
+                                        bRuns.Add(runPath)
+                                        sortRunPaths.Add(runPath)
+                                    End If
+                                End If
+                            Next
+                        End If
                     End If
                     If aChunk.Count > 0 Then
                         Dim runPath As String = CreateTapeSortRun(aChunk)
@@ -491,58 +588,106 @@ Public Class Form1
                         filelist.Clear()
                     End SyncLock
                     Invoke(Sub() Label4.Text = CStr(SchemaLoadText.Items(5)))
+                    Dim sortedFiles As IEnumerable(Of TapeFileInfo)
+                    If nativeTapeSortUsed Then
+                        sortedFiles = EnumerateTapeSortRuns(New List(Of String) From {nativeTapeSortPath})
+                    Else
+                        sortedFiles = EnumerateTapeSortRuns(aRuns).Concat(EnumerateTapeSortRuns(bRuns))
+                    End If
                     Dim counter As Long = 0
                     Dim ran As New Random
                     Dim stepval As Integer = ran.Next(100, 1000)
 
-                    Dim outputChunk As New Text.StringBuilder(64 * 1024)
-                    Dim flushOutput As Action =
-                        Sub()
-                            If outputChunk.Length = 0 Then Return
-                            Dim value As String = outputChunk.ToString()
-                            outputChunk.Clear()
-                            Invoke(Sub() TextBox2.AppendText(value))
-                        End Sub
-                    Dim fdir As String = TextBox3.Text
+                    'A multi-million-file result can be hundreds of MB.  Do
+                    'not append it to the WinForms TextBox from the worker
+                    'thread: each synchronous Invoke forces the UI to lay out
+                    'the growing edit control and makes the window appear hung.
+                    'Keep the complete result on disk and expose only a small
+                    'preview in the UI; Button3 copies the complete file.
+                    generatedOutputPath = LazySchemaStore.CreateTempFilePath("analyzer-output")
+                    Dim preview As New Text.StringBuilder(AnalyzerPreviewLimit)
+                    Dim previewTruncated As Boolean = False
+                    Dim fdir As String = sourceDirectory
                     If fdir.EndsWith("\") Then fdir = fdir.TrimEnd("\"c)
                     fdir &= "\"
-                    Dim tdir As String = TextBox4.Text
+                    Dim tdir As String = targetDirectory
                     If tdir.EndsWith("\") Then tdir = tdir.TrimEnd("\"c)
                     tdir &= "\"
-                    If Not CheckBox1.Checked Then
-                        Invoke(Sub() TextBox2.Text = $"Partition{vbTab}Startblock{vbTab}Length{vbTab}Path{vbCrLf}")
-                        For Each f As TapeFileInfo In EnumerateTapeSortRuns(aRuns).Concat(EnumerateTapeSortRuns(bRuns))
-                            outputChunk.Append(f.Partition.ToString).Append(vbTab).Append(f.BlockNumber).Append(vbTab).Append(f.FileLength).Append(vbTab).Append(f.Path).Append(vbCrLf)
-                            counter += 1
-                            If counter Mod stepval = 0 Then
-                                Invoke(Sub() Label4.Text = $"{SchemaLoadText.Items(5)}{counter}/{total}")
-                                stepval = ran.Next(100, 1000)
-                            End If
-                            If outputChunk.Length >= 64 * 1024 Then flushOutput()
-                        Next
-                    Else
-                        Invoke(Sub() TextBox2.Text = "chcp 65001" & vbCrLf)
-                        For Each f As TapeFileInfo In EnumerateTapeSortRuns(aRuns).Concat(EnumerateTapeSortRuns(bRuns))
-                            If CheckBox2.Checked Then
-                                outputChunk.Append($"echo f|robocopy ""{fdir}{f.Path}"" ""{tdir }{f.Path}"" /Copy:D /MIR /W:10 /R:10 /J{vbCrLf}")
-                            Else
-                                outputChunk.Append($"echo f|xcopy /J /D /Y ""{fdir}{f.Path}"" ""{tdir }{f.Path}""{vbCrLf}")
-                            End If
-                            counter += 1
-                            If counter Mod stepval = 0 Then
-                                Invoke(Sub() Label4.Text = $"{SchemaLoadText.Items(5)}{counter}/{total}")
-                                stepval = ran.Next(100, 1000)
-                            End If
-                            If outputChunk.Length >= 64 * 1024 Then flushOutput()
-                        Next
+                    Using outputWriter As New IO.StreamWriter(generatedOutputPath, append:=False,
+                                                              encoding:=New Text.UTF8Encoding(False),
+                                                              bufferSize:=1 << 20)
+                        Dim outputChunk As New Text.StringBuilder(64 * 1024)
+                        Dim flushOutput As Action =
+                            Sub()
+                                If outputChunk.Length = 0 Then Return
+                                outputWriter.Write(outputChunk.ToString())
+                                outputChunk.Clear()
+                            End Sub
+                        Dim appendPreview As Action(Of String) =
+                            Sub(value As String)
+                                If value Is Nothing OrElse previewTruncated Then Return
+                                Dim remaining As Integer = AnalyzerPreviewLimit - preview.Length
+                                If value.Length <= remaining Then
+                                    preview.Append(value)
+                                Else
+                                    If remaining > 0 Then preview.Append(value, 0, remaining)
+                                    previewTruncated = True
+                                End If
+                            End Sub
+                        Dim writeOutput As Action(Of String) =
+                            Sub(value As String)
+                                outputChunk.Append(value)
+                                appendPreview(value)
+                                If outputChunk.Length >= 64 * 1024 Then flushOutput()
+                            End Sub
+
+                        If Not generateCommands Then
+                            writeOutput($"Partition{vbTab}Startblock{vbTab}Length{vbTab}Path{vbCrLf}")
+                            For Each f As TapeFileInfo In sortedFiles
+                                writeOutput(f.Partition.ToString & vbTab & f.BlockNumber & vbTab & f.FileLength & vbTab & If(f.Path, String.Empty) & vbCrLf)
+                                counter += 1
+                                If counter Mod stepval = 0 Then
+                                    Invoke(Sub() Label4.Text = $"{SchemaLoadText.Items(5)}{counter}/{total}")
+                                    stepval = ran.Next(100, 1000)
+                                End If
+                            Next
+                        Else
+                            writeOutput("chcp 65001" & vbCrLf)
+                            For Each f As TapeFileInfo In sortedFiles
+                                If useRobocopy Then
+                                    writeOutput($"echo f|robocopy ""{fdir}{f.Path}"" ""{tdir}{f.Path}"" /Copy:D /MIR /W:10 /R:10 /J{vbCrLf}")
+                                Else
+                                    writeOutput($"echo f|xcopy /J /D /Y ""{fdir}{f.Path}"" ""{tdir}{f.Path}""{vbCrLf}")
+                                End If
+                                counter += 1
+                                If counter Mod stepval = 0 Then
+                                    Invoke(Sub() Label4.Text = $"{SchemaLoadText.Items(5)}{counter}/{total}")
+                                    stepval = ran.Next(100, 1000)
+                                End If
+                            Next
+                        End If
+                        flushOutput()
+                    End Using
+                    Dim previewText As String = preview.ToString()
+                    If previewTruncated Then
+                        previewText = previewText & vbCrLf & "... [preview truncated; Save exports the complete result]" & vbCrLf
                     End If
-                    flushOutput()
+                    Invoke(Sub()
+                               _updatingGeneratedPreview = True
+                               Try
+                                   TextBox2.Text = previewText
+                                   _generatedOutputPath = generatedOutputPath
+                                   generatedOutputPublished = True
+                               Finally
+                                   _updatingGeneratedPreview = False
+                               End Try
+                           End Sub)
                     Invoke(Sub() Label4.Text = CStr(SchemaLoadText.Items(6)))
                     Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(Form1))
                         Using categoryScope As IDisposable = LogContext.PushProperty("Category", "IndexAnalyzer")
                             Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
                                 Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "SchemaLoad")
-                                    Log.Information("Schema load completed. FilePath={FilePath} FileCount={FileCount} PartitionAFileCount={PartitionAFileCount} PartitionBFileCount={PartitionBFileCount}.", TextBox1.Text, total, aCount, bCount)
+                                    Log.Information("Schema load completed. FilePath={FilePath} FileCount={FileCount} PartitionAFileCount={PartitionAFileCount} PartitionBFileCount={PartitionBFileCount}.", schemaPath, total, aCount, bCount)
                                 End Using
                             End Using
                         End Using
@@ -552,13 +697,19 @@ Public Class Form1
                         Using categoryScope As IDisposable = LogContext.PushProperty("Category", "IndexAnalyzer")
                             Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
                                 Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
-                                    Log.Error(ex, "Schema load failed. FilePath={FilePath} ReloadFile={ReloadFile}.", TextBox1.Text, ReloadFile)
+                                    Log.Error(ex, "Schema load failed. FilePath={FilePath} ReloadFile={ReloadFile}.", schemaPath, ReloadFile)
                                 End Using
                             End Using
                         End Using
                     End Using
                     Invoke(Sub() TextBox2.Text = ex.Message)
                 Finally
+                    If Not generatedOutputPublished AndAlso Not String.IsNullOrEmpty(generatedOutputPath) Then
+                        Try
+                            If IO.File.Exists(generatedOutputPath) Then IO.File.Delete(generatedOutputPath)
+                        Catch
+                        End Try
+                    End If
                     For Each runPath As String In sortRunPaths
                         Try
                             If IO.File.Exists(runPath) Then IO.File.Delete(runPath)
@@ -570,6 +721,7 @@ Public Class Form1
                            Button1.Enabled = True
                            Button2.Enabled = True
                            Button3.Enabled = True
+                           Button4.Enabled = True
                            CheckBox1.Enabled = True
                            TextBox1.Enabled = True
                            TextBox2.Enabled = True
@@ -581,6 +733,7 @@ Public Class Form1
         Button1.Enabled = False
         Button2.Enabled = False
         Button3.Enabled = False
+        Button4.Enabled = False
         CheckBox1.Enabled = False
         TextBox1.Enabled = False
         TextBox2.Enabled = False
@@ -651,17 +804,12 @@ Public Class Form1
 
     Private Function CreateTapeFileInfo(f As ltfsindex.file, parentPath As String) As TapeFileInfo
         If f Is Nothing OrElse Not f.Selected Then Return Nothing
-        Dim blockNumber As Long = 0
-        Dim partition As ltfsindex.PartitionLabel = ltfsindex.PartitionLabel.a
-        If f.extentinfo IsNot Nothing AndAlso f.extentinfo.Count > 0 Then
-            blockNumber = f.extentinfo(0).startblock
-            partition = f.extentinfo(0).partition
-        End If
+        Dim tapeData As LazyFileTapeData = f.GetTapeData()
         Return New TapeFileInfo With {
-            .BlockNumber = blockNumber,
-            .Partition = partition,
-            .Path = parentPath & If(f.name, ""),
-            .FileLength = f.length}
+            .BlockNumber = tapeData.StartBlock,
+            .Partition = tapeData.Partition,
+            .Path = parentPath & If(tapeData.Name, ""),
+            .FileLength = tapeData.Length}
     End Function
 
     Private Sub AddTapeFileInfo(f As ltfsindex.file, parentPath As String, flist As List(Of TapeFileInfo))
@@ -684,7 +832,14 @@ Public Class Form1
                 End Using
             End Using
             Try
-                IO.File.WriteAllText(SaveFileDialog1.FileName, TextBox2.Text, New Text.UTF8Encoding(False))
+                If Not String.IsNullOrEmpty(_generatedOutputPath) AndAlso IO.File.Exists(_generatedOutputPath) Then
+                    'Large analyses are streamed to a temporary output file;
+                    'copy it directly instead of materializing hundreds of MB
+                    'through TextBox2.Text.
+                    IO.File.Copy(_generatedOutputPath, SaveFileDialog1.FileName, True)
+                Else
+                    IO.File.WriteAllText(SaveFileDialog1.FileName, TextBox2.Text, New Text.UTF8Encoding(False))
+                End If
                 Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(Form1))
                     Using categoryScope As IDisposable = LogContext.PushProperty("Category", "IndexAnalyzer")
                         Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
@@ -742,10 +897,33 @@ Public Class Form1
 
     Private Sub Button4_Click(sender As Object, e As EventArgs) Handles Button4.Click
         If schema Is Nothing Then Exit Sub
-        Dim schfile As ltfsindex = schema.Clone()
-        If FileBrowser.ShowDialog(schfile) = DialogResult.OK Then
-            schema = schfile
+
+        'The native loader already keeps the schema records on disk.  Cloning
+        'that object here used to serialize the entire schema on the UI
+        'thread before the file picker could even be shown.  Lazy schemas can
+        'edit their selection bytes transactionally and only need a rollback
+        'when the dialog is canceled.
+        Dim editableSchema As ltfsindex = schema
+        Dim selectionTransaction As LazySelectionTransaction = schema.BeginSelectionTransaction()
+        If selectionTransaction Is Nothing Then
+            'Retain the old behavior for non-lazy/eager schemas.
+            editableSchema = schema.Clone()
         End If
+
+        Dim accepted As Boolean = False
+        Try
+            accepted = FileBrowser.ShowDialog(editableSchema) = DialogResult.OK
+        Finally
+            If selectionTransaction IsNot Nothing Then
+                If accepted Then
+                    selectionTransaction.Commit()
+                Else
+                    selectionTransaction.Rollback()
+                End If
+            ElseIf accepted Then
+                schema = editableSchema
+            End If
+        End Try
         LoadSchemaFile(False)
     End Sub
 
@@ -1065,12 +1243,22 @@ Public Class Form1
         If DisplayHelper.ShowInputDialog("Search kw", "Search", patt) <> DialogResult.OK Then Exit Sub
         If patt <> "" Then
             Enabled = False
-            Dim dir As String = TextBox1.Text.Substring(0, TextBox1.Text.LastIndexOf("\"))
+            Dim selectedPath As String = TextBox1.Text
+            Dim lastSeparator As Integer = selectedPath.LastIndexOf("\"c)
+            If lastSeparator < 0 Then
+                Enabled = True
+                Exit Sub
+            End If
+            Dim dir As String = selectedPath.Substring(0, lastSeparator)
             Dim infoText As New Text.StringBuilder
-            If Not IO.Directory.Exists(dir) Then Exit Sub
+            If Not IO.Directory.Exists(dir) Then
+                Enabled = True
+                Exit Sub
+            End If
             Dim f() As IO.FileInfo = New IO.DirectoryInfo(dir).GetFiles("*.schema")
-            Dim progmax As Integer = f.Length
+            Dim progmax As Integer = f.Length + 1
             Dim progval As Integer = 0
+            Dim mergeFinished As Integer = 0
             Dim mergedSchema As ltfsindex = Nothing
             Dim th As New Threading.Thread(
                 Sub()
@@ -1083,8 +1271,9 @@ Public Class Form1
                         End If
                         schema = mergedSchema
                     Catch ex As Exception
-                        LogFileOperationWarning("Merge", TextBox1.Text, ex)
+                        LogFileOperationWarning("Merge", selectedPath, ex)
                     Finally
+                        Threading.Interlocked.Exchange(mergeFinished, 1)
                         Invoke(Sub() Enabled = True)
                     End Try
                 End Sub) With {.IsBackground = True}
@@ -1092,7 +1281,7 @@ Public Class Form1
                 Sub()
                     While True
                         Threading.Thread.Sleep(200)
-                        Dim exitflag As Boolean = (progval >= progmax)
+                        Dim exitflag As Boolean = (progval >= progmax OrElse Threading.Interlocked.CompareExchange(mergeFinished, 0, 0) <> 0)
                         Invoke(
                             Sub()
                                 TextBox2.Text = "Search for " & patt & " in file "

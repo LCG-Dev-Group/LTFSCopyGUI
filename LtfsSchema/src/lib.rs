@@ -1,15 +1,43 @@
 #![allow(clippy::missing_safety_doc)]
 
+use memmap2::{Mmap, MmapOptions};
 use quick_xml::escape::{escape, unescape};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
+use rayon::slice::ParallelSliceMut;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
 use std::str;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn CompareStringEx(
+        locale_name: *const u16,
+        compare_flags: u32,
+        left: *const u16,
+        left_length: i32,
+        right: *const u16,
+        right_length: i32,
+        version_information: *mut c_void,
+        reserved: *mut c_void,
+        sort_version: isize,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+#[link(name = "shlwapi")]
+unsafe extern "system" {
+    fn StrCmpLogicalW(left: *const u16, right: *const u16) -> i32;
+}
 
 pub const LSC_OK: i32 = 0;
 pub const LSC_ERROR: i32 = -1;
@@ -36,6 +64,7 @@ const PRESENT_VOLUME_LOCK_STATE: u32 = 1 << 8;
 const PRESENT_HIGHEST_FILE_UID: u32 = 1 << 9;
 
 static LAST_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
+static MERGE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn last_error() -> &'static Mutex<String> {
     LAST_ERROR.get_or_init(|| Mutex::new(String::new()))
@@ -329,6 +358,23 @@ pub struct LscStoreFileIndexEntry {
     pub selection_index: i64,
 }
 
+// The index analyzer only needs the file name, byte length, and first tape
+// extent.  Keeping this ABI separate from LscFileInfo lets the backing-store
+// path avoid constructing xattrs, timestamps, and all remaining extents for
+// every file in a large schema.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LscStoreFileSummary {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub length: i64,
+    pub partition: u32,
+    pub reserved: u32,
+    pub start_block: i64,
+    pub byte_offset: i64,
+    pub byte_count: i64,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct LscStoreDirectoryIndexEntry {
@@ -338,6 +384,50 @@ pub struct LscStoreDirectoryIndexEntry {
     pub record_offset: i64,
     pub selection_index: i64,
 }
+
+pub const LSC_SEARCH_MATCH_DIRECTORY: u32 = 1;
+pub const LSC_SEARCH_MATCH_FILE: u32 = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LscStoreSearchResult {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub found: u32,
+    pub match_kind: u32,
+    pub parent_directory_record_offset: i64,
+    pub record_offset: i64,
+    pub record_length: i64,
+    pub file_index: i64,
+}
+
+pub type LscStoreSearchProgressCallback =
+    unsafe extern "system" fn(processed: u64, total: u64, user_data: *mut c_void);
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LscStoreTapeSortResult {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub file_count: u64,
+    pub partition_a_file_count: u64,
+    pub partition_b_file_count: u64,
+}
+
+pub type LscStoreTapeSortProgressCallback =
+    unsafe extern "system" fn(processed: u64, total: u64, user_data: *mut c_void);
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LscStoreDirectorySortResult {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub file_count: u64,
+    pub directory_count: u64,
+}
+
+pub type LscStoreDirectorySortProgressCallback =
+    unsafe extern "system" fn(processed: u64, total: u64, user_data: *mut c_void);
 
 #[derive(Default, Clone)]
 struct SchemaMetadata {
@@ -447,6 +537,43 @@ fn write_i64(output: &mut impl Write, value: i64) -> Result<(), String> {
     output
         .write_all(&value.to_le_bytes())
         .map_err(|error| error.to_string())
+}
+
+fn read_i64_at(bytes: &[u8], offset: usize, label: &str) -> Result<i64, String> {
+    let end = offset
+        .checked_add(8)
+        .ok_or_else(|| invalid(format!("{label} offset overflow")))?;
+    if end > bytes.len() {
+        return Err(invalid(format!("{label} is truncated")));
+    }
+    Ok(i64::from_le_bytes(
+        bytes[offset..end]
+            .try_into()
+            .map_err(|_| invalid(format!("invalid {label}")))?,
+    ))
+}
+
+fn write_i64_at(bytes: &mut [u8], offset: usize, value: i64, label: &str) -> Result<(), String> {
+    let end = offset
+        .checked_add(8)
+        .ok_or_else(|| invalid(format!("{label} offset overflow")))?;
+    if end > bytes.len() {
+        return Err(invalid(format!("{label} is truncated")));
+    }
+    bytes[offset..end].copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn rebase_offset(value: i64, base: i64, label: &str) -> Result<i64, String> {
+    if value == -1 {
+        return Ok(-1);
+    }
+    if value < -1 {
+        return Err(invalid(format!("invalid {label} offset")));
+    }
+    value
+        .checked_add(base)
+        .ok_or_else(|| invalid(format!("{label} offset overflow")))
 }
 
 fn write_nullable_string(output: &mut impl Write, value: Option<&str>) -> Result<(), String> {
@@ -733,6 +860,238 @@ impl StoreOutput {
             .checked_add(source.count)
             .ok_or_else(|| invalid("too many directories in merged schema"))?;
         Ok(())
+    }
+
+    fn append_merge_source(
+        &mut self,
+        source: &MergeSourceResult,
+    ) -> Result<(IndexChain, IndexChain), String> {
+        let file_records_base = self.file_records_position;
+        let directory_records_base = self.directory_records_position;
+        let file_index_base = i64::try_from(self.file_index_data.len())
+            .map_err(|_| invalid("file index is too large"))?;
+        let directory_index_base = i64::try_from(self.directory_index_data.len())
+            .map_err(|_| invalid("directory index is too large"))?;
+        let selection_base = i64::try_from(self.selection_count)
+            .map_err(|_| invalid("schema selection data is too large"))?;
+
+        if source.file_records_length < 0
+            || source.directory_records_length < 0
+            || source.file_index_length < 0
+            || source.directory_index_length < 0
+        {
+            return Err(invalid("invalid merge source backing file length"));
+        }
+
+        let mut source_file_records = File::open(&source.paths[0]).map_err(|error| {
+            format!(
+                "cannot open merge source file records {}: {error}",
+                source.paths[0].display()
+            )
+        })?;
+        let copied_file_records =
+            std::io::copy(&mut source_file_records, &mut self.file_records)
+                .map_err(|error| format!("cannot append merge source file records: {error}"))?;
+        if copied_file_records != source.file_records_length as u64 {
+            return Err(invalid("merge source file records changed while merging"));
+        }
+        self.file_records_position = self
+            .file_records_position
+            .checked_add(source.file_records_length)
+            .ok_or_else(|| invalid("file records are too large"))?;
+
+        let mut directory_records = std::fs::read(&source.paths[1]).map_err(|error| {
+            format!(
+                "cannot read merge source directory records {}: {error}",
+                source.paths[1].display()
+            )
+        })?;
+        if i64::try_from(directory_records.len())
+            .map_err(|_| invalid("merge source directory records are too large"))?
+            != source.directory_records_length
+        {
+            return Err(invalid(
+                "merge source directory records changed while merging",
+            ));
+        }
+
+        let source_directory_index = std::fs::read(&source.paths[3]).map_err(|error| {
+            format!(
+                "cannot read merge source directory index {}: {error}",
+                source.paths[3].display()
+            )
+        })?;
+        if source_directory_index.len() % DIRECTORY_INDEX_ENTRY_SIZE as usize != 0 {
+            return Err(invalid("merge source directory index is truncated"));
+        }
+        for entry in source_directory_index.chunks_exact(DIRECTORY_INDEX_ENTRY_SIZE as usize) {
+            let record_offset = read_i64_at(entry, 8, "merge source directory record offset")?;
+            let local_offset = usize::try_from(record_offset)
+                .map_err(|_| invalid("invalid merge source directory record offset"))?;
+            let end = local_offset
+                .checked_add(DIRECTORY_HEADER_SIZE as usize)
+                .ok_or_else(|| invalid("merge source directory record offset overflow"))?;
+            if end > directory_records.len() {
+                return Err(invalid("merge source directory record is truncated"));
+            }
+            let header = &mut directory_records[local_offset..end];
+            let magic = i32::from_le_bytes(
+                header[0..4]
+                    .try_into()
+                    .map_err(|_| invalid("invalid merge source directory header"))?,
+            );
+            let version = i32::from_le_bytes(
+                header[4..8]
+                    .try_into()
+                    .map_err(|_| invalid("invalid merge source directory header"))?,
+            );
+            if magic != DIRECTORY_MAGIC || version != DIRECTORY_VERSION {
+                return Err(invalid("invalid merge source directory header"));
+            }
+            let scalar_offset = read_i64_at(header, 8, "merge source scalar offset")?;
+            let file_index_offset = read_i64_at(header, 24, "merge source file index offset")?;
+            let directory_index_offset =
+                read_i64_at(header, 36, "merge source directory index offset")?;
+            write_i64_at(
+                header,
+                8,
+                rebase_offset(scalar_offset, directory_records_base, "directory scalar")?,
+                "merge directory scalar offset",
+            )?;
+            write_i64_at(
+                header,
+                24,
+                rebase_offset(file_index_offset, file_index_base, "file index")?,
+                "merge directory file index offset",
+            )?;
+            write_i64_at(
+                header,
+                36,
+                rebase_offset(
+                    directory_index_offset,
+                    directory_index_base,
+                    "directory index",
+                )?,
+                "merge directory index offset",
+            )?;
+        }
+        self.directory_records
+            .write_all(&directory_records)
+            .map_err(|error| format!("cannot append merge source directory records: {error}"))?;
+        self.directory_records_position = self
+            .directory_records_position
+            .checked_add(source.directory_records_length)
+            .ok_or_else(|| invalid("directory records are too large"))?;
+
+        let mut file_index = std::fs::read(&source.paths[2]).map_err(|error| {
+            format!(
+                "cannot read merge source file index {}: {error}",
+                source.paths[2].display()
+            )
+        })?;
+        if i64::try_from(file_index.len())
+            .map_err(|_| invalid("merge source file index is too large"))?
+            != source.file_index_length
+            || file_index.len() % FILE_INDEX_ENTRY_SIZE as usize != 0
+        {
+            return Err(invalid("merge source file index is truncated"));
+        }
+        for entry in file_index.chunks_exact_mut(FILE_INDEX_ENTRY_SIZE as usize) {
+            let next_offset = read_i64_at(entry, 0, "merge source file index next offset")?;
+            let record_offset = read_i64_at(entry, 8, "merge source file record offset")?;
+            let selection_index = read_i64_at(entry, 24, "merge source file selection index")?;
+            write_i64_at(
+                entry,
+                0,
+                rebase_offset(next_offset, file_index_base, "file index")?,
+                "merge file index next offset",
+            )?;
+            write_i64_at(
+                entry,
+                8,
+                rebase_offset(record_offset, file_records_base, "file record")?,
+                "merge file record offset",
+            )?;
+            write_i64_at(
+                entry,
+                24,
+                rebase_offset(selection_index, selection_base, "selection")?,
+                "merge file selection index",
+            )?;
+        }
+        self.file_index_data.extend_from_slice(&file_index);
+
+        let mut directory_index = source_directory_index;
+        if i64::try_from(directory_index.len())
+            .map_err(|_| invalid("merge source directory index is too large"))?
+            != source.directory_index_length
+        {
+            return Err(invalid(
+                "merge source directory index changed while merging",
+            ));
+        }
+        for entry in directory_index.chunks_exact_mut(DIRECTORY_INDEX_ENTRY_SIZE as usize) {
+            let next_offset = read_i64_at(entry, 0, "merge source directory index next offset")?;
+            let record_offset = read_i64_at(entry, 8, "merge source directory record offset")?;
+            let selection_index = read_i64_at(entry, 16, "merge source directory selection index")?;
+            write_i64_at(
+                entry,
+                0,
+                rebase_offset(next_offset, directory_index_base, "directory index")?,
+                "merge directory index next offset",
+            )?;
+            write_i64_at(
+                entry,
+                8,
+                rebase_offset(record_offset, directory_records_base, "directory record")?,
+                "merge directory record offset",
+            )?;
+            write_i64_at(
+                entry,
+                16,
+                rebase_offset(selection_index, selection_base, "selection")?,
+                "merge directory selection index",
+            )?;
+        }
+        self.directory_index_data
+            .extend_from_slice(&directory_index);
+
+        let selection = std::fs::read(&source.paths[4]).map_err(|error| {
+            format!(
+                "cannot read merge source selection {}: {error}",
+                source.paths[4].display()
+            )
+        })?;
+        if u64::try_from(selection.len()).map_err(|_| invalid("selection data is too large"))?
+            != source.selection_count
+        {
+            return Err(invalid("merge source selection data changed while merging"));
+        }
+        self.selection_data.extend_from_slice(&selection);
+        self.selection_count = self
+            .selection_count
+            .checked_add(source.selection_count)
+            .ok_or_else(|| invalid("schema selection data is too large"))?;
+
+        let files = IndexChain {
+            first: rebase_offset(source.files.first, file_index_base, "file index")?,
+            last: rebase_offset(source.files.last, file_index_base, "file index")?,
+            count: source.files.count,
+        };
+        let directories = IndexChain {
+            first: rebase_offset(
+                source.directories.first,
+                directory_index_base,
+                "directory index",
+            )?,
+            last: rebase_offset(
+                source.directories.last,
+                directory_index_base,
+                "directory index",
+            )?,
+            count: source.directories.count,
+        };
+        Ok((files, directories))
     }
 
     fn finish_directory(
@@ -1323,6 +1682,1670 @@ fn store_directory_index_entry(
     })
 }
 
+fn read_store_file_into(
+    file: &mut File,
+    offset: i64,
+    length: usize,
+    buffer: &mut Vec<u8>,
+    label: &str,
+) -> Result<(), String> {
+    if offset < 0 {
+        return Err(invalid(format!("invalid {label} offset")));
+    }
+    let offset = u64::try_from(offset).map_err(|_| invalid(format!("invalid {label} offset")))?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| format!("cannot seek {label} backing file: {error}"))?;
+    buffer.resize(length, 0);
+    file.read_exact(buffer)
+        .map_err(|error| format!("cannot read {label} backing file: {error}"))
+}
+
+struct StoreSearchReader<'a> {
+    file_records: MutexGuard<'a, File>,
+    directory_records: MutexGuard<'a, File>,
+    file_index: MutexGuard<'a, File>,
+    directory_index: MutexGuard<'a, File>,
+    header_buffer: Vec<u8>,
+    scalar_buffer: Vec<u8>,
+    index_buffer: Vec<u8>,
+    record_buffer: Vec<u8>,
+}
+
+impl<'a> StoreSearchReader<'a> {
+    fn new(context: &'a StoreContext) -> Result<Self, String> {
+        Ok(Self {
+            file_records: context
+                .file_records
+                .lock()
+                .map_err(|_| invalid("file records backing file is poisoned"))?,
+            directory_records: context
+                .directory_records
+                .lock()
+                .map_err(|_| invalid("directory records backing file is poisoned"))?,
+            file_index: context
+                .file_index
+                .lock()
+                .map_err(|_| invalid("file index backing file is poisoned"))?,
+            directory_index: context
+                .directory_index
+                .lock()
+                .map_err(|_| invalid("directory index backing file is poisoned"))?,
+            header_buffer: Vec::with_capacity(DIRECTORY_HEADER_SIZE as usize),
+            scalar_buffer: Vec::new(),
+            index_buffer: Vec::with_capacity(FILE_INDEX_ENTRY_SIZE as usize),
+            record_buffer: Vec::new(),
+        })
+    }
+
+    fn read_directory_header(
+        &mut self,
+        record_offset: i64,
+    ) -> Result<StoreDirectoryHeader, String> {
+        read_store_file_into(
+            &mut self.directory_records,
+            record_offset,
+            DIRECTORY_HEADER_SIZE as usize,
+            &mut self.header_buffer,
+            "directory header",
+        )?;
+        let mut cursor = StoreCursor::new(&self.header_buffer);
+        if cursor.i32()? != DIRECTORY_MAGIC || cursor.i32()? != DIRECTORY_VERSION {
+            return Err(invalid("invalid schema backing directory header"));
+        }
+        let scalar_offset = cursor.i64()?;
+        let scalar_length = i64::from(cursor.i32()?);
+        let _reserved = cursor.i32()?;
+        let file_index_offset = cursor.i64()?;
+        let file_count = i64::from(cursor.i32()?);
+        let directory_index_offset = cursor.i64()?;
+        let directory_count = i64::from(cursor.i32()?);
+        let total_file_count = cursor.i64()?;
+        let total_directory_count = cursor.i64()?;
+
+        let scalar_minimum = record_offset
+            .checked_add(DIRECTORY_HEADER_SIZE)
+            .ok_or_else(|| invalid("schema backing directory offset overflow"))?;
+        if scalar_offset < scalar_minimum || scalar_length < 0 {
+            return Err(invalid("invalid schema backing directory scalar record"));
+        }
+        if file_index_offset < -1
+            || directory_index_offset < -1
+            || file_count < 0
+            || directory_count < 0
+            || total_file_count < 0
+            || total_directory_count < 0
+        {
+            return Err(invalid(
+                "invalid schema backing directory counts or indexes",
+            ));
+        }
+        Ok(StoreDirectoryHeader {
+            scalar_offset,
+            scalar_length,
+            file_index_offset,
+            file_count,
+            directory_index_offset,
+            directory_count,
+            total_file_count,
+            total_directory_count,
+        })
+    }
+
+    fn read_directory_name(&mut self, header: &StoreDirectoryHeader) -> Result<String, String> {
+        read_store_file_into(
+            &mut self.directory_records,
+            header.scalar_offset,
+            read_store_length(header.scalar_length, "directory scalar record")?,
+            &mut self.scalar_buffer,
+            "directory scalar",
+        )?;
+        let mut cursor = StoreCursor::new(&self.scalar_buffer);
+        Ok(cursor.nullable_string()?.unwrap_or_default())
+    }
+
+    fn read_file_index_entry(&mut self, offset: i64) -> Result<LscStoreFileIndexEntry, String> {
+        read_store_file_into(
+            &mut self.file_index,
+            offset,
+            FILE_INDEX_ENTRY_SIZE as usize,
+            &mut self.index_buffer,
+            "file index",
+        )?;
+        let mut cursor = StoreCursor::new(&self.index_buffer);
+        Ok(LscStoreFileIndexEntry {
+            struct_size: std::mem::size_of::<LscStoreFileIndexEntry>() as u32,
+            abi_version: 1,
+            next_offset: cursor.i64()?,
+            record_offset: cursor.i64()?,
+            record_length: cursor.i64()?,
+            selection_index: cursor.i64()?,
+        })
+    }
+
+    fn read_directory_index_entry(
+        &mut self,
+        offset: i64,
+    ) -> Result<LscStoreDirectoryIndexEntry, String> {
+        read_store_file_into(
+            &mut self.directory_index,
+            offset,
+            DIRECTORY_INDEX_ENTRY_SIZE as usize,
+            &mut self.index_buffer,
+            "directory index",
+        )?;
+        let mut cursor = StoreCursor::new(&self.index_buffer);
+        Ok(LscStoreDirectoryIndexEntry {
+            struct_size: std::mem::size_of::<LscStoreDirectoryIndexEntry>() as u32,
+            abi_version: 1,
+            next_offset: cursor.i64()?,
+            record_offset: cursor.i64()?,
+            selection_index: cursor.i64()?,
+        })
+    }
+
+    fn read_file_name(&mut self, offset: i64, length: i64) -> Result<String, String> {
+        read_store_file_into(
+            &mut self.file_records,
+            offset,
+            read_store_length(length, "schema file record")?,
+            &mut self.record_buffer,
+            "file record",
+        )?;
+        parse_file_name_bytes(&self.record_buffer)
+    }
+}
+
+fn map_tape_sort_file(file: &Mutex<File>, label: &str) -> Result<Option<Mmap>, String> {
+    let file = file
+        .lock()
+        .map_err(|_| invalid(format!("{label} backing file is poisoned")))?;
+    let length = file
+        .metadata()
+        .map_err(|error| format!("cannot stat {label} backing file: {error}"))?
+        .len();
+    if length == 0 {
+        return Ok(None);
+    }
+    // SAFETY: the lazy backing files are immutable while native tape sort is
+    // running.  The mapping is kept alive for the duration of the reader.
+    unsafe { MmapOptions::new().map(&*file) }
+        .map(Some)
+        .map_err(|error| format!("cannot map {label} backing file: {error}"))
+}
+
+struct TapeSortReader {
+    file_records: Option<Mmap>,
+    directory_records: Option<Mmap>,
+    file_index: Option<Mmap>,
+    directory_index: Option<Mmap>,
+}
+
+impl TapeSortReader {
+    fn new(context: &StoreContext) -> Result<Self, String> {
+        Ok(Self {
+            file_records: map_tape_sort_file(&context.file_records, "file records")?,
+            directory_records: map_tape_sort_file(&context.directory_records, "directory records")?,
+            file_index: map_tape_sort_file(&context.file_index, "file index")?,
+            directory_index: map_tape_sort_file(&context.directory_index, "directory index")?,
+        })
+    }
+
+    fn slice<'a>(
+        map: &'a Option<Mmap>,
+        offset: i64,
+        length: i64,
+        label: &str,
+    ) -> Result<&'a [u8], String> {
+        if offset < 0 || length < 0 {
+            return Err(invalid(format!("invalid {label} range")));
+        }
+        let offset =
+            usize::try_from(offset).map_err(|_| invalid(format!("invalid {label} offset")))?;
+        let length =
+            usize::try_from(length).map_err(|_| invalid(format!("{label} is too large")))?;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| invalid(format!("{label} range overflow")))?;
+        let Some(map) = map.as_ref() else {
+            if length == 0 {
+                return Ok(&[]);
+            }
+            return Err(invalid(format!("{label} backing file is empty")));
+        };
+        if end > map.len() {
+            return Err(invalid(format!("{label} backing file is truncated")));
+        }
+        Ok(&map[offset..end])
+    }
+
+    fn read_directory_header(&self, record_offset: i64) -> Result<StoreDirectoryHeader, String> {
+        let bytes = Self::slice(
+            &self.directory_records,
+            record_offset,
+            DIRECTORY_HEADER_SIZE,
+            "directory header",
+        )?;
+        let mut cursor = StoreCursor::new(bytes);
+        if cursor.i32()? != DIRECTORY_MAGIC || cursor.i32()? != DIRECTORY_VERSION {
+            return Err(invalid("invalid schema backing directory header"));
+        }
+        let scalar_offset = cursor.i64()?;
+        let scalar_length = i64::from(cursor.i32()?);
+        let _reserved = cursor.i32()?;
+        let file_index_offset = cursor.i64()?;
+        let file_count = i64::from(cursor.i32()?);
+        let directory_index_offset = cursor.i64()?;
+        let directory_count = i64::from(cursor.i32()?);
+        let total_file_count = cursor.i64()?;
+        let total_directory_count = cursor.i64()?;
+        let scalar_minimum = record_offset
+            .checked_add(DIRECTORY_HEADER_SIZE)
+            .ok_or_else(|| invalid("schema backing directory offset overflow"))?;
+        if scalar_offset < scalar_minimum || scalar_length < 0 {
+            return Err(invalid("invalid schema backing directory scalar record"));
+        }
+        if file_index_offset < -1
+            || directory_index_offset < -1
+            || file_count < 0
+            || directory_count < 0
+            || total_file_count < 0
+            || total_directory_count < 0
+        {
+            return Err(invalid(
+                "invalid schema backing directory counts or indexes",
+            ));
+        }
+        Ok(StoreDirectoryHeader {
+            scalar_offset,
+            scalar_length,
+            file_index_offset,
+            file_count,
+            directory_index_offset,
+            directory_count,
+            total_file_count,
+            total_directory_count,
+        })
+    }
+
+    fn read_directory_name(&self, header: &StoreDirectoryHeader) -> Result<String, String> {
+        let bytes = Self::slice(
+            &self.directory_records,
+            header.scalar_offset,
+            header.scalar_length,
+            "directory scalar",
+        )?;
+        let mut cursor = StoreCursor::new(bytes);
+        Ok(cursor.nullable_string()?.unwrap_or_default())
+    }
+
+    fn read_file_index_entry(&self, offset: i64) -> Result<LscStoreFileIndexEntry, String> {
+        let bytes = Self::slice(
+            &self.file_index,
+            offset,
+            FILE_INDEX_ENTRY_SIZE,
+            "file index",
+        )?;
+        let mut cursor = StoreCursor::new(bytes);
+        Ok(LscStoreFileIndexEntry {
+            struct_size: std::mem::size_of::<LscStoreFileIndexEntry>() as u32,
+            abi_version: 1,
+            next_offset: cursor.i64()?,
+            record_offset: cursor.i64()?,
+            record_length: cursor.i64()?,
+            selection_index: cursor.i64()?,
+        })
+    }
+
+    fn read_directory_index_entry(
+        &self,
+        offset: i64,
+    ) -> Result<LscStoreDirectoryIndexEntry, String> {
+        let bytes = Self::slice(
+            &self.directory_index,
+            offset,
+            DIRECTORY_INDEX_ENTRY_SIZE,
+            "directory index",
+        )?;
+        let mut cursor = StoreCursor::new(bytes);
+        Ok(LscStoreDirectoryIndexEntry {
+            struct_size: std::mem::size_of::<LscStoreDirectoryIndexEntry>() as u32,
+            abi_version: 1,
+            next_offset: cursor.i64()?,
+            record_offset: cursor.i64()?,
+            selection_index: cursor.i64()?,
+        })
+    }
+
+    fn read_file_summary(&self, offset: i64, length: i64) -> Result<ParsedFileSummary, String> {
+        let bytes = Self::slice(&self.file_records, offset, length, "file record")?;
+        parse_file_summary_bytes(bytes)
+    }
+}
+
+const TAPE_SORT_CHUNK_SIZE: usize = 262_144;
+const TAPE_SORT_PROGRESS_INTERVAL: u64 = 4096;
+
+struct TapeSortEntry {
+    partition: u8,
+    start_block: i64,
+    length: i64,
+    path: String,
+    sequence: u64,
+}
+
+impl TapeSortEntry {
+    fn compare_key(left: &Self, right: &Self) -> Ordering {
+        let left_partition = u8::from(left.partition != 0);
+        let right_partition = u8::from(right.partition != 0);
+        left_partition
+            .cmp(&right_partition)
+            .then_with(|| left.start_block.cmp(&right.start_block))
+            // VB's StringComparer.Ordinal compares UTF-16 code units.  Use
+            // the same ordering here instead of Rust's Unicode scalar order
+            // so the native fast path emits exactly the same tape order.
+            .then_with(|| left.path.encode_utf16().cmp(right.path.encode_utf16()))
+            .then_with(|| left.sequence.cmp(&right.sequence))
+    }
+}
+
+struct TapeSortRunCursor {
+    reader: BufReader<File>,
+}
+
+impl TapeSortRunCursor {
+    fn new(path: &Path) -> Result<Self, String> {
+        let file = File::open(path)
+            .map_err(|error| format!("cannot open tape sort run {}: {error}", path.display()))?;
+        Ok(Self {
+            reader: BufReader::with_capacity(1024 * 1024, file),
+        })
+    }
+
+    fn next(&mut self) -> Result<Option<TapeSortEntry>, String> {
+        read_tape_sort_entry(&mut self.reader)
+    }
+}
+
+struct TapeSortHeapItem {
+    entry: TapeSortEntry,
+    run_id: usize,
+}
+
+impl PartialEq for TapeSortHeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.run_id == other.run_id
+            && TapeSortEntry::compare_key(&self.entry, &other.entry) == Ordering::Equal
+    }
+}
+
+impl Eq for TapeSortHeapItem {}
+
+impl PartialOrd for TapeSortHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TapeSortHeapItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap is a max heap.  Reverse the key so the smallest tape
+        // entry is returned first.
+        TapeSortEntry::compare_key(&other.entry, &self.entry)
+            .then_with(|| other.run_id.cmp(&self.run_id))
+    }
+}
+
+fn write_tape_sort_u32<W: Write>(writer: &mut W, mut value: u32) -> Result<(), String> {
+    // BinaryWriter.Write(String) uses a 7-bit encoded byte length.  Keeping
+    // the run format compatible lets the existing VB output reader consume
+    // the native result without another conversion pass.
+    while value >= 0x80 {
+        writer
+            .write_all(&[(value as u8) | 0x80])
+            .map_err(|error| error.to_string())?;
+        value >>= 7;
+    }
+    writer
+        .write_all(&[value as u8])
+        .map_err(|error| error.to_string())
+}
+
+fn write_tape_sort_entry<W: Write>(writer: &mut W, entry: &TapeSortEntry) -> Result<(), String> {
+    writer
+        .write_all(&[entry.partition])
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_all(&entry.start_block.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_all(&entry.length.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    let path = entry.path.as_bytes();
+    let path_length =
+        u32::try_from(path.len()).map_err(|_| invalid("tape sort path is too long to write"))?;
+    write_tape_sort_u32(writer, path_length)?;
+    writer.write_all(path).map_err(|error| error.to_string())
+}
+
+fn read_tape_sort_u32<R: Read>(reader: &mut R) -> Result<u32, String> {
+    let mut result = 0u32;
+    for shift in (0..35).step_by(7) {
+        let mut byte = [0u8; 1];
+        reader
+            .read_exact(&mut byte)
+            .map_err(|error| format!("cannot read tape sort path length: {error}"))?;
+        let value = u32::from(byte[0] & 0x7f);
+        result |= value
+            .checked_shl(shift)
+            .ok_or_else(|| invalid("invalid tape sort path length"))?;
+        if byte[0] & 0x80 == 0 {
+            return Ok(result);
+        }
+    }
+    Err(invalid("invalid tape sort path length"))
+}
+
+fn read_tape_sort_entry<R: Read>(reader: &mut R) -> Result<Option<TapeSortEntry>, String> {
+    let mut partition = [0u8; 1];
+    match reader.read(&mut partition) {
+        Ok(0) => return Ok(None),
+        Ok(1) => {}
+        Ok(_) => unreachable!("one-byte tape sort read returned more than one byte"),
+        Err(error) => return Err(format!("cannot read tape sort partition: {error}")),
+    }
+
+    let mut block = [0u8; 8];
+    reader
+        .read_exact(&mut block)
+        .map_err(|error| format!("cannot read tape sort start block: {error}"))?;
+    let mut length = [0u8; 8];
+    reader
+        .read_exact(&mut length)
+        .map_err(|error| format!("cannot read tape sort file length: {error}"))?;
+    let path_length = read_tape_sort_u32(reader)? as usize;
+    let mut path = vec![0u8; path_length];
+    reader
+        .read_exact(&mut path)
+        .map_err(|error| format!("cannot read tape sort path: {error}"))?;
+    let path = String::from_utf8(path).map_err(|_| invalid("tape sort path is not valid UTF-8"))?;
+
+    Ok(Some(TapeSortEntry {
+        partition: partition[0],
+        start_block: i64::from_le_bytes(block),
+        length: i64::from_le_bytes(length),
+        path,
+        // The run format does not need to persist a tie-breaker.  The heap
+        // uses the run id for equal keys during the final merge.
+        sequence: 0,
+    }))
+}
+
+fn tape_sort_run_path(output_path: &Path) -> PathBuf {
+    let sequence = MERGE_TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let name = format!(
+        "ltfscopy_tape_sort_{}_{}_{}.run",
+        std::process::id(),
+        timestamp,
+        sequence
+    );
+    output_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(name)
+}
+
+fn merge_tape_sort_runs(run_paths: &[PathBuf], output_path: &Path) -> Result<(), String> {
+    if run_paths.is_empty() {
+        File::create(output_path)
+            .map_err(|error| format!("cannot create tape sort output: {error}"))?;
+        return Ok(());
+    }
+
+    if run_paths.len() == 1 {
+        // The collection phase already produced a complete sorted run.  A
+        // rename avoids reading and writing the entire result a second time.
+        let _ = std::fs::remove_file(output_path);
+        if std::fs::rename(&run_paths[0], output_path).is_ok() {
+            return Ok(());
+        }
+    }
+
+    let output = File::create(output_path)
+        .map_err(|error| format!("cannot create tape sort output: {error}"))?;
+    let mut writer = BufWriter::with_capacity(1024 * 1024, output);
+    let mut cursors = Vec::with_capacity(run_paths.len());
+    let mut heap = BinaryHeap::with_capacity(run_paths.len());
+    for (run_id, path) in run_paths.iter().enumerate() {
+        let mut cursor = TapeSortRunCursor::new(path)?;
+        if let Some(entry) = cursor.next()? {
+            heap.push(TapeSortHeapItem { entry, run_id });
+        }
+        cursors.push(cursor);
+    }
+
+    while let Some(item) = heap.pop() {
+        write_tape_sort_entry(&mut writer, &item.entry)?;
+        if let Some(entry) = cursors[item.run_id].next()? {
+            heap.push(TapeSortHeapItem {
+                entry,
+                run_id: item.run_id,
+            });
+        }
+    }
+    writer.flush().map_err(|error| error.to_string())
+}
+
+struct TapeSortDirectoryFrame {
+    path: String,
+    next_file_offset: i64,
+    remaining_files: u64,
+    next_directory_offset: i64,
+    remaining_directories: u64,
+}
+
+fn tape_sort_directory_frame(
+    header: &StoreDirectoryHeader,
+    path: String,
+) -> Result<TapeSortDirectoryFrame, String> {
+    Ok(TapeSortDirectoryFrame {
+        path,
+        next_file_offset: header.file_index_offset,
+        remaining_files: u64::try_from(header.file_count)
+            .map_err(|_| invalid("invalid tape sort file count"))?,
+        next_directory_offset: header.directory_index_offset,
+        remaining_directories: u64::try_from(header.directory_count)
+            .map_err(|_| invalid("invalid tape sort directory count"))?,
+    })
+}
+
+fn tape_sort_child_path(parent: &str, name: &str) -> String {
+    // This deliberately mirrors Form1's existing `parent & name & "\\"`
+    // behavior, including the trailing slash for an empty directory name.
+    let mut result = String::with_capacity(parent.len() + name.len() + 1);
+    result.push_str(parent);
+    result.push_str(name);
+    result.push('\\');
+    result
+}
+
+fn tape_sort_file_path(parent: &str, name: &str) -> String {
+    let mut result = String::with_capacity(parent.len() + name.len());
+    result.push_str(parent);
+    result.push_str(name);
+    result
+}
+
+struct TapeSortCollectionState<'a> {
+    entries: Vec<TapeSortEntry>,
+    run_paths: Vec<PathBuf>,
+    output_path: &'a Path,
+    total: u64,
+    processed: u64,
+    selected_count: u64,
+    partition_a_count: u64,
+    partition_b_count: u64,
+    callback: Option<LscStoreTapeSortProgressCallback>,
+    user_data: *mut c_void,
+}
+
+impl<'a> TapeSortCollectionState<'a> {
+    fn new(
+        output_path: &'a Path,
+        total: u64,
+        callback: Option<LscStoreTapeSortProgressCallback>,
+        user_data: *mut c_void,
+    ) -> Self {
+        Self {
+            entries: Vec::with_capacity(TAPE_SORT_CHUNK_SIZE),
+            run_paths: Vec::new(),
+            output_path,
+            total,
+            processed: 0,
+            selected_count: 0,
+            partition_a_count: 0,
+            partition_b_count: 0,
+            callback,
+            user_data,
+        }
+    }
+
+    fn notify(&self) {
+        if let Some(callback) = self.callback {
+            if self.processed == 1
+                || self.processed % TAPE_SORT_PROGRESS_INTERVAL == 0
+                || self.processed >= self.total
+            {
+                // SAFETY: the callback and user data remain valid for this
+                // synchronous native operation.
+                unsafe { callback(self.processed, self.total, self.user_data) };
+            }
+        }
+    }
+
+    fn visit_file(
+        &mut self,
+        reader: &TapeSortReader,
+        selection: &[u8],
+        parent_path: &str,
+        entry: LscStoreFileIndexEntry,
+    ) -> Result<(), String> {
+        self.processed = self.processed.saturating_add(1);
+        self.notify();
+
+        let selected = if entry.selection_index < 0 {
+            true
+        } else {
+            usize::try_from(entry.selection_index)
+                .ok()
+                .and_then(|index| selection.get(index))
+                .map(|value| *value != 0)
+                .unwrap_or(true)
+        };
+        if !selected {
+            return Ok(());
+        }
+
+        let summary = reader.read_file_summary(entry.record_offset, entry.record_length)?;
+        let partition = u8::try_from(summary.info.partition)
+            .map_err(|_| invalid("invalid tape sort partition label"))?;
+        if partition == 0 {
+            self.partition_a_count = self.partition_a_count.saturating_add(1);
+        } else {
+            self.partition_b_count = self.partition_b_count.saturating_add(1);
+        }
+        self.selected_count = self.selected_count.saturating_add(1);
+        let sequence = self.selected_count;
+        self.entries.push(TapeSortEntry {
+            partition,
+            start_block: summary.info.start_block,
+            length: summary.info.length,
+            path: tape_sort_file_path(parent_path, &summary.name),
+            sequence,
+        });
+        if self.entries.len() >= TAPE_SORT_CHUNK_SIZE {
+            self.flush_run()?;
+        }
+        Ok(())
+    }
+
+    fn flush_run(&mut self) -> Result<(), String> {
+        if self.entries.is_empty() {
+            return Ok(());
+        }
+        self.entries
+            .par_sort_unstable_by(TapeSortEntry::compare_key);
+        let path = tape_sort_run_path(self.output_path);
+        let file = File::create(&path)
+            .map_err(|error| format!("cannot create tape sort run {}: {error}", path.display()))?;
+        self.run_paths.push(path);
+        let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+        for entry in &self.entries {
+            write_tape_sort_entry(&mut writer, entry)?;
+        }
+        writer.flush().map_err(|error| error.to_string())?;
+        self.entries.clear();
+        Ok(())
+    }
+}
+
+fn collect_tape_sort_directory(
+    reader: &TapeSortReader,
+    directory_offset: i64,
+    path: String,
+    selection: &[u8],
+    state: &mut TapeSortCollectionState<'_>,
+) -> Result<(), String> {
+    let header = reader.read_directory_header(directory_offset)?;
+    let mut frames = vec![tape_sort_directory_frame(&header, path)?];
+    while !frames.is_empty() {
+        let top = frames.len() - 1;
+        if frames[top].remaining_files > 0 {
+            let index_offset = frames[top].next_file_offset;
+            let parent_path = frames[top].path.clone();
+            let entry = reader.read_file_index_entry(index_offset)?;
+            frames[top].next_file_offset = entry.next_offset;
+            frames[top].remaining_files -= 1;
+            state.visit_file(reader, selection, &parent_path, entry)?;
+            continue;
+        }
+
+        if frames[top].remaining_directories > 0 {
+            let index_offset = frames[top].next_directory_offset;
+            let entry = reader.read_directory_index_entry(index_offset)?;
+            frames[top].next_directory_offset = entry.next_offset;
+            frames[top].remaining_directories -= 1;
+            let child_header = reader.read_directory_header(entry.record_offset)?;
+            let child_name = reader.read_directory_name(&child_header)?;
+            let child_path = tape_sort_child_path(&frames[top].path, &child_name);
+            frames.push(tape_sort_directory_frame(&child_header, child_path)?);
+            continue;
+        }
+
+        frames.pop();
+    }
+    Ok(())
+}
+
+fn tape_sort_total_files(
+    reader: &TapeSortReader,
+    root_file_index_offset: i64,
+    root_file_count: u64,
+    root_directory_index_offset: i64,
+    root_directory_count: u64,
+) -> Result<u64, String> {
+    if root_file_count > 0 && root_file_index_offset < 0 {
+        return Err(invalid("invalid tape sort root file index"));
+    }
+    if root_directory_count > 0 && root_directory_index_offset < 0 {
+        return Err(invalid("invalid tape sort root directory index"));
+    }
+
+    let mut total = root_file_count;
+    let mut index_offset = root_directory_index_offset;
+    for _ in 0..root_directory_count {
+        if index_offset < 0 {
+            return Err(invalid("invalid tape sort root directory index chain"));
+        }
+        let entry = reader.read_directory_index_entry(index_offset)?;
+        let header = reader.read_directory_header(entry.record_offset)?;
+        let directory_total = u64::try_from(header.total_file_count)
+            .map_err(|_| invalid("invalid tape sort directory file count"))?;
+        total = total
+            .checked_add(directory_total)
+            .ok_or_else(|| invalid("tape sort file count overflow"))?;
+        index_offset = entry.next_offset;
+    }
+    Ok(total)
+}
+
+fn collect_tape_sort_roots(
+    reader: &TapeSortReader,
+    root_file_index_offset: i64,
+    root_file_count: u64,
+    root_directory_index_offset: i64,
+    root_directory_count: u64,
+    selection: &[u8],
+    state: &mut TapeSortCollectionState<'_>,
+) -> Result<(), String> {
+    let mut file_index_offset = root_file_index_offset;
+    for _ in 0..root_file_count {
+        if file_index_offset < 0 {
+            return Err(invalid("invalid tape sort root file index chain"));
+        }
+        let entry = reader.read_file_index_entry(file_index_offset)?;
+        file_index_offset = entry.next_offset;
+        state.visit_file(reader, selection, "", entry)?;
+    }
+
+    let mut directory_index_offset = root_directory_index_offset;
+    for _ in 0..root_directory_count {
+        if directory_index_offset < 0 {
+            return Err(invalid("invalid tape sort root directory index chain"));
+        }
+        let entry = reader.read_directory_index_entry(directory_index_offset)?;
+        directory_index_offset = entry.next_offset;
+        // The schema root directory is a container and is intentionally not
+        // included in the generated path, matching Form1's existing logic.
+        collect_tape_sort_directory(reader, entry.record_offset, String::new(), selection, state)?;
+    }
+    state.flush_run()
+}
+
+fn sort_tape_files(
+    context: &StoreContext,
+    root_file_index_offset: i64,
+    root_file_count: u64,
+    root_directory_index_offset: i64,
+    root_directory_count: u64,
+    selection_path: &Path,
+    output_path: &Path,
+    callback: Option<LscStoreTapeSortProgressCallback>,
+    user_data: *mut c_void,
+) -> Result<LscStoreTapeSortResult, String> {
+    let selection = std::fs::read(selection_path).map_err(|error| {
+        format!(
+            "cannot read schema selection backing file {}: {error}",
+            selection_path.display()
+        )
+    })?;
+    let reader = TapeSortReader::new(context)?;
+    let total = tape_sort_total_files(
+        &reader,
+        root_file_index_offset,
+        root_file_count,
+        root_directory_index_offset,
+        root_directory_count,
+    )?;
+    let mut state = TapeSortCollectionState::new(output_path, total, callback, user_data);
+    let result = (|| -> Result<LscStoreTapeSortResult, String> {
+        collect_tape_sort_roots(
+            &reader,
+            root_file_index_offset,
+            root_file_count,
+            root_directory_index_offset,
+            root_directory_count,
+            &selection,
+            &mut state,
+        )?;
+        state.notify();
+        merge_tape_sort_runs(&state.run_paths, output_path)?;
+        Ok(LscStoreTapeSortResult {
+            struct_size: std::mem::size_of::<LscStoreTapeSortResult>() as u32,
+            abi_version: 1,
+            file_count: state.selected_count,
+            partition_a_file_count: state.partition_a_count,
+            partition_b_file_count: state.partition_b_count,
+        })
+    })();
+    for path in &state.run_paths {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+const DIRECTORY_SORT_MODE_LOGICAL: u32 = 1;
+const DIRECTORY_SORT_MODE_CURRENT_CULTURE: u32 = 2;
+const DIRECTORY_SORT_CHUNK_SIZE: usize = 65_536;
+const DIRECTORY_SORT_PROGRESS_INTERVAL: u64 = 4096;
+
+struct DirectorySortComparer {
+    mode: u32,
+    locale_name: Vec<u16>,
+}
+
+impl DirectorySortComparer {
+    fn new(mode: u32, locale_name: String) -> Result<Self, String> {
+        if mode != DIRECTORY_SORT_MODE_LOGICAL && mode != DIRECTORY_SORT_MODE_CURRENT_CULTURE {
+            return Err(invalid("invalid directory sort mode"));
+        }
+        if locale_name.contains('\0') {
+            return Err(invalid("invalid directory sort locale"));
+        }
+        let mut locale_name = locale_name.encode_utf16().collect::<Vec<_>>();
+        // An empty locale name is the Windows invariant locale.  Keep a
+        // non-null empty UTF-16 string so CompareStringEx can distinguish it
+        // from a null system-default locale.
+        locale_name.push(0);
+        Ok(Self { mode, locale_name })
+    }
+
+    fn compare_names(&self, left: &[u16], right: &[u16]) -> Ordering {
+        #[cfg(windows)]
+        {
+            if self.mode == DIRECTORY_SORT_MODE_LOGICAL {
+                // SAFETY: both keys are valid, NUL-terminated UTF-16 strings
+                // owned by their entries and remain alive for this call.
+                return unsafe { StrCmpLogicalW(left.as_ptr(), right.as_ptr()) }.cmp(&0);
+            }
+
+            let locale = self.locale_name.as_ptr();
+            let left_length = i32::try_from(left.len().saturating_sub(1)).unwrap_or(i32::MAX);
+            let right_length = i32::try_from(right.len().saturating_sub(1)).unwrap_or(i32::MAX);
+            // SAFETY: all pointers refer to valid UTF-16 buffers for the
+            // specified lengths; the optional version/reserved arguments are
+            // null as required by CompareStringEx.
+            let result = unsafe {
+                CompareStringEx(
+                    locale,
+                    0,
+                    left.as_ptr(),
+                    left_length,
+                    right.as_ptr(),
+                    right_length,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                )
+            };
+            return match result {
+                1 => Ordering::Less,
+                2 => Ordering::Equal,
+                3 => Ordering::Greater,
+                _ => left.cmp(right),
+            };
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = self;
+            left.cmp(right)
+        }
+    }
+
+    fn compare(&self, left: &DirectorySortEntry, right: &DirectorySortEntry) -> Ordering {
+        self.compare_names(&left.name_key, &right.name_key)
+            .then_with(|| left.sequence.cmp(&right.sequence))
+    }
+}
+
+struct DirectorySortEntry {
+    record_offset: i64,
+    record_length: i64,
+    selection_index: i64,
+    name: String,
+    name_key: Vec<u16>,
+    sequence: u64,
+}
+
+impl DirectorySortEntry {
+    fn new(
+        record_offset: i64,
+        record_length: i64,
+        selection_index: i64,
+        name: String,
+        sequence: u64,
+    ) -> Self {
+        let mut name_key = name.encode_utf16().collect::<Vec<_>>();
+        name_key.push(0);
+        Self {
+            record_offset,
+            record_length,
+            selection_index,
+            name,
+            name_key,
+            sequence,
+        }
+    }
+}
+
+fn directory_sort_run_path(output_path: &Path, is_file: bool) -> PathBuf {
+    let sequence = MERGE_TEMP_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let kind = if is_file { "file" } else { "directory" };
+    output_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            "ltfscopy_directory_sort_{}_{}_{}_{}.run",
+            std::process::id(),
+            timestamp,
+            sequence,
+            kind
+        ))
+}
+
+fn write_directory_sort_entry<W: Write>(
+    writer: &mut W,
+    entry: &DirectorySortEntry,
+) -> Result<(), String> {
+    writer
+        .write_all(&entry.record_offset.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_all(&entry.record_length.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_all(&entry.selection_index.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_all(&entry.sequence.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    let name = entry.name.as_bytes();
+    let name_length =
+        u32::try_from(name.len()).map_err(|_| invalid("directory sort name is too long"))?;
+    write_tape_sort_u32(writer, name_length)?;
+    writer.write_all(name).map_err(|error| error.to_string())
+}
+
+fn read_directory_sort_i64<R: Read>(reader: &mut R) -> Result<Option<i64>, String> {
+    let mut first = [0u8; 1];
+    match reader.read(&mut first) {
+        Ok(0) => return Ok(None),
+        Ok(1) => {}
+        Ok(_) => unreachable!("one-byte directory sort read returned more than one byte"),
+        Err(error) => return Err(format!("cannot read directory sort entry: {error}")),
+    }
+    let mut bytes = [0u8; 8];
+    bytes[0] = first[0];
+    reader
+        .read_exact(&mut bytes[1..])
+        .map_err(|error| format!("cannot read directory sort record offset: {error}"))?;
+    Ok(Some(i64::from_le_bytes(bytes)))
+}
+
+fn read_directory_sort_entry<R: Read>(
+    reader: &mut R,
+) -> Result<Option<DirectorySortEntry>, String> {
+    let Some(record_offset) = read_directory_sort_i64(reader)? else {
+        return Ok(None);
+    };
+    let mut record_length = [0u8; 8];
+    reader
+        .read_exact(&mut record_length)
+        .map_err(|error| format!("cannot read directory sort record length: {error}"))?;
+    let mut selection_index = [0u8; 8];
+    reader
+        .read_exact(&mut selection_index)
+        .map_err(|error| format!("cannot read directory sort selection index: {error}"))?;
+    let mut sequence = [0u8; 8];
+    reader
+        .read_exact(&mut sequence)
+        .map_err(|error| format!("cannot read directory sort sequence: {error}"))?;
+    let name_length = read_tape_sort_u32(reader)? as usize;
+    let mut name = vec![0u8; name_length];
+    reader
+        .read_exact(&mut name)
+        .map_err(|error| format!("cannot read directory sort name: {error}"))?;
+    let name =
+        String::from_utf8(name).map_err(|_| invalid("directory sort name is not valid UTF-8"))?;
+    Ok(Some(DirectorySortEntry::new(
+        record_offset,
+        i64::from_le_bytes(record_length),
+        i64::from_le_bytes(selection_index),
+        name,
+        u64::from_le_bytes(sequence),
+    )))
+}
+
+struct DirectorySortRunCursor {
+    reader: BufReader<File>,
+}
+
+impl DirectorySortRunCursor {
+    fn new(path: &Path) -> Result<Self, String> {
+        let file = File::open(path).map_err(|error| {
+            format!("cannot open directory sort run {}: {error}", path.display())
+        })?;
+        Ok(Self {
+            reader: BufReader::with_capacity(1024 * 1024, file),
+        })
+    }
+
+    fn next(&mut self) -> Result<Option<DirectorySortEntry>, String> {
+        read_directory_sort_entry(&mut self.reader)
+    }
+}
+
+struct DirectorySortHeapItem {
+    entry: DirectorySortEntry,
+    run_id: usize,
+    comparer: Arc<DirectorySortComparer>,
+}
+
+impl PartialEq for DirectorySortHeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.run_id == other.run_id
+            && self.comparer.compare(&self.entry, &other.entry) == Ordering::Equal
+    }
+}
+
+impl Eq for DirectorySortHeapItem {}
+
+impl PartialOrd for DirectorySortHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DirectorySortHeapItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap is a max heap.  Reverse the name ordering so the
+        // smallest child is returned first.
+        self.comparer
+            .compare(&other.entry, &self.entry)
+            .then_with(|| other.run_id.cmp(&self.run_id))
+    }
+}
+
+struct DirectorySortProgress {
+    processed: u64,
+    total: u64,
+    callback: Option<LscStoreDirectorySortProgressCallback>,
+    user_data: *mut c_void,
+}
+
+impl DirectorySortProgress {
+    fn new(
+        total: u64,
+        callback: Option<LscStoreDirectorySortProgressCallback>,
+        user_data: *mut c_void,
+    ) -> Self {
+        Self {
+            processed: 0,
+            total,
+            callback,
+            user_data,
+        }
+    }
+
+    fn visit(&mut self) {
+        self.processed = self.processed.saturating_add(1);
+        if let Some(callback) = self.callback {
+            if self.processed == 1
+                || self.processed % DIRECTORY_SORT_PROGRESS_INTERVAL == 0
+                || self.processed >= self.total
+            {
+                // SAFETY: the callback and user data remain valid for this
+                // synchronous native operation.
+                unsafe { callback(self.processed, self.total, self.user_data) };
+            }
+        }
+    }
+}
+
+fn flush_directory_sort_run(
+    entries: &mut Vec<DirectorySortEntry>,
+    output_path: &Path,
+    is_file: bool,
+    comparer: &DirectorySortComparer,
+    run_paths: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    entries.par_sort_unstable_by(|left, right| comparer.compare(left, right));
+    let path = directory_sort_run_path(output_path, is_file);
+    let result = (|| -> Result<(), String> {
+        let file = File::create(&path).map_err(|error| {
+            format!(
+                "cannot create directory sort run {}: {error}",
+                path.display()
+            )
+        })?;
+        let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+        for entry in entries.iter() {
+            write_directory_sort_entry(&mut writer, entry)?;
+        }
+        writer.flush().map_err(|error| error.to_string())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        run_paths.push(path);
+        entries.clear();
+    }
+    result
+}
+
+fn collect_directory_sort_runs(
+    reader: &TapeSortReader,
+    first_index_offset: i64,
+    item_count: u64,
+    is_file: bool,
+    output_path: &Path,
+    comparer: &DirectorySortComparer,
+    progress: &mut DirectorySortProgress,
+    run_paths: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    if item_count == 0 {
+        return Ok(());
+    }
+    if first_index_offset < 0 {
+        return Err(invalid("invalid lazy schema index chain"));
+    }
+
+    let mut index_offset = first_index_offset;
+    let mut entries = Vec::with_capacity(DIRECTORY_SORT_CHUNK_SIZE);
+    for sequence in 0..item_count {
+        if index_offset < 0 {
+            return Err(invalid("invalid lazy schema index chain"));
+        }
+        let (next_offset, record_offset, record_length, selection_index, name) = if is_file {
+            let entry = reader.read_file_index_entry(index_offset)?;
+            let summary = reader.read_file_summary(entry.record_offset, entry.record_length)?;
+            (
+                entry.next_offset,
+                entry.record_offset,
+                entry.record_length,
+                entry.selection_index,
+                summary.name,
+            )
+        } else {
+            let entry = reader.read_directory_index_entry(index_offset)?;
+            let child_header = reader.read_directory_header(entry.record_offset)?;
+            let name = reader.read_directory_name(&child_header)?;
+            (
+                entry.next_offset,
+                entry.record_offset,
+                0,
+                entry.selection_index,
+                name,
+            )
+        };
+        progress.visit();
+        entries.push(DirectorySortEntry::new(
+            record_offset,
+            record_length,
+            selection_index,
+            name,
+            sequence,
+        ));
+        if entries.len() >= DIRECTORY_SORT_CHUNK_SIZE {
+            flush_directory_sort_run(&mut entries, output_path, is_file, comparer, run_paths)?;
+        }
+        index_offset = next_offset;
+    }
+    flush_directory_sort_run(&mut entries, output_path, is_file, comparer, run_paths)
+}
+
+fn write_sorted_directory_index_entry<W: Write>(
+    writer: &mut W,
+    entry: &DirectorySortEntry,
+    next_offset: i64,
+    is_file: bool,
+) -> Result<(), String> {
+    writer
+        .write_all(&next_offset.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_all(&entry.record_offset.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    if is_file {
+        writer
+            .write_all(&entry.record_length.to_le_bytes())
+            .map_err(|error| error.to_string())?;
+    }
+    writer
+        .write_all(&entry.selection_index.to_le_bytes())
+        .map_err(|error| error.to_string())
+}
+
+fn merge_directory_sort_runs(
+    run_paths: &[PathBuf],
+    output_path: &Path,
+    target_index_offset: i64,
+    item_count: u64,
+    is_file: bool,
+    comparer: Arc<DirectorySortComparer>,
+) -> Result<(), String> {
+    if target_index_offset < 0 {
+        return Err(invalid("invalid lazy schema target index offset"));
+    }
+    let entry_size = if is_file {
+        FILE_INDEX_ENTRY_SIZE
+    } else {
+        DIRECTORY_INDEX_ENTRY_SIZE
+    };
+    let output = File::create(output_path).map_err(|error| {
+        format!(
+            "cannot create sorted directory index {}: {error}",
+            output_path.display()
+        )
+    })?;
+    let mut writer = BufWriter::with_capacity(1024 * 1024, output);
+    let mut cursors = Vec::with_capacity(run_paths.len());
+    let mut heap = BinaryHeap::with_capacity(run_paths.len());
+    for (run_id, path) in run_paths.iter().enumerate() {
+        let mut cursor = DirectorySortRunCursor::new(path)?;
+        if let Some(entry) = cursor.next()? {
+            heap.push(DirectorySortHeapItem {
+                entry,
+                run_id,
+                comparer: Arc::clone(&comparer),
+            });
+        }
+        cursors.push(cursor);
+    }
+
+    let mut written = 0u64;
+    while let Some(item) = heap.pop() {
+        let next_entry = cursors[item.run_id].next()?;
+        if let Some(entry) = next_entry {
+            heap.push(DirectorySortHeapItem {
+                entry,
+                run_id: item.run_id,
+                comparer: Arc::clone(&comparer),
+            });
+        }
+        let next_offset = if heap.is_empty() {
+            -1
+        } else {
+            let next_position = written
+                .checked_add(1)
+                .and_then(|value| value.checked_mul(entry_size as u64))
+                .and_then(|value| i64::try_from(value).ok())
+                .and_then(|value| target_index_offset.checked_add(value))
+                .ok_or_else(|| invalid("lazy schema sorted index offset overflow"))?;
+            next_position
+        };
+        write_sorted_directory_index_entry(&mut writer, &item.entry, next_offset, is_file)?;
+        written = written
+            .checked_add(1)
+            .ok_or_else(|| invalid("lazy schema sorted index count overflow"))?;
+    }
+    if written != item_count {
+        return Err(invalid("lazy schema sort lost an index entry"));
+    }
+    writer.flush().map_err(|error| error.to_string())
+}
+
+fn sort_directory_children(
+    context: &StoreContext,
+    directory_record_offset: i64,
+    sort_mode: u32,
+    locale_name: String,
+    file_target_index_offset: i64,
+    directory_target_index_offset: i64,
+    file_output_path: &Path,
+    directory_output_path: &Path,
+    callback: Option<LscStoreDirectorySortProgressCallback>,
+    user_data: *mut c_void,
+) -> Result<LscStoreDirectorySortResult, String> {
+    if directory_record_offset < 0 {
+        return Err(invalid("invalid lazy schema directory record offset"));
+    }
+    let comparer = Arc::new(DirectorySortComparer::new(sort_mode, locale_name)?);
+    let reader = TapeSortReader::new(context)?;
+    let header = reader.read_directory_header(directory_record_offset)?;
+    let file_count = u64::try_from(header.file_count)
+        .map_err(|_| invalid("invalid lazy schema directory file count"))?;
+    let directory_count = u64::try_from(header.directory_count)
+        .map_err(|_| invalid("invalid lazy schema directory count"))?;
+    let total = file_count
+        .checked_add(directory_count)
+        .ok_or_else(|| invalid("lazy schema directory child count overflow"))?;
+    let mut progress = DirectorySortProgress::new(total, callback, user_data);
+    let mut run_paths = Vec::new();
+    let result = (|| -> Result<LscStoreDirectorySortResult, String> {
+        collect_directory_sort_runs(
+            &reader,
+            header.file_index_offset,
+            file_count,
+            true,
+            file_output_path,
+            &comparer,
+            &mut progress,
+            &mut run_paths,
+        )?;
+        merge_directory_sort_runs(
+            &run_paths,
+            file_output_path,
+            file_target_index_offset,
+            file_count,
+            true,
+            Arc::clone(&comparer),
+        )?;
+        for path in run_paths.drain(..) {
+            let _ = std::fs::remove_file(path);
+        }
+
+        collect_directory_sort_runs(
+            &reader,
+            header.directory_index_offset,
+            directory_count,
+            false,
+            directory_output_path,
+            &comparer,
+            &mut progress,
+            &mut run_paths,
+        )?;
+        merge_directory_sort_runs(
+            &run_paths,
+            directory_output_path,
+            directory_target_index_offset,
+            directory_count,
+            false,
+            Arc::clone(&comparer),
+        )?;
+        Ok(LscStoreDirectorySortResult {
+            struct_size: std::mem::size_of::<LscStoreDirectorySortResult>() as u32,
+            abi_version: 1,
+            file_count,
+            directory_count,
+        })
+    })();
+    for path in &run_paths {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+struct StoreSearchHit {
+    result: LscStoreSearchResult,
+    path: String,
+    directory_path: String,
+}
+
+struct StoreSearchState<'a> {
+    keyword: &'a str,
+    folded_keyword: String,
+    case_sensitive: bool,
+    resume_kind: u32,
+    resume_offset: i64,
+    resume_active: bool,
+    processed: u64,
+    total: u64,
+    callback: Option<LscStoreSearchProgressCallback>,
+    user_data: *mut c_void,
+}
+
+impl StoreSearchState<'_> {
+    fn visit(&mut self) {
+        self.processed = self.processed.saturating_add(1);
+        if let Some(callback) = self.callback {
+            if self.processed == 1 || self.processed % 256 == 0 || self.processed >= self.total {
+                // SAFETY: the callback and user data are supplied by the FFI caller and remain
+                // valid for the duration of the synchronous search call.
+                unsafe { callback(self.processed, self.total, self.user_data) };
+            }
+        }
+    }
+
+    fn contains(&self, value: &str) -> bool {
+        if self.keyword.is_empty() {
+            return true;
+        }
+        if self.case_sensitive {
+            return value.contains(self.keyword);
+        }
+        if value.is_ascii() && self.keyword.is_ascii() {
+            return value.to_ascii_lowercase().contains(&self.folded_keyword);
+        }
+        value.to_lowercase().contains(&self.folded_keyword)
+    }
+
+    fn is_resume(&self, kind: u32, record_offset: i64) -> bool {
+        self.resume_active && self.resume_kind == kind && self.resume_offset == record_offset
+    }
+}
+
+fn append_search_path(path: &mut String, name: &str) -> usize {
+    let original_length = path.len();
+    if name.is_empty() {
+        return original_length;
+    }
+    if !path.is_empty() {
+        path.push('\\');
+    }
+    path.push_str(name);
+    original_length
+}
+
+fn search_directory_contents(
+    reader: &mut StoreSearchReader<'_>,
+    directory_offset: i64,
+    header: StoreDirectoryHeader,
+    path: &mut String,
+    state: &mut StoreSearchState<'_>,
+) -> Result<Option<StoreSearchHit>, String> {
+    let mut file_index_offset = header.file_index_offset;
+    for file_index in 0..header.file_count {
+        if file_index_offset < 0 {
+            return Err(invalid("invalid schema backing file index chain"));
+        }
+        let entry = reader.read_file_index_entry(file_index_offset)?;
+        let name = reader.read_file_name(entry.record_offset, entry.record_length)?;
+        state.visit();
+
+        if state.resume_active {
+            if state.is_resume(LSC_SEARCH_MATCH_FILE, entry.record_offset) {
+                state.resume_active = false;
+            }
+            file_index_offset = entry.next_offset;
+            continue;
+        }
+
+        if state.contains(&name) {
+            let original_length = append_search_path(path, &name);
+            let full_path = path.clone();
+            path.truncate(original_length);
+            return Ok(Some(StoreSearchHit {
+                result: LscStoreSearchResult {
+                    struct_size: std::mem::size_of::<LscStoreSearchResult>() as u32,
+                    abi_version: 1,
+                    found: 1,
+                    match_kind: LSC_SEARCH_MATCH_FILE,
+                    parent_directory_record_offset: directory_offset,
+                    record_offset: entry.record_offset,
+                    record_length: entry.record_length,
+                    file_index,
+                },
+                path: full_path,
+                directory_path: path.clone(),
+            }));
+        }
+        file_index_offset = entry.next_offset;
+    }
+
+    let mut directory_index_offset = header.directory_index_offset;
+    for _ in 0..header.directory_count {
+        if directory_index_offset < 0 {
+            return Err(invalid("invalid schema backing directory index chain"));
+        }
+        let entry = reader.read_directory_index_entry(directory_index_offset)?;
+        let child_header = reader.read_directory_header(entry.record_offset)?;
+        let child_name = reader.read_directory_name(&child_header)?;
+        state.visit();
+
+        let was_resuming = state.resume_active;
+        if was_resuming && state.is_resume(LSC_SEARCH_MATCH_DIRECTORY, entry.record_offset) {
+            state.resume_active = false;
+        }
+
+        let original_length = append_search_path(path, &child_name);
+        if !was_resuming && state.contains(&child_name) {
+            let full_path = path.clone();
+            path.truncate(original_length);
+            return Ok(Some(StoreSearchHit {
+                result: LscStoreSearchResult {
+                    struct_size: std::mem::size_of::<LscStoreSearchResult>() as u32,
+                    abi_version: 1,
+                    found: 1,
+                    match_kind: LSC_SEARCH_MATCH_DIRECTORY,
+                    parent_directory_record_offset: directory_offset,
+                    record_offset: entry.record_offset,
+                    record_length: 0,
+                    file_index: -1,
+                },
+                path: full_path,
+                directory_path: path.clone(),
+            }));
+        }
+
+        let result =
+            search_directory_contents(reader, entry.record_offset, child_header, path, state)?;
+        path.truncate(original_length);
+        if result.is_some() {
+            return Ok(result);
+        }
+        directory_index_offset = entry.next_offset;
+    }
+
+    Ok(None)
+}
+
+fn search_store(
+    context: &StoreContext,
+    root_record_offset: i64,
+    root_path: String,
+    keyword: String,
+    case_sensitive: bool,
+    resume_kind: u32,
+    resume_record_offset: i64,
+    callback: Option<LscStoreSearchProgressCallback>,
+    user_data: *mut c_void,
+) -> Result<StoreSearchComputation, String> {
+    if root_record_offset < 0 {
+        return Err(invalid("invalid schema search root record offset"));
+    }
+    if resume_kind != 0
+        && resume_kind != LSC_SEARCH_MATCH_DIRECTORY
+        && resume_kind != LSC_SEARCH_MATCH_FILE
+    {
+        return Err(invalid("invalid schema search resume kind"));
+    }
+
+    let mut reader = StoreSearchReader::new(context)?;
+    let root_header = reader.read_directory_header(root_record_offset)?;
+    let total_file_count = u64::try_from(root_header.total_file_count)
+        .map_err(|_| invalid("schema search file count is too large"))?;
+    let total_directory_count = u64::try_from(root_header.total_directory_count)
+        .map_err(|_| invalid("schema search directory count is too large"))?;
+    let base_total = 1u64
+        .checked_add(total_file_count)
+        .and_then(|value| value.checked_add(total_directory_count))
+        .ok_or_else(|| invalid("schema search entry count overflow"))?;
+    let total = if resume_kind == 0 {
+        base_total
+    } else {
+        base_total
+            .checked_mul(2)
+            .ok_or_else(|| invalid("schema search progress count overflow"))?
+    };
+
+    let folded_keyword = keyword.to_lowercase();
+    let mut state = StoreSearchState {
+        keyword: &keyword,
+        folded_keyword,
+        case_sensitive,
+        resume_kind,
+        resume_offset: resume_record_offset,
+        resume_active: resume_kind != 0,
+        processed: 0,
+        total,
+        callback,
+        user_data,
+    };
+    let first_path = root_path.clone();
+    let mut path = root_path;
+    state.visit();
+    let mut hit = search_directory_contents(
+        &mut reader,
+        root_record_offset,
+        root_header,
+        &mut path,
+        &mut state,
+    )?;
+
+    if hit.is_none() && resume_kind != 0 {
+        state.resume_active = false;
+        path = first_path;
+        state.visit();
+        let root_header = reader.read_directory_header(root_record_offset)?;
+        hit = search_directory_contents(
+            &mut reader,
+            root_record_offset,
+            root_header,
+            &mut path,
+            &mut state,
+        )?;
+    }
+
+    if let Some(hit) = hit {
+        Ok(StoreSearchComputation {
+            result: hit.result,
+            path: hit.path,
+            directory_path: hit.directory_path,
+        })
+    } else {
+        Ok(StoreSearchComputation::default())
+    }
+}
+
+#[derive(Default)]
+struct StoreSearchComputation {
+    result: LscStoreSearchResult,
+    path: String,
+    directory_path: String,
+}
+
 #[derive(Default)]
 struct DirectoryValues {
     name: Option<String>,
@@ -1342,12 +3365,25 @@ struct SchemaParser<R: BufRead> {
     barcode: Option<String>,
 }
 
-struct MergeSourceResult {
+struct ParsedMergeSource {
     store: StoreOutput,
     files: IndexChain,
     directories: IndexChain,
     total_files: i64,
     total_directories: i64,
+}
+
+struct MergeSourceResult {
+    paths: [PathBuf; 5],
+    files: IndexChain,
+    directories: IndexChain,
+    total_files: i64,
+    total_directories: i64,
+    file_records_length: i64,
+    directory_records_length: i64,
+    file_index_length: i64,
+    directory_index_length: i64,
+    selection_count: u64,
 }
 
 impl<R: BufRead> SchemaParser<R> {
@@ -1475,7 +3511,7 @@ impl<R: BufRead> SchemaParser<R> {
         })
     }
 
-    fn parse_merge_contents(mut self) -> Result<MergeSourceResult, String> {
+    fn parse_merge_contents(mut self) -> Result<ParsedMergeSource, String> {
         let mut buffer = Vec::new();
         let root = loop {
             match self.next_event(&mut buffer)? {
@@ -1546,7 +3582,7 @@ impl<R: BufRead> SchemaParser<R> {
             ));
         }
 
-        Ok(MergeSourceResult {
+        Ok(ParsedMergeSource {
             store: self.store,
             files: state.files,
             directories: state.directories,
@@ -2230,6 +4266,127 @@ impl<R: BufRead> FileParser<R> {
         }
     }
 
+    fn parse_summary(mut self) -> Result<ParsedFileSummary, String> {
+        let mut result = ParsedFileSummary {
+            info: LscStoreFileSummary {
+                struct_size: std::mem::size_of::<LscStoreFileSummary>() as u32,
+                abi_version: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut buffer = Vec::new();
+        let root = loop {
+            match self.next_event(&mut buffer)? {
+                Event::Start(value) => break value,
+                Event::Empty(value) if is_name(&value, "file") => return Ok(result),
+                Event::Decl(_) | Event::Comment(_) | Event::PI(_) => continue,
+                Event::Text(value)
+                    if value
+                        .as_ref()
+                        .chars()
+                        .all(|character| character.is_ascii_whitespace()) =>
+                {
+                    continue;
+                }
+                Event::DocType(_) | Event::GeneralRef(_) => {
+                    return Err(invalid("unsafe XML construct in file record"));
+                }
+                _ => return Err(invalid("file record root element was not found")),
+            }
+        };
+        if !is_name(&root, "file") {
+            return Err(invalid("file record root element must be file"));
+        }
+        if root.is_empty() {
+            return Ok(result);
+        }
+
+        loop {
+            match self.next_event(&mut buffer)? {
+                Event::Start(value) if is_name(&value, "name") => {
+                    result.name = decode_schema_value(self.read_text(value)?);
+                }
+                Event::Start(value) if is_name(&value, "length") => {
+                    result.info.length = self.read_text(value)?.trim().parse().unwrap_or(0);
+                }
+                Event::Start(value) if is_name(&value, "extentinfo") => {
+                    self.parse_first_extent(value, &mut result.info)?;
+                }
+                Event::Start(value) => self.skip_element(value)?,
+                Event::Empty(value) if is_name(&value, "name") => result.name.clear(),
+                Event::Empty(value) if is_name(&value, "length") => result.info.length = 0,
+                Event::Empty(_) => {}
+                Event::End(value) if event_name_end(&value) == "file" => break,
+                Event::End(_)
+                | Event::Text(_)
+                | Event::CData(_)
+                | Event::Comment(_)
+                | Event::PI(_) => {}
+                Event::Decl(_) => {
+                    return Err(invalid("XML declaration is not valid inside a file record"));
+                }
+                Event::DocType(_) | Event::GeneralRef(_) => {
+                    return Err(invalid("unsafe XML construct in file record"));
+                }
+                Event::Eof => return Err(invalid("unexpected end of file record")),
+            }
+        }
+        Ok(result)
+    }
+
+    fn parse_first_extent(
+        &mut self,
+        start: BytesStart<'static>,
+        result: &mut LscStoreFileSummary,
+    ) -> Result<(), String> {
+        if start.is_empty() {
+            return Ok(());
+        }
+        let expected = event_name_start(&start);
+        let mut found = false;
+        let mut buffer = Vec::new();
+        loop {
+            match self.next_event(&mut buffer)? {
+                Event::Start(value) if is_name(&value, "extent") => {
+                    if !found {
+                        let extent = self.parse_extent(value)?;
+                        result.partition = extent.partition;
+                        result.start_block = extent.start_block;
+                        result.byte_offset = extent.byte_offset;
+                        result.byte_count = extent.byte_count;
+                        found = true;
+                    } else {
+                        // Tape sorting only needs the first extent.  The
+                        // remaining extents still have to be consumed to
+                        // reach the end of extentinfo, but parsing all of
+                        // their numeric fields is unnecessary.
+                        self.skip_element(value)?;
+                    }
+                }
+                Event::Empty(value) if is_name(&value, "extent") => {
+                    found = true;
+                }
+                Event::Start(value) => self.skip_element(value)?,
+                Event::Empty(_) => {}
+                Event::End(value) if event_name_end(&value) == expected => break,
+                Event::End(_)
+                | Event::Text(_)
+                | Event::CData(_)
+                | Event::Comment(_)
+                | Event::PI(_) => {}
+                Event::Decl(_) => {
+                    return Err(invalid("XML declaration is not valid inside extents"));
+                }
+                Event::DocType(_) | Event::GeneralRef(_) => {
+                    return Err(invalid("unsafe XML construct in extents"));
+                }
+                Event::Eof => return Err(invalid("unexpected end of extents")),
+            }
+        }
+        Ok(())
+    }
+
     fn parse_child(
         &mut self,
         value: BytesStart<'static>,
@@ -2494,6 +4651,16 @@ fn parse_file_length_bytes(bytes: &[u8]) -> Result<i64, String> {
     FileParser::new(Reader::from_reader(Cursor::new(bytes))).parse_length()
 }
 
+#[derive(Default)]
+struct ParsedFileSummary {
+    name: String,
+    info: LscStoreFileSummary,
+}
+
+fn parse_file_summary_bytes(bytes: &[u8]) -> Result<ParsedFileSummary, String> {
+    FileParser::new(Reader::from_reader(Cursor::new(bytes))).parse_summary()
+}
+
 fn file_data_from_input(input: &LscFileInput) -> Result<FileData, String> {
     let text = |slice: LscUtf16Slice| unsafe { utf16_string(slice.ptr, slice.len) };
     let optional = |slice: LscUtf16Slice| -> Result<Option<String>, String> {
@@ -2710,6 +4877,174 @@ fn schema_context_from_file(
     }
 }
 
+fn merge_source_paths(index: usize, temp_directory: &Path) -> [PathBuf; 5] {
+    let sequence = MERGE_TEMP_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let prefix = format!(
+        "ltfscopy_merge_{}_{}_{}_{}",
+        std::process::id(),
+        timestamp,
+        sequence,
+        index
+    );
+    [
+        temp_directory.join(format!("{prefix}_file_records.tmp")),
+        temp_directory.join(format!("{prefix}_directory_records.tmp")),
+        temp_directory.join(format!("{prefix}_file_index.tmp")),
+        temp_directory.join(format!("{prefix}_directory_index.tmp")),
+        temp_directory.join(format!("{prefix}_selection.tmp")),
+    ]
+}
+
+fn cleanup_merge_source_paths(paths: &[PathBuf; 5]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn parse_merge_source(
+    index: usize,
+    input_path: PathBuf,
+    temp_directory: &Path,
+) -> Result<MergeSourceResult, String> {
+    let paths = merge_source_paths(index, temp_directory);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let input = File::open(&input_path)
+            .map_err(|error| format!("cannot open schema {}: {error}", input_path.display()))?;
+        let reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, input));
+        let barcode = input_path
+            .file_stem()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let parser = SchemaParser::new(reader, StoreOutput::new(&paths)?).with_barcode(barcode);
+        let ParsedMergeSource {
+            mut store,
+            files,
+            directories,
+            total_files,
+            total_directories,
+        } = parser.parse_merge_contents()?;
+        store.finish()?;
+        let source = MergeSourceResult {
+            paths: paths.clone(),
+            files,
+            directories,
+            total_files,
+            total_directories,
+            file_records_length: store.file_records_position,
+            directory_records_length: store.directory_records_position,
+            file_index_length: i64::try_from(store.file_index_data.len())
+                .map_err(|_| invalid("merge source file index is too large"))?,
+            directory_index_length: i64::try_from(store.directory_index_data.len())
+                .map_err(|_| invalid("merge source directory index is too large"))?,
+            selection_count: store.selection_count,
+        };
+        drop(store);
+        Ok(source)
+    }));
+
+    match result {
+        Ok(result) => {
+            if result.is_err() {
+                cleanup_merge_source_paths(&paths);
+            }
+            result
+        }
+        Err(_) => {
+            cleanup_merge_source_paths(&paths);
+            Err(invalid("merge worker panicked while parsing schema"))
+        }
+    }
+}
+
+fn parse_merge_sources(
+    input_paths: Vec<PathBuf>,
+    temp_directory: PathBuf,
+) -> Result<Vec<MergeSourceResult>, String> {
+    let input_count = input_paths.len();
+    if input_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let worker_count = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1)
+        .min(4)
+        .min(input_count);
+    let queue = Arc::new(Mutex::new(
+        input_paths.into_iter().enumerate().collect::<Vec<_>>(),
+    ));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut sources: Vec<Option<MergeSourceResult>> = (0..input_count).map(|_| None).collect();
+
+    let worker_result = std::thread::scope(|scope| -> Result<Option<String>, String> {
+        for _ in 0..worker_count {
+            let queue = Arc::clone(&queue);
+            let sender = sender.clone();
+            let temp_directory = temp_directory.clone();
+            scope.spawn(move || {
+                loop {
+                    let task = match queue.lock() {
+                        Ok(mut queue) => queue.pop(),
+                        Err(_) => break,
+                    };
+                    let Some((index, input_path)) = task else {
+                        break;
+                    };
+                    let result = parse_merge_source(index, input_path, &temp_directory);
+                    if sender.send((index, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+
+        let mut first_error = None;
+        for _ in 0..input_count {
+            let (index, result) = receiver
+                .recv()
+                .map_err(|_| invalid("merge workers stopped unexpectedly"))?;
+            if index >= input_count {
+                return Err(invalid("merge worker returned an invalid schema index"));
+            }
+            match result {
+                Ok(source) => sources[index] = Some(source),
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        Ok(first_error)
+    });
+
+    if let Err(error) = worker_result {
+        for source in sources.iter().filter_map(Option::as_ref) {
+            cleanup_merge_source_paths(&source.paths);
+        }
+        return Err(error);
+    }
+    if let Some(error) = worker_result.ok().flatten() {
+        for source in sources.iter().filter_map(Option::as_ref) {
+            cleanup_merge_source_paths(&source.paths);
+        }
+        return Err(error);
+    }
+
+    sources
+        .into_iter()
+        .enumerate()
+        .map(|(index, source)| {
+            source.ok_or_else(|| invalid(format!("merge source {index} was not produced")))
+        })
+        .collect()
+}
+
 fn schema_context_from_files(
     input_paths: Vec<PathBuf>,
     root_name: String,
@@ -2718,67 +5053,64 @@ fn schema_context_from_files(
     let mut store = StoreOutput::new(&paths)?;
     let mut root_state = store.begin_directory()?;
 
-    for input_path in input_paths {
-        let input = File::open(&input_path)
-            .map_err(|error| format!("cannot open schema {}: {error}", input_path.display()))?;
-        let reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, input));
-        let barcode = input_path
-            .file_stem()
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let parser = SchemaParser::new(reader, store).with_barcode(barcode);
-        let MergeSourceResult {
-            store: next_store,
-            files,
-            directories,
-            total_files,
-            total_directories,
-        } = parser.parse_merge_contents()?;
-        store = next_store;
-        store.join_file_chains(&mut root_state.files, &files)?;
-        store.join_directory_chains(&mut root_state.directories, &directories)?;
-        root_state.total_file_count = root_state
-            .total_file_count
-            .checked_add(total_files)
-            .ok_or_else(|| invalid("too many files in merged schema"))?;
-        root_state.total_directory_count = root_state
-            .total_directory_count
-            .checked_add(total_directories)
-            .ok_or_else(|| invalid("too many directories in merged schema"))?;
-    }
+    let temp_directory = paths[0]
+        .parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let sources = parse_merge_sources(input_paths, temp_directory)?;
+    let result = (|| -> Result<Box<SchemaContext>, String> {
+        for source in &sources {
+            let (files, directories) = store.append_merge_source(source)?;
+            store.join_file_chains(&mut root_state.files, &files)?;
+            store.join_directory_chains(&mut root_state.directories, &directories)?;
+            root_state.total_file_count = root_state
+                .total_file_count
+                .checked_add(source.total_files)
+                .ok_or_else(|| invalid("too many files in merged schema"))?;
+            root_state.total_directory_count = root_state
+                .total_directory_count
+                .checked_add(source.total_directories)
+                .ok_or_else(|| invalid("too many directories in merged schema"))?;
+        }
 
-    let root_values = DirectoryValues {
-        name: Some(root_name),
-        ..Default::default()
-    };
-    store.finish_directory(&root_state, &root_values)?;
-
-    let mut root_directories = IndexChain::default();
-    store.append_directory_index(
-        &mut root_directories,
-        root_state.offset,
-        root_state.selection_index,
-    )?;
-    store.finish()?;
-
-    let result = LscSchemaResult {
-        struct_size: std::mem::size_of::<LscSchemaResult>() as u32,
-        abi_version: 1,
-        root_file_index_offset: -1,
-        root_file_count: 0,
-        root_directory_index_offset: root_directories.first,
-        root_directory_count: root_directories.count,
-        selection_count: store.selection_count,
-    };
-    let metadata = SchemaMetadata {
-        public: LscSchemaMetadata {
-            struct_size: std::mem::size_of::<LscSchemaMetadata>() as u32,
-            abi_version: 1,
+        let root_values = DirectoryValues {
+            name: Some(root_name),
             ..Default::default()
-        },
-        ..Default::default()
-    };
-    Ok(Box::new(SchemaContext { result, metadata }))
+        };
+        store.finish_directory(&root_state, &root_values)?;
+
+        let mut root_directories = IndexChain::default();
+        store.append_directory_index(
+            &mut root_directories,
+            root_state.offset,
+            root_state.selection_index,
+        )?;
+        store.finish()?;
+
+        let result = LscSchemaResult {
+            struct_size: std::mem::size_of::<LscSchemaResult>() as u32,
+            abi_version: 1,
+            root_file_index_offset: -1,
+            root_file_count: 0,
+            root_directory_index_offset: root_directories.first,
+            root_directory_count: root_directories.count,
+            selection_count: store.selection_count,
+        };
+        let metadata = SchemaMetadata {
+            public: LscSchemaMetadata {
+                struct_size: std::mem::size_of::<LscSchemaMetadata>() as u32,
+                abi_version: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        Ok(Box::new(SchemaContext { result, metadata }))
+    })();
+    for source in &sources {
+        cleanup_merge_source_paths(&source.paths);
+    }
+    result
 }
 
 fn get_schema_string(context: &SchemaContext, field: u32) -> Option<&str> {
@@ -2816,6 +5148,43 @@ fn writer_mut(writer: &mut SchemaWriter) -> Result<&mut Writer<BufWriter<File>>,
         .writer
         .as_mut()
         .ok_or_else(|| invalid("schema writer is already finished"))
+}
+
+fn copy_store_file_record_to_writer(
+    writer: &mut Writer<BufWriter<File>>,
+    store: &StoreContext,
+    record_offset: i64,
+    record_length: u64,
+) -> Result<(), String> {
+    if record_offset < 0 || record_length == 0 {
+        return Err(invalid("invalid schema store file record range"));
+    }
+    let length = usize::try_from(record_length)
+        .map_err(|_| invalid("schema store file record is too large"))?;
+    let offset = u64::try_from(record_offset)
+        .map_err(|_| invalid("invalid schema store file record offset"))?;
+    let mut source = store
+        .file_records
+        .lock()
+        .map_err(|_| invalid("file records backing file is poisoned"))?;
+    source
+        .seek(SeekFrom::Start(offset))
+        .map_err(|error| format!("cannot seek file records backing file: {error}"))?;
+
+    let mut remaining = length;
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let chunk = remaining.min(buffer.len());
+        source
+            .read_exact(&mut buffer[..chunk])
+            .map_err(|error| format!("cannot read file records backing file: {error}"))?;
+        writer
+            .get_mut()
+            .write_all(&buffer[..chunk])
+            .map_err(|error| error.to_string())?;
+        remaining -= chunk;
+    }
+    Ok(())
 }
 
 fn writer_name(ptr: *const u16, len: u32) -> Result<String, String> {
@@ -3064,6 +5433,228 @@ pub unsafe extern "system" fn lsc_store_copy_directory_string(
     copy_utf16(&value, buffer, capacity, required)
 }
 
+fn copy_optional_utf16(value: &str, buffer: *mut u16, capacity: u32, required: *mut u32) -> i32 {
+    if value.is_empty() {
+        if !required.is_null() {
+            // SAFETY: `required` is an output pointer supplied by the caller.
+            unsafe { *required = 0 };
+        }
+        if !buffer.is_null() && capacity > 0 {
+            // SAFETY: the caller supplied at least one UTF-16 output slot.
+            unsafe { *buffer = 0 };
+        }
+        return LSC_OK;
+    }
+    copy_utf16(value, buffer, capacity, required)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn lsc_store_search(
+    context: *const StoreContext,
+    root_record_offset: i64,
+    root_path: *const u16,
+    root_path_len: u32,
+    keyword: *const u16,
+    keyword_len: u32,
+    case_sensitive: u32,
+    resume_kind: u32,
+    resume_record_offset: i64,
+    callback: Option<LscStoreSearchProgressCallback>,
+    user_data: *mut c_void,
+    output: *mut LscStoreSearchResult,
+    path_buffer: *mut u16,
+    path_capacity: u32,
+    path_required: *mut u32,
+    directory_path_buffer: *mut u16,
+    directory_path_capacity: u32,
+    directory_path_required: *mut u32,
+) -> i32 {
+    if context.is_null() || output.is_null() {
+        set_last_error("schema store context or search output is null");
+        return LSC_INVALID_ARGUMENT;
+    }
+    let root_path = match unsafe { utf16_string(root_path, root_path_len) } {
+        Ok(value) => value,
+        Err(error) => {
+            set_last_error(error);
+            return LSC_INVALID_ARGUMENT;
+        }
+    };
+    let keyword = match unsafe { utf16_string(keyword, keyword_len) } {
+        Ok(value) => value,
+        Err(error) => {
+            set_last_error(error);
+            return LSC_INVALID_ARGUMENT;
+        }
+    };
+
+    let mut computation = StoreSearchComputation::default();
+    let status = ffi_call_value(
+        || {
+            // SAFETY: context was checked for null and remains alive until the synchronous call
+            // returns.
+            search_store(
+                unsafe { &*context },
+                root_record_offset,
+                root_path,
+                keyword,
+                case_sensitive != 0,
+                resume_kind,
+                resume_record_offset,
+                callback,
+                user_data,
+            )
+        },
+        &mut computation,
+    );
+    if status != LSC_OK {
+        return status;
+    }
+
+    // SAFETY: output was checked for null and is owned by the caller.
+    unsafe { *output = computation.result };
+    let path_status =
+        copy_optional_utf16(&computation.path, path_buffer, path_capacity, path_required);
+    let directory_path_status = copy_optional_utf16(
+        &computation.directory_path,
+        directory_path_buffer,
+        directory_path_capacity,
+        directory_path_required,
+    );
+    if path_status != LSC_OK {
+        return path_status;
+    }
+    directory_path_status
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn lsc_store_tape_sort(
+    context: *const StoreContext,
+    root_file_index_offset: i64,
+    root_file_count: u64,
+    root_directory_index_offset: i64,
+    root_directory_count: u64,
+    selection_path: *const u16,
+    selection_path_len: u32,
+    output_path: *const u16,
+    output_path_len: u32,
+    callback: Option<LscStoreTapeSortProgressCallback>,
+    user_data: *mut c_void,
+    output: *mut LscStoreTapeSortResult,
+) -> i32 {
+    if context.is_null() || output.is_null() {
+        set_last_error("schema store or tape sort output is null");
+        return LSC_INVALID_ARGUMENT;
+    }
+    let selection_path = match unsafe { utf16_string(selection_path, selection_path_len) } {
+        Ok(value) => PathBuf::from(value),
+        Err(error) => {
+            set_last_error(error);
+            return LSC_INVALID_ARGUMENT;
+        }
+    };
+    let output_path = match unsafe { utf16_string(output_path, output_path_len) } {
+        Ok(value) => PathBuf::from(value),
+        Err(error) => {
+            set_last_error(error);
+            return LSC_INVALID_ARGUMENT;
+        }
+    };
+
+    let status = ffi_call_value(
+        || {
+            // SAFETY: context was checked for null and remains alive until
+            // this synchronous operation returns.
+            sort_tape_files(
+                unsafe { &*context },
+                root_file_index_offset,
+                root_file_count,
+                root_directory_index_offset,
+                root_directory_count,
+                &selection_path,
+                &output_path,
+                callback,
+                user_data,
+            )
+        },
+        output,
+    );
+    if status != LSC_OK {
+        let _ = std::fs::remove_file(output_path);
+    }
+    status
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn lsc_store_sort_directory_children(
+    context: *const StoreContext,
+    directory_record_offset: i64,
+    sort_mode: u32,
+    locale_name: *const u16,
+    locale_name_len: u32,
+    file_target_index_offset: i64,
+    directory_target_index_offset: i64,
+    file_output_path: *const u16,
+    file_output_path_len: u32,
+    directory_output_path: *const u16,
+    directory_output_path_len: u32,
+    callback: Option<LscStoreDirectorySortProgressCallback>,
+    user_data: *mut c_void,
+    output: *mut LscStoreDirectorySortResult,
+) -> i32 {
+    if context.is_null() || output.is_null() {
+        set_last_error("schema store or directory sort output is null");
+        return LSC_INVALID_ARGUMENT;
+    }
+    let locale_name = match unsafe { utf16_string(locale_name, locale_name_len) } {
+        Ok(value) => value,
+        Err(error) => {
+            set_last_error(error);
+            return LSC_INVALID_ARGUMENT;
+        }
+    };
+    let file_output_path = match unsafe { utf16_string(file_output_path, file_output_path_len) } {
+        Ok(value) => PathBuf::from(value),
+        Err(error) => {
+            set_last_error(error);
+            return LSC_INVALID_ARGUMENT;
+        }
+    };
+    let directory_output_path =
+        match unsafe { utf16_string(directory_output_path, directory_output_path_len) } {
+            Ok(value) => PathBuf::from(value),
+            Err(error) => {
+                set_last_error(error);
+                return LSC_INVALID_ARGUMENT;
+            }
+        };
+
+    let status = ffi_call_value(
+        || {
+            // SAFETY: context was checked for null and remains alive until
+            // this synchronous operation returns.
+            sort_directory_children(
+                unsafe { &*context },
+                directory_record_offset,
+                sort_mode,
+                locale_name,
+                file_target_index_offset,
+                directory_target_index_offset,
+                &file_output_path,
+                &directory_output_path,
+                callback,
+                user_data,
+            )
+        },
+        output,
+    );
+    if status != LSC_OK {
+        let _ = std::fs::remove_file(file_output_path);
+        let _ = std::fs::remove_file(directory_output_path);
+    }
+    status
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn lsc_store_get_file_index_entry(
     context: *const StoreContext,
@@ -3179,6 +5770,50 @@ pub unsafe extern "system" fn lsc_store_copy_file_name(
         return status;
     }
     copy_utf16(&value, buffer, capacity, required)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn lsc_store_copy_file_summary(
+    context: *const StoreContext,
+    record_offset: i64,
+    record_length: u64,
+    name_buffer: *mut u16,
+    name_capacity: u32,
+    name_required: *mut u32,
+    output: *mut LscStoreFileSummary,
+) -> i32 {
+    if context.is_null() || output.is_null() {
+        set_last_error("schema store context or file summary output is null");
+        return LSC_INVALID_ARGUMENT;
+    }
+    let length = match usize::try_from(record_length) {
+        Ok(value) => value,
+        Err(_) => {
+            set_last_error("schema store file record is too large");
+            return LSC_ERROR;
+        }
+    };
+    let mut value = ParsedFileSummary::default();
+    let status = ffi_call_value(
+        || {
+            // SAFETY: context was checked for null and remains alive until close.
+            let bytes = read_store_at(
+                unsafe { &(*context).file_records },
+                record_offset,
+                length,
+                "file record",
+            )?;
+            parse_file_summary_bytes(&bytes)
+        },
+        &mut value,
+    );
+    if status != LSC_OK {
+        return status;
+    }
+
+    // SAFETY: output was checked for null and is owned by the caller.
+    unsafe { *output = value.info };
+    copy_utf16(&value.name, name_buffer, name_capacity, name_required)
 }
 
 #[unsafe(no_mangle)]
@@ -3551,6 +6186,74 @@ pub unsafe extern "system" fn lsc_writer_raw(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn lsc_writer_store_file_record(
+    writer: *mut SchemaWriter,
+    store: *const StoreContext,
+    record_offset: i64,
+    record_length: u64,
+) -> i32 {
+    if writer.is_null() || store.is_null() {
+        set_last_error("schema writer or schema store is null");
+        return LSC_INVALID_ARGUMENT;
+    }
+    if record_offset < 0 || record_length == 0 {
+        set_last_error("invalid schema store file record range");
+        return LSC_INVALID_ARGUMENT;
+    }
+    ffi_call(|| {
+        // SAFETY: both pointers were checked above and remain owned by the
+        // caller for the duration of this synchronous FFI call.
+        let writer = writer_mut(unsafe { &mut *writer })?;
+        let store = unsafe { &*store };
+        copy_store_file_record_to_writer(writer, store, record_offset, record_length)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn lsc_writer_store_directory_files(
+    writer: *mut SchemaWriter,
+    store: *const StoreContext,
+    directory_record_offset: i64,
+) -> i32 {
+    if writer.is_null() || store.is_null() {
+        set_last_error("schema writer or schema store is null");
+        return LSC_INVALID_ARGUMENT;
+    }
+    if directory_record_offset < 0 {
+        set_last_error("invalid schema store directory record offset");
+        return LSC_INVALID_ARGUMENT;
+    }
+    ffi_call(|| {
+        // SAFETY: both pointers were checked above and remain owned by the
+        // caller for the duration of this synchronous FFI call.
+        let writer = writer_mut(unsafe { &mut *writer })?;
+        let store = unsafe { &*store };
+        let header = read_store_directory_header(store, directory_record_offset)?;
+        if header.file_count == 0 {
+            return Ok(());
+        }
+        if header.file_index_offset < 0 {
+            return Err(invalid("invalid schema backing file index"));
+        }
+
+        let count = usize::try_from(header.file_count)
+            .map_err(|_| invalid("schema backing file count is too large"))?;
+        let mut entry_offset = header.file_index_offset;
+        for _ in 0..count {
+            if entry_offset < 0 {
+                return Err(invalid("schema backing file index chain is truncated"));
+            }
+            let entry = store_file_index_entry(store, entry_offset)?;
+            let record_length = u64::try_from(entry.record_length)
+                .map_err(|_| invalid("invalid schema backing file record length"))?;
+            copy_store_file_record_to_writer(writer, store, entry.record_offset, record_length)?;
+            entry_offset = entry.next_offset;
+        }
+        Ok(())
+    })
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn lsc_writer_finish(writer: *mut SchemaWriter) -> i32 {
     ffi_call(|| {
         if writer.is_null() {
@@ -3623,6 +6326,13 @@ mod tests {
             length: 4,
             open_for_write: true,
             xattrs: vec![("key".to_owned(), "值 & value".to_owned())],
+            extents: vec![LscExtent {
+                partition: 1,
+                start_block: 42,
+                byte_offset: 7,
+                byte_count: 9,
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let xml = String::from_utf8(serialize_file(&value).expect("serialize file"))
@@ -3641,6 +6351,13 @@ mod tests {
             parse_file_length_bytes(xml.as_bytes()).expect("parse file length"),
             4
         );
+        let summary = parse_file_summary_bytes(xml.as_bytes()).expect("parse file summary");
+        assert_eq!(summary.name, value.name);
+        assert_eq!(summary.info.length, value.length);
+        assert_eq!(summary.info.partition, 1);
+        assert_eq!(summary.info.start_block, 42);
+        assert_eq!(summary.info.byte_offset, 7);
+        assert_eq!(summary.info.byte_count, 9);
     }
 
     #[test]
@@ -3707,6 +6424,264 @@ mod tests {
             Some("first")
         );
 
+        drop(store);
+        drop(context);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn searches_lazy_store_across_directories_and_wraps() {
+        let root = std::env::temp_dir().join(format!(
+            "ltfscopy_schema_search_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create search test directory");
+        let input = root.join("search.schema");
+        let paths = [
+            root.join("files.bin"),
+            root.join("directories.bin"),
+            root.join("file-index.bin"),
+            root.join("directory-index.bin"),
+            root.join("selection.bin"),
+        ];
+        let text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><contents><file><name>48188-root.txt</name><length>1</length></file><directory><name>sub</name><contents><file><name>48188-child.txt</name><length>2</length></file></contents></directory></contents></directory></ltfsindex>"#;
+        std::fs::write(&input, text).expect("write search test schema");
+
+        let context = schema_context_from_file(input.to_string_lossy().into_owned(), paths.clone())
+            .expect("parse search test schema");
+        let store = StoreContext {
+            file_records: Mutex::new(File::open(&paths[0]).expect("open file backing")),
+            directory_records: Mutex::new(File::open(&paths[1]).expect("open directory backing")),
+            file_index: Mutex::new(File::open(&paths[2]).expect("open file index backing")),
+            directory_index: Mutex::new(
+                File::open(&paths[3]).expect("open directory index backing"),
+            ),
+        };
+        let root_index =
+            store_directory_index_entry(&store, context.result.root_directory_index_offset)
+                .expect("read search root index");
+
+        let first = search_store(
+            &store,
+            root_index.record_offset,
+            "root".to_owned(),
+            "48188".to_owned(),
+            false,
+            0,
+            -1,
+            None,
+            ptr::null_mut(),
+        )
+        .expect("search first result");
+        assert_eq!(first.path, r"root\48188-root.txt");
+        assert_eq!(first.directory_path, "root");
+
+        let second = search_store(
+            &store,
+            root_index.record_offset,
+            "root".to_owned(),
+            "48188".to_owned(),
+            false,
+            LSC_SEARCH_MATCH_FILE,
+            first.result.record_offset,
+            None,
+            ptr::null_mut(),
+        )
+        .expect("search second result");
+        assert_eq!(second.path, r"root\sub\48188-child.txt");
+        assert_eq!(second.directory_path, r"root\sub");
+
+        let wrapped = search_store(
+            &store,
+            root_index.record_offset,
+            "root".to_owned(),
+            "48188".to_owned(),
+            false,
+            LSC_SEARCH_MATCH_FILE,
+            second.result.record_offset,
+            None,
+            ptr::null_mut(),
+        )
+        .expect("search wrapped result");
+        assert_eq!(wrapped.path, r"root\48188-root.txt");
+
+        drop(store);
+        drop(context);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sorts_selected_files_by_tape_position_in_native_code() {
+        let root = std::env::temp_dir().join(format!(
+            "ltfscopy_schema_tape_sort_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create tape sort test directory");
+        let input = root.join("sort.schema");
+        let paths = [
+            root.join("files.bin"),
+            root.join("directories.bin"),
+            root.join("file-index.bin"),
+            root.join("directory-index.bin"),
+            root.join("selection.bin"),
+        ];
+        let output = root.join("tape-sort.run");
+        let text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><contents><file><name>b.txt</name><length>2</length><extentinfo><extent><partition>b</partition><startblock>2</startblock><byteoffset>0</byteoffset><bytecount>2</bytecount></extent></extentinfo></file><file><name>a.txt</name><length>3</length><extentinfo><extent><partition>a</partition><startblock>20</startblock><byteoffset>0</byteoffset><bytecount>3</bytecount></extent></extentinfo></file><directory><name>sub</name><contents><file><name>c.txt</name><length>4</length><extentinfo><extent><partition>a</partition><startblock>10</startblock><byteoffset>0</byteoffset><bytecount>4</bytecount></extent></extentinfo></file></contents></directory><file><name>d.txt</name><length>5</length><extentinfo><extent><partition>a</partition><startblock>10</startblock><byteoffset>0</byteoffset><bytecount>5</bytecount></extent></extentinfo></file></contents></directory></ltfsindex>"#;
+        std::fs::write(&input, text).expect("write tape sort schema");
+
+        let context = schema_context_from_file(input.to_string_lossy().into_owned(), paths.clone())
+            .expect("parse tape sort schema");
+        let store = StoreContext {
+            file_records: Mutex::new(File::open(&paths[0]).expect("open file backing")),
+            directory_records: Mutex::new(File::open(&paths[1]).expect("open directory backing")),
+            file_index: Mutex::new(File::open(&paths[2]).expect("open file index backing")),
+            directory_index: Mutex::new(
+                File::open(&paths[3]).expect("open directory index backing"),
+            ),
+        };
+        let result = sort_tape_files(
+            &store,
+            context.result.root_file_index_offset,
+            context.result.root_file_count,
+            context.result.root_directory_index_offset,
+            context.result.root_directory_count,
+            &paths[4],
+            &output,
+            None,
+            ptr::null_mut(),
+        )
+        .expect("sort tape files");
+        assert_eq!(result.file_count, 4);
+        assert_eq!(result.partition_a_file_count, 3);
+        assert_eq!(result.partition_b_file_count, 1);
+
+        let mut reader = BufReader::new(File::open(&output).expect("open tape sort output"));
+        let mut entries = Vec::new();
+        while let Some(entry) = read_tape_sort_entry(&mut reader).expect("read tape sort output") {
+            entries.push((entry.partition, entry.start_block, entry.path));
+        }
+        assert_eq!(
+            entries,
+            vec![
+                (0, 10, "d.txt".to_owned()),
+                (0, 10, "sub\\c.txt".to_owned()),
+                (0, 20, "a.txt".to_owned()),
+                (1, 2, "b.txt".to_owned()),
+            ]
+        );
+
+        drop(reader);
+        drop(store);
+        drop(context);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sorts_directory_children_into_fixed_index_chains() {
+        let root = std::env::temp_dir().join(format!(
+            "ltfscopy_schema_directory_sort_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create directory sort test directory");
+        let input = root.join("sort.schema");
+        let paths = [
+            root.join("files.bin"),
+            root.join("directories.bin"),
+            root.join("file-index.bin"),
+            root.join("directory-index.bin"),
+            root.join("selection.bin"),
+        ];
+        let file_output = root.join("sorted-files.bin");
+        let directory_output = root.join("sorted-directories.bin");
+        let text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><contents><file><name>b.txt</name><length>2</length></file><file><name>a.txt</name><length>3</length></file><file><name>d.txt</name><length>4</length></file><directory><name>sub</name><contents><file><name>child.txt</name><length>5</length></file></contents></directory></contents></directory></ltfsindex>"#;
+        std::fs::write(&input, text).expect("write directory sort schema");
+
+        let context = schema_context_from_file(input.to_string_lossy().into_owned(), paths.clone())
+            .expect("parse directory sort schema");
+        let store = StoreContext {
+            file_records: Mutex::new(File::open(&paths[0]).expect("open file backing")),
+            directory_records: Mutex::new(File::open(&paths[1]).expect("open directory backing")),
+            file_index: Mutex::new(File::open(&paths[2]).expect("open file index backing")),
+            directory_index: Mutex::new(
+                File::open(&paths[3]).expect("open directory index backing"),
+            ),
+        };
+        let root_index =
+            store_directory_index_entry(&store, context.result.root_directory_index_offset)
+                .expect("read root directory index");
+        let file_target_offset = File::open(&paths[2])
+            .expect("open file index for metadata")
+            .metadata()
+            .expect("read file index metadata")
+            .len() as i64;
+        let directory_target_offset = File::open(&paths[3])
+            .expect("open directory index for metadata")
+            .metadata()
+            .expect("read directory index metadata")
+            .len() as i64;
+        let result = sort_directory_children(
+            &store,
+            root_index.record_offset,
+            DIRECTORY_SORT_MODE_CURRENT_CULTURE,
+            String::new(),
+            file_target_offset,
+            directory_target_offset,
+            &file_output,
+            &directory_output,
+            None,
+            ptr::null_mut(),
+        )
+        .expect("sort directory children");
+        assert_eq!(result.file_count, 3);
+        assert_eq!(result.directory_count, 1);
+
+        let reader = TapeSortReader::new(&store).expect("map directory sort backing files");
+        let mut file_reader = BufReader::new(File::open(&file_output).expect("open sorted files"));
+        let mut names = Vec::new();
+        for _ in 0..result.file_count {
+            let mut bytes = vec![0u8; FILE_INDEX_ENTRY_SIZE as usize];
+            file_reader
+                .read_exact(&mut bytes)
+                .expect("read sorted file index");
+            let mut cursor = StoreCursor::new(&bytes);
+            let _next_offset = cursor.i64().expect("read sorted file next offset");
+            let record_offset = cursor.i64().expect("read sorted file record offset");
+            let record_length = cursor.i64().expect("read sorted file record length");
+            let _selection_index = cursor.i64().expect("read sorted file selection index");
+            names.push(
+                reader
+                    .read_file_summary(record_offset, record_length)
+                    .expect("read sorted file summary")
+                    .name,
+            );
+        }
+        assert_eq!(names, vec!["a.txt", "b.txt", "d.txt"]);
+
+        let mut directory_reader =
+            BufReader::new(File::open(&directory_output).expect("open sorted directories"));
+        let mut bytes = vec![0u8; DIRECTORY_INDEX_ENTRY_SIZE as usize];
+        directory_reader
+            .read_exact(&mut bytes)
+            .expect("read sorted directory index");
+        let mut cursor = StoreCursor::new(&bytes);
+        assert_eq!(cursor.i64().expect("read directory next offset"), -1);
+        assert_eq!(
+            reader
+                .read_directory_name(
+                    &reader
+                        .read_directory_header(cursor.i64().expect("read directory record offset"))
+                        .expect("read child directory header")
+                )
+                .expect("read child directory name"),
+            "sub"
+        );
+
+        drop(directory_reader);
+        drop(file_reader);
+        drop(reader);
         drop(store);
         drop(context);
         let _ = std::fs::remove_dir_all(root);

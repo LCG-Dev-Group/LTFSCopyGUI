@@ -6,8 +6,14 @@ Imports Serilog.Context
 
 Public Class FileBrowser
     Private Const BrowserPageSize As Integer = 1024
+    Private Const SearchProgressMaximum As Integer = 10000
     Public Property schema As ltfsindex
     Private ReadOnly _logSessionId As String = $"filebrowser-{Guid.NewGuid().ToString("N").Substring(0, 8)}"
+    Private _searchStatusStrip As StatusStrip
+    Private _searchStatusLabel As ToolStripStatusLabel
+    Private _searchProgressBar As ToolStripProgressBar
+    Private _searchStatusLayoutApplied As Boolean
+    Private _filterInProgress As Integer
     Public Overloads Shared Sub Show(FList As ltfsindex)
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileBrowser))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileBrowser")
@@ -46,6 +52,7 @@ Public Class FileBrowser
                 End Using
             End Using
         End Using
+        InitializeSearchStatusBar()
         SuspendLayout()
         SyncLock EventLock
             If EventLock Then Exit Sub
@@ -73,6 +80,38 @@ Public Class FileBrowser
             End Using
         End Using
     End Sub
+
+    Private Sub InitializeSearchStatusBar()
+        If _searchStatusStrip IsNot Nothing Then Return
+
+        _searchStatusLabel = New ToolStripStatusLabel With {
+            .Text = "Ready",
+            .Spring = True}
+        _searchProgressBar = New ToolStripProgressBar With {
+            .Minimum = 0,
+            .Maximum = SearchProgressMaximum,
+            .Value = 0,
+            .AutoSize = False,
+            .Width = 180,
+            .ToolTipText = "Search progress"}
+        _searchStatusStrip = New StatusStrip With {
+            .Name = "SearchStatusStrip",
+            .Dock = DockStyle.Bottom,
+            .ShowItemToolTips = True,
+            .SizingGrip = False}
+        _searchStatusStrip.Items.AddRange(New ToolStripItem() {_searchStatusLabel, _searchProgressBar})
+        Controls.Add(_searchStatusStrip)
+        _searchStatusStrip.BringToFront()
+
+        If Not _searchStatusLayoutApplied Then
+            Dim statusHeight As Integer = Math.Max(1, _searchStatusStrip.Height)
+            Button1.Top = Math.Max(0, Button1.Top - statusHeight)
+            Button2.Top = Math.Max(0, Button2.Top - statusHeight)
+            CheckBox1.Top = Math.Max(0, CheckBox1.Top - statusHeight)
+            TreeView1.Height = Math.Max(0, TreeView1.Height - statusHeight)
+            _searchStatusLayoutApplied = True
+        End If
+    End Sub
     Private NotInheritable Class BrowserTreeNode
         Inherits TreeNode
 
@@ -85,11 +124,14 @@ Public Class FileBrowser
 
     Private Function CreateDirectoryNode(directory As ltfsindex.directory) As BrowserTreeNode
         If directory Is Nothing Then Return Nothing
+        'The tree's expandable children are directories.  Files are
+        'listed as leaf nodes and must not make an empty directory look
+        'expandable.
         Dim node As New BrowserTreeNode With {
             .Text = If(directory.name, String.Empty),
             .Tag = directory,
             .Checked = directory.Selected,
-            .ChildrenComplete = Not directory.HasPotentialChildren()}
+            .ChildrenComplete = directory.GetLazyDirectDirectoryCount() = 0}
         AddUnloadedChildrenMarker(node)
         Return node
     End Function
@@ -105,7 +147,7 @@ Public Class FileBrowser
     Private Sub AddUnloadedChildrenMarker(node As BrowserTreeNode)
         If node Is Nothing OrElse node.Tag IsNot Nothing AndAlso
            TypeOf node.Tag Is ltfsindex.directory AndAlso
-           Not DirectCast(node.Tag, ltfsindex.directory).HasPotentialChildren() Then Return
+           DirectCast(node.Tag, ltfsindex.directory).GetLazyDirectDirectoryCount() = 0 Then Return
         Dim marker As New BrowserTreeNode With {
             .Text = "...",
             .Tag = New UnloadedChildrenMarker With {.Owner = node},
@@ -452,8 +494,14 @@ Public Class FileBrowser
     Private Sub 按大小ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 按大小ToolStripMenuItem.Click
         SuspendLayout()
         Dim sMin As Long = 0, sMax As Long = Long.MaxValue
-        DisplayHelper.ShowInputDialog("Minimum Bytes", "By Size", sMin)
-        DisplayHelper.ShowInputDialog("Maximum Bytes", "By Size", sMax)
+        If DisplayHelper.ShowInputDialog("Minimum Bytes", "By Size", sMin) <> DialogResult.OK Then
+            ResumeLayout()
+            Exit Sub
+        End If
+        If DisplayHelper.ShowInputDialog("Maximum Bytes", "By Size", sMax) <> DialogResult.OK Then
+            ResumeLayout()
+            Exit Sub
+        End If
         If sMax < sMin Then
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileBrowser))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileBrowser")
@@ -479,14 +527,26 @@ Public Class FileBrowser
         ApplySelectionFilter(Function(value As ltfsindex.file)
                                  Dim length As Long = value.length
                                  Return sMin <= length AndAlso length <= sMax
-                             End Function)
+                             End Function,
+                             "Search by size")
         ResumeLayout()
     End Sub
 
     Private Sub 匹配文件名ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 匹配文件名ToolStripMenuItem.Click
         SuspendLayout()
         Dim pattern As String = "*"
-        DisplayHelper.ShowInputDialog("Regex", "By regex", pattern)
+        If DisplayHelper.ShowInputDialog("Regex", "By regex", pattern) <> DialogResult.OK Then
+            ResumeLayout()
+            Exit Sub
+        End If
+        Dim matcher As Text.RegularExpressions.Regex
+        Try
+            matcher = New Text.RegularExpressions.Regex(pattern, System.Text.RegularExpressions.RegexOptions.Compiled)
+        Catch ex As Exception
+            ResumeLayout()
+            MessageBox.Show(New Form With {.TopMost = True}, ex.Message, "Invalid regex", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            Exit Sub
+        End Try
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileBrowser))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileBrowser")
                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
@@ -496,42 +556,174 @@ Public Class FileBrowser
                 End Using
             End Using
         End Using
-        Dim matcher As New Text.RegularExpressions.Regex(pattern, System.Text.RegularExpressions.RegexOptions.Compiled)
         ApplySelectionFilter(Function(value As ltfsindex.file)
                                  Return matcher.IsMatch(If(value.name, String.Empty))
-                             End Function)
+                             End Function,
+                             "Search by name")
         ResumeLayout()
     End Sub
 
-    Private Sub ApplySelectionFilter(predicate As Func(Of ltfsindex.file, Boolean))
-        If schema Is Nothing OrElse predicate Is Nothing Then Return
-
-        If schema._file IsNot Nothing Then
-            For Each rootFile As ltfsindex.file In schema._file
-                rootFile.Selected = predicate(rootFile)
-            Next
+    Private Sub LockSearchGui(locked As Boolean)
+        Dim update As Action =
+            Sub()
+                Button1.Enabled = Not locked
+                Button2.Enabled = Not locked
+                CheckBox1.Enabled = Not locked
+                TreeView1.Enabled = Not locked
+                ContextMenuStrip1.Enabled = Not locked
+            End Sub
+        If IsHandleCreated AndAlso InvokeRequired Then
+            Invoke(update)
+        Else
+            update()
         End If
+    End Sub
+
+    Private Function GetFilterFileCount() As Long
+        Dim result As Long = 0
+        If schema Is Nothing Then Return 1
+        If schema._file IsNot Nothing Then result += schema._file.Count
         If schema._directory IsNot Nothing Then
             For Each rootDirectory As ltfsindex.directory In schema._directory
-                ApplyDirectorySelectionFilter(rootDirectory, predicate)
+                If rootDirectory Is Nothing Then Continue For
+                result += rootDirectory.TotalFiles
             Next
         End If
+        Return Math.Max(1L, result)
+    End Function
 
-        RefreshLoadedSelectionStates()
+    Private Shared Function GetFilterProgressValue(processed As Long, total As Long) As Integer
+        If total <= 0 Then Return 0
+        Dim scaled As Double = processed / CDbl(total) * SearchProgressMaximum
+        Return CInt(Math.Max(0.0, Math.Min(CDbl(SearchProgressMaximum), scaled)))
+    End Function
+
+    Private Sub BeginFilterProgress(total As Long, operationText As String)
+        If _searchStatusStrip Is Nothing Then InitializeSearchStatusBar()
+        _searchProgressBar.Minimum = 0
+        _searchProgressBar.Maximum = SearchProgressMaximum
+        _searchProgressBar.Value = 0
+        _searchProgressBar.ToolTipText = $"{operationText} 0/{total}"
+        _searchStatusLabel.Text = $"{operationText} 0/{total}"
+        _searchStatusLabel.ToolTipText = _searchStatusLabel.Text
+    End Sub
+
+    Private Sub ReportFilterProgress(processed As Long, total As Long, operationText As String)
+        If Threading.Volatile.Read(_filterInProgress) = 0 Then Return
+        If processed > 1 AndAlso processed < total AndAlso processed Mod 256 <> 0 Then Return
+
+        Dim value As Integer = GetFilterProgressValue(processed, total)
+        Dim update As Action =
+            Sub()
+                If Threading.Volatile.Read(_filterInProgress) = 0 OrElse IsDisposed Then Return
+                _searchProgressBar.Value = value
+                _searchProgressBar.ToolTipText = $"{operationText} {processed}/{total}"
+                _searchStatusLabel.Text = $"{operationText} {processed}/{total}"
+                _searchStatusLabel.ToolTipText = _searchStatusLabel.Text
+            End Sub
+        Try
+            If IsHandleCreated AndAlso InvokeRequired Then
+                BeginInvoke(update)
+            Else
+                update()
+            End If
+        Catch
+        End Try
+    End Sub
+
+    Private Sub FinishFilterProgress(success As Boolean, operationText As String)
+        Dim update As Action =
+            Sub()
+                If Not IsDisposed Then
+                    _searchProgressBar.Value = If(success, SearchProgressMaximum, 0)
+                    _searchProgressBar.ToolTipText = If(success, $"{operationText} complete", $"{operationText} failed")
+                    _searchStatusLabel.Text = If(success, $"{operationText} complete", $"{operationText} failed")
+                    _searchStatusLabel.ToolTipText = _searchStatusLabel.Text
+                End If
+                Threading.Interlocked.Exchange(_filterInProgress, 0)
+                LockSearchGui(False)
+            End Sub
+        Try
+            If IsHandleCreated AndAlso InvokeRequired Then
+                Invoke(update)
+            Else
+                update()
+            End If
+        Catch
+            Threading.Interlocked.Exchange(_filterInProgress, 0)
+        End Try
+    End Sub
+
+    Private Sub ApplySelectionFilter(predicate As Func(Of ltfsindex.file, Boolean),
+                                      Optional operationText As String = "Search")
+        If schema Is Nothing OrElse predicate Is Nothing Then Return
+        If Threading.Interlocked.CompareExchange(_filterInProgress, 1, 0) <> 0 Then Return
+
+        Dim total As Long
+        Try
+            total = GetFilterFileCount()
+        Catch ex As Exception
+            Threading.Interlocked.Exchange(_filterInProgress, 0)
+            MessageBox.Show(New Form With {.TopMost = True}, ex.ToString(), "Search failed", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Return
+        End Try
+
+        LockSearchGui(True)
+        BeginFilterProgress(total, operationText)
+        Task.Run(
+            Sub()
+                Dim processed As Long = 0
+                Dim reportProgress As Action =
+                    Sub()
+                        Dim current As Long = Threading.Interlocked.Increment(processed)
+                        ReportFilterProgress(current, total, operationText)
+                    End Sub
+                Try
+                    If schema._file IsNot Nothing Then
+                        For Each rootFile As ltfsindex.file In schema._file
+                            rootFile.Selected = predicate(rootFile)
+                            reportProgress()
+                        Next
+                    End If
+                    If schema._directory IsNot Nothing Then
+                        For Each rootDirectory As ltfsindex.directory In schema._directory
+                            ApplyDirectorySelectionFilter(rootDirectory, predicate, reportProgress)
+                        Next
+                    End If
+
+                    Invoke(
+                        Sub()
+                            RefreshLoadedSelectionStates()
+                            FinishFilterProgress(True, operationText)
+                        End Sub)
+                Catch ex As Exception
+                    Try
+                        Invoke(
+                            Sub()
+                                FinishFilterProgress(False, operationText)
+                                MessageBox.Show(New Form With {.TopMost = True}, ex.ToString(), "Search failed", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                            End Sub)
+                    Catch
+                        Threading.Interlocked.Exchange(_filterInProgress, 0)
+                    End Try
+                End Try
+            End Sub)
     End Sub
 
     Private Function ApplyDirectorySelectionFilter(directory As ltfsindex.directory,
-                                                    predicate As Func(Of ltfsindex.file, Boolean)) As Boolean
+                                                    predicate As Func(Of ltfsindex.file, Boolean),
+                                                    progressCallback As Action) As Boolean
         If directory Is Nothing Then Return False
         Dim hasSelectedFile As Boolean = False
         For Each childFile As ltfsindex.file In directory.EnumerateLazyFiles()
             Dim selected As Boolean = predicate(childFile)
             childFile.Selected = selected
             If selected Then hasSelectedFile = True
+            If progressCallback IsNot Nothing Then progressCallback()
         Next
 
         For Each childDirectory As ltfsindex.directory In directory.EnumerateLazyDirectories()
-            If ApplyDirectorySelectionFilter(childDirectory, predicate) Then hasSelectedFile = True
+            If ApplyDirectorySelectionFilter(childDirectory, predicate, progressCallback) Then hasSelectedFile = True
         Next
 
         directory.Selected = hasSelectedFile
@@ -555,6 +747,10 @@ Public Class FileBrowser
     End Sub
 
     Private Sub FileBrowser_Closing(sender As Object, e As CancelEventArgs) Handles Me.Closing
+        If Threading.Volatile.Read(_filterInProgress) <> 0 Then
+            e.Cancel = True
+            Return
+        End If
         My.Settings.FileBrowser_CopyInfo = CheckBox1.Checked
         My.Settings.Save()
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileBrowser))

@@ -7168,10 +7168,7 @@ Public Class TapeUtils
         Public Property Content As New List(Of MAMAttribute)
         Public Function GetSerializedText() As String
             Dim writer As New XmlSerializer(GetType(MAMAttributeList))
-            Dim tmpf As String = Application.StartupPath & "\" & Now.ToString("MAM_yyyyMMdd_HHmmss.fffffff.tmp")
-            While File.Exists(tmpf)
-                tmpf = Application.StartupPath & "\" & Now.ToString("MAM_yyyyMMdd_HHmmss.fffffff.tmp")
-            End While
+            Dim tmpf As String = LazySchemaStore.CreateTempFilePath("mam")
             Dim ms As New FileStream(tmpf, FileMode.Create)
             Dim t As TextWriter = New StreamWriter(ms, New UTF8Encoding(False))
             writer.Serialize(t, Me)
