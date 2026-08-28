@@ -47,7 +47,10 @@ jobs:
             - name: Test FastReader
               run: cargo test --manifest-path LtfsFastReader/Cargo.toml
 
-            - name: Build LTFSCopyGUI and FastReader
+            - name: Test LtfsSchema
+              run: cargo test --manifest-path LtfsSchema/Cargo.toml
+
+            - name: Build LTFSCopyGUI, FastReader, and LtfsSchema
               run: msbuild LTFSCopyGUI.sln /m /t:Build /p:Configuration=Release /p:Platform=x64
 
             - name: Verify build output
@@ -55,7 +58,8 @@ jobs:
               run: |
                   $requiredFiles = @(
                     "LTFSCopyGUI/bin/x64/Release/LTFSCopyGUI.exe",
-                    "LTFSCopyGUI/bin/x64/Release/ltfscopy_fastreader.dll"
+                    "LTFSCopyGUI/bin/x64/Release/ltfscopy_fastreader.dll",
+                    "LTFSCopyGUI/bin/x64/Release/ltfscopy_schema.dll"
                   )
 
                   foreach ($requiredFile in $requiredFiles) {
@@ -114,6 +118,17 @@ jobs:
               with:
                   path: Installer/LCG.ci.iss
 
+            - name: Build portable archive
+              shell: pwsh
+              run: |
+                  $installers = @(Get-ChildItem -Path "Installer/LTFSCopyGUI-*.exe" -File)
+                  if ($installers.Count -ne 1) {
+                    throw "Expected exactly one installer before building the portable archive, found $($installers.Count)."
+                  }
+
+                  $portablePath = Join-Path $installers[0].DirectoryName ($installers[0].BaseName + "-portable.zip")
+                  & ".\Installer\Build-Portable.ps1" -OutputPath $portablePath
+
             - name: Verify installer output
               shell: pwsh
               run: |
@@ -122,9 +137,21 @@ jobs:
                     throw "Expected exactly one installer, found $($installers.Count)."
                   }
 
+                  $portableArchives = @(Get-ChildItem -Path "Installer/LTFSCopyGUI-*-portable.zip" -File)
+                  if ($portableArchives.Count -ne 1) {
+                    throw "Expected exactly one portable archive, found $($portableArchives.Count)."
+                  }
+
             - name: Upload installer artifact
               uses: actions/upload-artifact@v4
               with:
-                  name: LTFSCopyGUI-installer
+                  name: LTFSCopyGUI-installer-${{ github.sha }}
                   path: Installer/LTFSCopyGUI-*.exe
+                  if-no-files-found: error
+
+            - name: Upload portable artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: LTFSCopyGUI-portable-${{ github.sha }}
+                  path: Installer/LTFSCopyGUI-*-portable.zip
                   if-no-files-found: error
