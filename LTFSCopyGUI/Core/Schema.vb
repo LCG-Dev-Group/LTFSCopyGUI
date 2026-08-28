@@ -520,13 +520,7 @@ Public Class ltfsindex
             End Set
         End Property
         Public Function GetSerializedText(Optional ByVal ReduceSize As Boolean = True) As String
-            Dim writer As New Xml.Serialization.XmlSerializer(GetType(file))
-            Dim sb As New Text.StringBuilder
-            Dim t As New IO.StringWriter(sb)
-            Dim ns As New Xml.Serialization.XmlSerializerNamespaces({New Xml.XmlQualifiedName("v", "1")})
-            writer.Serialize(t, Me, ns)
-            sb.Remove(0, 41)
-            Return sb.ToString().Replace("<file xmlns:v=""1""", "<file")
+            Return Text.Encoding.UTF8.GetString(NativeSchemaXml.SerializeFile(Me))
         End Function
         Public Function GetCopy(fileuid1 As Long) As file
             Dim result As New file With {.accesstime = accesstime, .backuptime = backuptime,
@@ -819,6 +813,28 @@ Public Class ltfsindex
         Friend Function GetLazyDirectFileCount() As Integer
             If _lazyStore Is Nothing OrElse _lazyContentsLoaded Then Return If(_contents Is Nothing OrElse _contents._file Is Nothing, 0, _contents._file.Count)
             Return _lazyStore.GetVisibleDirectoryFileCount(_lazyRecordOffset)
+        End Function
+
+        Friend Function GetLazyDirectFileByteCount() As Long
+            If _lazyStore Is Nothing OrElse _lazyContentsLoaded Then
+                Dim result As Long = 0
+                For Each item As file In EnumerateLazyFiles()
+                    result += item.length
+                Next
+                Return result
+            End If
+
+            'The native fast path is valid for an untouched lazy store.  Once
+            'a file/directory mutation exists, enumerate the visible sequence
+            'so added, removed, and edited file lengths remain exact.
+            If _lazyStore.HasPendingByteChanges() Then
+                Dim result As Long = 0
+                For Each item As file In EnumerateLazyFiles()
+                    result += item.length
+                Next
+                Return result
+            End If
+            Return _lazyStore.GetDirectoryDirectFileByteCount(_lazyRecordOffset)
         End Function
 
         Friend Function GetLazyDirectDirectoryCount() As Integer
@@ -1227,53 +1243,43 @@ Public Class ltfsindex
             If _lazyStore IsNot Nothing Then
                 Dim lazyText As New Text.StringBuilder(40960)
                 Using lazyWriter As New IO.StringWriter(lazyText)
-                    _lazyStore.WriteDirectory(Me, lazyWriter, useCollectionWrappers:=True)
+                    _lazyStore.WriteDirectoryNative(Me, lazyWriter, useCollectionWrappers:=True)
                 End Using
                 Return lazyText.ToString()
             End If
-            Dim writer As New Xml.Serialization.XmlSerializer(GetType(directory))
-            Dim sb As New Text.StringBuilder
-            Dim t As New IO.StringWriter(sb)
-            writer.Serialize(t, Me)
-            Return sb.ToString()
+            Dim temporaryPath As String = LazySchemaStore.CreateTempFilePath("directory-output")
+            Try
+                NativeSchemaXml.WriteEagerDirectory(Me, temporaryPath, useCollectionWrappers:=True)
+                Return IO.File.ReadAllText(temporaryPath, Text.Encoding.UTF8)
+            Finally
+                Try
+                    If IO.File.Exists(temporaryPath) Then IO.File.Delete(temporaryPath)
+                Catch
+                End Try
+            End Try
         End Function
         Public Function SaveFile(FileName As String) As Boolean
             If _lazyStore IsNot Nothing Then
                 Try
-                    Using lazyWriter As New IO.StreamWriter(FileName, append:=False, encoding:=New Text.UTF8Encoding(False), bufferSize:=1 << 16)
-                        _lazyStore.WriteDirectory(Me, lazyWriter, useCollectionWrappers:=True)
-                    End Using
+                    _lazyStore.WriteDirectoryNative(Me, FileName, useCollectionWrappers:=True)
                     Return True
                 Catch
                     Return False
                 End Try
             End If
-            Dim writer As New Xml.Serialization.XmlSerializer(GetType(directory))
-            Dim ms As New IO.FileStream(FileName, IO.FileMode.Create)
-            Dim t As IO.TextWriter = New IO.StreamWriter(ms, New Text.UTF8Encoding(False))
-            Dim ns As New Xml.Serialization.XmlSerializerNamespaces({New Xml.XmlQualifiedName("v", "2.4.0")})
-            writer.Serialize(t, Me, ns)
-            t.Close()
-            ms.Close()
-            Return True
+            Try
+                NativeSchemaXml.WriteEagerDirectory(Me, FileName, useCollectionWrappers:=True)
+                Return True
+            Catch
+                Return False
+            End Try
         End Function
         Public Shared Function FromXML(s As String) As directory
-            Dim reader As New Xml.Serialization.XmlSerializer(GetType(directory))
-            Dim t As IO.TextReader = New IO.StringReader(s)
-            Return CType(reader.Deserialize(t), directory)
+            Return NativeSchemaXml.LoadDirectoryText(s)
         End Function
         Public Shared Function FromFile(FileName As String) As directory
             If String.IsNullOrWhiteSpace(FileName) OrElse Not IO.File.Exists(FileName) Then Return Nothing
-            If New IO.FileInfo(FileName).Length >= LazyLoadThresholdBytes Then
-                Return LazySchemaReader.LoadDirectory(FileName)
-            End If
-
-            Dim result As directory
-            Dim reader As New Xml.Serialization.XmlSerializer(GetType(directory))
-            Dim t As IO.StreamReader = New IO.StreamReader(FileName)
-            result = CType(reader.Deserialize(t), directory)
-            t.Close()
-            Return result
+            Return NativeSchemaXml.LoadDirectory(FileName)
         End Function
     End Class
     <Serializable>
@@ -1401,270 +1407,76 @@ Public Class ltfsindex
 
     Public Sub WriteSerializedText(output As IO.TextWriter, Optional ByVal reduceSize As Boolean = True)
         Searializing = True
-        Standarize()
-
-        If _lazyStore IsNot Nothing Then
-            Try
-                _lazyStore.WriteSchema(Me, output, reduceSize)
-            Finally
-                Searializing = False
-            End Try
-            Return
-        End If
-
-        Const buf As Integer = 1 << 16
-        Dim serializer As New Xml.Serialization.XmlSerializer(GetType(ltfsindex))
-        Dim ns As New Xml.Serialization.XmlSerializerNamespaces({New Xml.XmlQualifiedName("v", "2.4.0")})
-
         Try
-            Dim tempFile As String = $"{Application.StartupPath}\LCG_{Now:yyyyMMdd_HHmmss.fffffff}.tmp"
-            Using sw As New IO.StreamWriter(tempFile, append:=False, encoding:=New Text.UTF8Encoding(False), bufferSize:=buf)
-                serializer.Serialize(sw, Me, ns)
-            End Using
-
-            Using r As New IO.StreamReader(tempFile, Text.Encoding.UTF8, detectEncodingFromByteOrderMarks:=True, bufferSize:=buf)
-                Dim line As String = r.ReadLine()
-
-                If line IsNot Nothing Then
-                    If line.StartsWith("<?xml", StringComparison.Ordinal) AndAlso line.IndexOf("utf-8", StringComparison.Ordinal) >= 0 Then
-                        line = line.Replace("utf-8", "UTF-8")
-                    End If
-                    If reduceSize AndAlso line.IndexOf("xmlns:v", StringComparison.Ordinal) >= 0 Then
-                        line = line.Replace("xmlns:v", "version")
-                    End If
-                    If reduceSize Then line = line.Trim(" "c)
-                    If line.Length > 0 Then output.WriteLine(line)
-                End If
-
-                Do
-                    line = r.ReadLine()
-                    If line Is Nothing Then Exit Do
-
-                    If reduceSize Then
-                        If line.IndexOf("xmlns:v", StringComparison.Ordinal) >= 0 Then
-                            line = line.Replace("xmlns:v", "version")
-                        End If
-                        If line.IndexOf("_file", StringComparison.Ordinal) >= 0 Then
-                            line = line.Replace("<_file />", "").Replace("<_file>", "").Replace("</_file>", "")
-                        End If
-                        If line.IndexOf("_directory", StringComparison.Ordinal) >= 0 Then
-                            line = line.Replace("<_directory />", "").Replace("<_directory>", "").Replace("</_directory>", "")
-                        End If
-                        line = line.Trim(" "c)
-                    End If
-
-                    If line.Length > 0 Then output.WriteLine(line)
-                Loop
-            End Using
+            Standarize()
+            Dim temporaryPath As String = LazySchemaStore.CreateTempFilePath("schema-output")
             Try
-                IO.File.Delete(tempFile)
-            Catch
+                If _lazyStore IsNot Nothing Then
+                    _lazyStore.WriteSchemaNative(Me, temporaryPath, reduceSize)
+                Else
+                    NativeSchemaXml.WriteEagerIndex(Me, temporaryPath)
+                End If
+                output.Write(IO.File.ReadAllText(temporaryPath, Text.Encoding.UTF8))
+                output.Flush()
+            Finally
+                Try
+                    If IO.File.Exists(temporaryPath) Then IO.File.Delete(temporaryPath)
+                Catch
+                End Try
             End Try
-
         Finally
             Searializing = False
         End Try
+        Return
+
     End Sub
 
     Public Function SaveFile(fileName As String) As Boolean
         Searializing = True
-        Standarize()
-
-        If _lazyStore IsNot Nothing Then
-            Try
-                Using lazyWriter As New IO.StreamWriter(fileName, append:=False, encoding:=New Text.UTF8Encoding(False), bufferSize:=1 << 16)
-                    _lazyStore.WriteSchema(Me, lazyWriter, True)
-                End Using
-                Return True
-            Catch
-                Return False
-            Finally
-                Searializing = False
-            End Try
-        End If
-
-        Dim tempFile As String = $"{Application.StartupPath}\LCG_{Now:yyyyMMdd_HHmmss.fffffff}.tmp"
-        Const buf As Integer = 1 << 16
-
         Try
-            Using writer As New IO.StreamWriter(tempFile, append:=False, encoding:=New Text.UTF8Encoding(False), bufferSize:=buf)
-                Dim serializer As New Xml.Serialization.XmlSerializer(GetType(ltfsindex))
-                Dim ns As New Xml.Serialization.XmlSerializerNamespaces({New Xml.XmlQualifiedName("v", "2.4.0")})
-                serializer.Serialize(writer, Me, ns)
-            End Using
-
-            Using r As New IO.StreamReader(tempFile, Text.Encoding.UTF8, detectEncodingFromByteOrderMarks:=True, bufferSize:=buf)
-                Using w As New IO.StreamWriter(fileName, append:=False, encoding:=New Text.UTF8Encoding(False), bufferSize:=buf)
-                    Dim sline As String = r.ReadLine()
-                    If sline IsNot Nothing Then
-                        If sline.StartsWith("<?xml", StringComparison.Ordinal) Then
-                            If sline.IndexOf("utf-8", StringComparison.Ordinal) >= 0 Then
-                                sline = sline.Replace("utf-8", "UTF-8")
-                            End If
-                        End If
-                        If sline.IndexOf("xmlns:v", StringComparison.Ordinal) >= 0 Then
-                            sline = sline.Replace("xmlns:v", "version")
-                        End If
-                        sline = sline.Trim(" "c)
-                        If sline.Length > 0 Then w.WriteLine(sline)
-                    End If
-
-                    Do
-                        sline = r.ReadLine()
-                        If sline Is Nothing Then Exit Do
-                        If sline.IndexOf("xmlns:v", StringComparison.Ordinal) >= 0 Then
-                            sline = sline.Replace("xmlns:v", "version")
-                        End If
-                        If sline.IndexOf("_file", StringComparison.Ordinal) >= 0 Then
-                            sline = sline.Replace("<_file />", "") _
-                                         .Replace("<_file>", "") _
-                                         .Replace("</_file>", "")
-                        End If
-                        If sline.IndexOf("_directory", StringComparison.Ordinal) >= 0 Then
-                            sline = sline.Replace("<_directory />", "") _
-                                         .Replace("<_directory>", "") _
-                                         .Replace("</_directory>", "")
-                        End If
-                        sline = sline.Trim(" "c)
-                        If sline.Length > 0 Then w.WriteLine(sline)
-                    Loop
-                End Using
-            End Using
-
+            Standarize()
+            If _lazyStore IsNot Nothing Then
+                _lazyStore.WriteSchemaNative(Me, fileName, True)
+            Else
+                NativeSchemaXml.WriteEagerIndex(Me, fileName)
+            End If
             Return True
-
         Catch
             Return False
-
         Finally
             Searializing = False
-            Try
-                If IO.File.Exists(tempFile) Then IO.File.Delete(tempFile)
-            Catch
-            End Try
         End Try
+
     End Function
 
     Public Shared Function FromXML(s As String) As ltfsindex
-        Dim reader As New Xml.Serialization.XmlSerializer(GetType(ltfsindex))
-        Dim t As IO.TextReader = New IO.StringReader(s)
-        Return CType(reader.Deserialize(t), ltfsindex)
+        Return NativeSchemaXml.LoadText(s)
+
     End Function
     Public Shared Function FromSchemaText(s As String) As ltfsindex
-        s = s.Replace("<directory>", "<_directory><directory>")
-        s = s.Replace("</directory>", "</directory></_directory>")
-        s = s.Replace("<file>", "<_file><file>")
-        s = s.Replace("</file>", "</file></_file>")
-        s = s.Replace("%25", "%")
-        Dim reader As New Xml.Serialization.XmlSerializer(GetType(ltfsindex))
-        Dim t As IO.TextReader = New IO.StringReader(s)
-        Dim result As ltfsindex = CType(reader.Deserialize(t), ltfsindex)
-        result.Standarize()
-        Return result
-    End Function
-    Private Const LazyLoadThresholdBytes As Long = 4L * 1024L * 1024L
+        Return NativeSchemaXml.LoadText(s)
 
+    End Function
     Public Shared Function FromSchemaFile(FileName As String) As ltfsindex
         If String.IsNullOrWhiteSpace(FileName) OrElse Not IO.File.Exists(FileName) Then Return Nothing
 
         Try
-            ' A serializer-produced schema contains the XML Schema namespace,
-            ' while the compact tape schema does not.  Probe only the header so
-            ' opening a multi-million-file index never requires ReadAllText.
-            Dim serializedSchema As Boolean = False
-            Using probe As New IO.StreamReader(FileName, Text.Encoding.UTF8,
-                                                detectEncodingFromByteOrderMarks:=True,
-                                                bufferSize:=1 << 16)
-                Dim header As New Text.StringBuilder(1 << 16)
-                While header.Length < (1 << 16) AndAlso Not probe.EndOfStream
-                    Dim line As String = probe.ReadLine()
-                    If line Is Nothing Then Exit While
-                    header.AppendLine(line)
-                End While
-                serializedSchema = header.ToString().IndexOf("XMLSchema", StringComparison.Ordinal) >= 0
-            End Using
-
-            If serializedSchema Then
-                If New IO.FileInfo(FileName).Length >= LazyLoadThresholdBytes Then
-                    Return LazySchemaReader.Load(FileName)
-                End If
-                Return FromXML(IO.File.ReadAllText(FileName))
-            End If
-
-            Return FromSchFile(FileName)
+            Return NativeSchemaXml.LoadIndex(FileName)
         Catch ex As Exception
             MessageBox.Show(New Form With {.TopMost = True}, ex.ToString)
             Return Nothing
         End Try
+
     End Function
 
     Public Shared Function FromSchFile(FileName As String) As ltfsindex
         Try
-            If IO.File.Exists(FileName) AndAlso New IO.FileInfo(FileName).Length >= LazyLoadThresholdBytes Then
-                Return LazySchemaReader.Load(FileName)
-            End If
-
-            Return FromSchFileEager(FileName)
+            Return NativeSchemaXml.LoadIndex(FileName)
         Catch ex As Exception
             MessageBox.Show(New Form With {.TopMost = True}, ex.ToString)
             Return Nothing
         End Try
-    End Function
 
-    Private Shared Function FromSchFileEager(FileName As String) As ltfsindex
-        Const BUF As Integer = 1 << 16 ' 64 KiB
-        Dim tmpf As String = $"{Application.StartupPath}\LCX_{Now:yyyyMMdd_HHmmss.fffffff}_{Guid.NewGuid()}.tmp"
-        Dim result As ltfsindex = Nothing
-
-        Try
-            Using sin As New IO.StreamReader(FileName, Text.Encoding.UTF8, detectEncodingFromByteOrderMarks:=True, bufferSize:=BUF)
-                Using soutx As New IO.StreamWriter(tmpf, append:=False, encoding:=New Text.UTF8Encoding(False), bufferSize:=BUF)
-                    Do
-                        Dim s As String = sin.ReadLine()
-                        If s Is Nothing Then Exit Do
-
-                        If s.Length = 0 Then
-                            Continue Do
-                        End If
-
-                        If s.IndexOf("<directory>", StringComparison.Ordinal) >= 0 Then
-                            s = s.Replace("<directory>", "<_directory><directory>")
-                        End If
-                        If s.IndexOf("</directory>", StringComparison.Ordinal) >= 0 Then
-                            s = s.Replace("</directory>", "</directory></_directory>")
-                        End If
-                        If s.IndexOf("<file>", StringComparison.Ordinal) >= 0 Then
-                            s = s.Replace("<file>", "<_file><file>")
-                        End If
-                        If s.IndexOf("</file>", StringComparison.Ordinal) >= 0 Then
-                            s = s.Replace("</file>", "</file></_file>")
-                        End If
-                        If s.IndexOf("%25", StringComparison.Ordinal) >= 0 Then
-                            s = s.Replace("%25", "%")
-                        End If
-
-                        soutx.WriteLine(s)
-                    Loop
-                End Using
-            End Using
-
-            Dim reader As New Xml.Serialization.XmlSerializer(GetType(ltfsindex))
-            Using t As New IO.StreamReader(tmpf, Text.Encoding.UTF8, detectEncodingFromByteOrderMarks:=True, bufferSize:=BUF)
-                result = CType(reader.Deserialize(t), ltfsindex)
-            End Using
-
-            If result IsNot Nothing Then
-                result.Standarize()
-            End If
-
-        Finally
-            Try
-                If IO.File.Exists(tmpf) Then IO.File.Delete(tmpf)
-            Catch
-            End Try
-        End Try
-
-        Return result
     End Function
 
     Public Function Clone() As ltfsindex
@@ -1773,18 +1585,31 @@ End Structure
 Friend NotInheritable Class LazySchemaStore
     Private Const DirectoryMagic As Integer = &H4C534452 ' LSDR
     Private Const DirectoryVersion As Integer = 2
-    Private Const DirectoryHeaderSize As Integer = 64
     Private Const FileIndexEntrySize As Integer = 32
     Private Const DirectoryIndexEntrySize As Integer = 24
     Private Const IoBufferSize As Integer = 1 << 16
     Private Shared ReadOnly StrictUtf8 As New Text.UTF8Encoding(False, True)
-    Private Shared ReadOnly LazyNameReaderSettings As New XmlReaderSettings With {
-        .IgnoreComments = True,
-        .IgnoreWhitespace = True,
-        .IgnoreProcessingInstructions = True,
-        .DtdProcessing = DtdProcessing.Prohibit,
-        .XmlResolver = Nothing,
-        .CloseInput = True}
+
+    Private Shared Sub ReadExactly(stream As IO.Stream, buffer As Byte(), offset As Integer, count As Integer)
+        Dim total As Integer = 0
+        While total < count
+            Dim readCount As Integer = stream.Read(buffer, offset + total, count - total)
+            If readCount <= 0 Then Throw New IO.EndOfStreamException()
+            total += readCount
+        End While
+    End Sub
+
+    Private Shared Function ReadInt32(stream As IO.Stream) As Integer
+        Dim bytes(3) As Byte
+        ReadExactly(stream, bytes, 0, bytes.Length)
+        Return BitConverter.ToInt32(bytes, 0)
+    End Function
+
+    Private Shared Function ReadInt64(stream As IO.Stream) As Long
+        Dim bytes(7) As Byte
+        ReadExactly(stream, bytes, 0, bytes.Length)
+        Return BitConverter.ToInt64(bytes, 0)
+    End Function
 
     Private ReadOnly _fileRecordsPath As String
     Private ReadOnly _directoryRecordsPath As String
@@ -1793,6 +1618,7 @@ Friend NotInheritable Class LazySchemaStore
     Private ReadOnly _selectionPath As String
     Private ReadOnly _buildLock As New Object
     Private ReadOnly _selectionLock As New Object
+    Private ReadOnly _readCacheLock As New Object
 
     Private _fileRecords As IO.FileStream
     Private _directoryRecords As IO.FileStream
@@ -1803,6 +1629,7 @@ Friend NotInheritable Class LazySchemaStore
     Private _directoryWriter As IO.BinaryWriter
     Private _fileIndexWriter As IO.BinaryWriter
     Private _directoryIndexWriter As IO.BinaryWriter
+    Private _nativeStore As IntPtr
     Private _building As Boolean
     Private _nextSelectionIndex As Long
     Private ReadOnly _mutationLock As New Object
@@ -1811,6 +1638,8 @@ Friend NotInheritable Class LazySchemaStore
     Private ReadOnly _modifiedDirectories As New Dictionary(Of Long, ltfsindex.directory)
     Private ReadOnly _fileTotalDeltas As New Dictionary(Of Long, Long)
     Private ReadOnly _directoryTotalDeltas As New Dictionary(Of Long, Long)
+    Private ReadOnly _directoryHeaderCache As New Dictionary(Of Long, LazyDirectoryHeader)
+    Private ReadOnly _directoryDirectFileByteCountCache As New Dictionary(Of Long, Long)
 
     'A larger run keeps the external merge fan-in small while retaining a
     'bounded memory footprint (only one chunk is resident at a time).
@@ -1826,7 +1655,6 @@ Friend NotInheritable Class LazySchemaStore
         Implements IDisposable
 
         Private ReadOnly _stream As IO.FileStream
-        Private ReadOnly _reader As IO.BinaryReader
         Private _hasCurrent As Boolean
         Private _name As String
         Private _indexOffset As Long
@@ -1836,7 +1664,6 @@ Friend NotInheritable Class LazySchemaStore
             Me.RunId = runId
             _stream = New IO.FileStream(path, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read,
                                         IoBufferSize, IO.FileOptions.SequentialScan)
-            _reader = New IO.BinaryReader(_stream, New Text.UTF8Encoding(False, True), leaveOpen:=False)
         End Sub
 
         Public ReadOnly Property Name As String
@@ -1862,9 +1689,9 @@ Friend NotInheritable Class LazySchemaStore
                 Return False
             End If
 
-            _sequence = _reader.ReadInt64()
-            _indexOffset = _reader.ReadInt64()
-            _name = ReadNullableString(_reader)
+            _sequence = ReadInt64(_stream)
+            _indexOffset = ReadInt64(_stream)
+            _name = ReadNullableString(_stream)
             _hasCurrent = True
             Return True
         End Function
@@ -1876,7 +1703,7 @@ Friend NotInheritable Class LazySchemaStore
         End Property
 
         Public Sub Dispose() Implements IDisposable.Dispose
-            If _reader IsNot Nothing Then _reader.Dispose()
+            If _stream IsNot Nothing Then _stream.Dispose()
         End Sub
     End Class
 
@@ -1903,24 +1730,36 @@ Friend NotInheritable Class LazySchemaStore
                     directoryRecordsPath As String,
                     fileIndexPath As String,
                     directoryIndexPath As String,
-                    selectionPath As String)
+                    selectionPath As String,
+                    Optional createFiles As Boolean = True)
         _fileRecordsPath = fileRecordsPath
         _directoryRecordsPath = directoryRecordsPath
         _fileIndexPath = fileIndexPath
         _directoryIndexPath = directoryIndexPath
         _selectionPath = selectionPath
 
-        _fileRecords = New IO.FileStream(_fileRecordsPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
-        _directoryRecords = New IO.FileStream(_directoryRecordsPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
-        _fileIndex = New IO.FileStream(_fileIndexPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
-        _directoryIndex = New IO.FileStream(_directoryIndexPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
-        _selectionStream = New IO.FileStream(_selectionPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.ReadWrite, IoBufferSize, IO.FileOptions.RandomAccess)
-        Dim utf8 As New Text.UTF8Encoding(False, True)
-        _fileWriter = New IO.BinaryWriter(_fileRecords, utf8, leaveOpen:=True)
-        _directoryWriter = New IO.BinaryWriter(_directoryRecords, utf8, leaveOpen:=True)
-        _fileIndexWriter = New IO.BinaryWriter(_fileIndex, utf8, leaveOpen:=True)
-        _directoryIndexWriter = New IO.BinaryWriter(_directoryIndex, utf8, leaveOpen:=True)
-        _building = True
+        If createFiles Then
+            _fileRecords = New IO.FileStream(_fileRecordsPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
+            _directoryRecords = New IO.FileStream(_directoryRecordsPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
+            _fileIndex = New IO.FileStream(_fileIndexPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
+            _directoryIndex = New IO.FileStream(_directoryIndexPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
+            _selectionStream = New IO.FileStream(_selectionPath, IO.FileMode.Create, IO.FileAccess.ReadWrite, IO.FileShare.ReadWrite, IoBufferSize, IO.FileOptions.RandomAccess)
+            Dim utf8 As New Text.UTF8Encoding(False, True)
+            _fileWriter = New IO.BinaryWriter(_fileRecords, utf8, leaveOpen:=True)
+            _directoryWriter = New IO.BinaryWriter(_directoryRecords, utf8, leaveOpen:=True)
+            _fileIndexWriter = New IO.BinaryWriter(_fileIndex, utf8, leaveOpen:=True)
+            _directoryIndexWriter = New IO.BinaryWriter(_directoryIndex, utf8, leaveOpen:=True)
+            _building = True
+        Else
+            If Not IO.File.Exists(_fileRecordsPath) OrElse Not IO.File.Exists(_directoryRecordsPath) OrElse
+               Not IO.File.Exists(_fileIndexPath) OrElse Not IO.File.Exists(_directoryIndexPath) OrElse
+               Not IO.File.Exists(_selectionPath) Then
+                Throw New IO.InvalidDataException("Native schema backing files are incomplete.")
+            End If
+            _selectionStream = New IO.FileStream(_selectionPath, IO.FileMode.Open, IO.FileAccess.ReadWrite, IO.FileShare.ReadWrite, IoBufferSize, IO.FileOptions.RandomAccess)
+            _nextSelectionIndex = _selectionStream.Length
+            _building = False
+        End If
     End Sub
 
     Friend Shared Function CreateForBuild() As LazySchemaStore
@@ -1929,7 +1768,7 @@ Friend NotInheritable Class LazySchemaStore
             For Each suffix As String In New String() {"files", "directories", "file-index", "directory-index", "selection"}
                 paths.Add(CreateTempFilePath(suffix))
             Next
-            Return New LazySchemaStore(paths(0), paths(1), paths(2), paths(3), paths(4))
+            Return New LazySchemaStore(paths(0), paths(1), paths(2), paths(3), paths(4), createFiles:=True)
         Catch
             For Each path As String In paths
                 Try
@@ -1941,7 +1780,7 @@ Friend NotInheritable Class LazySchemaStore
         End Try
     End Function
 
-    Private Shared Function CreateTempFilePath(suffix As String) As String
+    Friend Shared Function CreateTempFilePath(suffix As String) As String
         Dim directories As New List(Of String)
         Try
             directories.Add(System.Windows.Forms.Application.StartupPath)
@@ -1966,25 +1805,50 @@ Friend NotInheritable Class LazySchemaStore
         Throw New IO.IOException("Unable to create a temporary schema store.")
     End Function
 
+    Friend Shared Function CreateForNativeImport(paths As String()) As LazySchemaStore
+        If paths Is Nothing OrElse paths.Length <> 5 Then Throw New ArgumentException("Five native schema backing paths are required.", NameOf(paths))
+        Return New LazySchemaStore(paths(0), paths(1), paths(2), paths(3), paths(4), createFiles:=False)
+    End Function
+
+    Friend Function EnsureNativeStore() As IntPtr
+        SyncLock _buildLock
+            If _nativeStore = IntPtr.Zero Then
+                NativeSchemaXml.OpenStore(_fileRecordsPath, _directoryRecordsPath, _fileIndexPath, _directoryIndexPath, _nativeStore)
+            End If
+            Return _nativeStore
+        End SyncLock
+    End Function
+
+    Private Sub CloseNativeStore()
+        If _nativeStore <> IntPtr.Zero Then
+            NativeSchemaXml.CloseStore(_nativeStore)
+            _nativeStore = IntPtr.Zero
+        End If
+        SyncLock _readCacheLock
+            _directoryHeaderCache.Clear()
+            _directoryDirectFileByteCountCache.Clear()
+        End SyncLock
+    End Sub
+
     Friend Function BeginFileRecord() As Long
         EnsureBuilding()
         Return _fileRecords.Position
-    End Function
-
-    Friend Function CreateFileXmlWriter() As XmlWriter
-        EnsureBuilding()
-        Return XmlWriter.Create(_fileRecords, New XmlWriterSettings With {
-            .Encoding = New Text.UTF8Encoding(False),
-            .OmitXmlDeclaration = True,
-            .Indent = False,
-            .CloseOutput = False,
-            .CheckCharacters = True})
     End Function
 
     Friend Function EndFileRecord(startOffset As Long) As Long
         EnsureBuilding()
         _fileRecords.Flush()
         Return _fileRecords.Position - startOffset
+    End Function
+
+    Friend Function AppendNativeFileRecord(value As ltfsindex.file) As Tuple(Of Long, Long)
+        EnsureBuilding()
+        Dim bytes As Byte() = NativeSchemaXml.SerializeFile(value)
+        If bytes Is Nothing OrElse bytes.Length = 0 Then Throw New IO.InvalidDataException("Native schema file serialization returned no data.")
+        Dim offset As Long = _fileRecords.Position
+        _fileRecords.Write(bytes, 0, bytes.Length)
+        _fileRecords.Flush()
+        Return Tuple.Create(offset, CLng(bytes.Length))
     End Function
 
     Friend Function AllocateSelectionIndex() As Long
@@ -2124,6 +1988,7 @@ Friend NotInheritable Class LazySchemaStore
     Friend Sub AbortBuild()
         SyncLock _buildLock
             _building = False
+            CloseNativeStore()
             CloseBuildStreams()
             CloseSelectionStream()
             DeleteBackingFiles()
@@ -2173,6 +2038,21 @@ Friend NotInheritable Class LazySchemaStore
             Dim result As ltfsindex.file = Nothing
             If _modifiedFiles.TryGetValue(recordOffset, result) Then Return result
             Return Nothing
+        End SyncLock
+    End Function
+
+    Friend Function HasPendingByteChanges() As Boolean
+        SyncLock _mutationLock
+            If _modifiedFiles.Count > 0 Then Return True
+            For Each mutation As LazyDirectoryMutation In _directoryMutations.Values
+                If mutation.AddedFiles.Count > 0 OrElse
+                   mutation.AddedDirectories.Count > 0 OrElse
+                   mutation.RemovedFileOffsets.Count > 0 OrElse
+                   mutation.RemovedDirectoryOffsets.Count > 0 Then
+                    Return True
+                End If
+            Next
+            Return False
         End SyncLock
     End Function
 
@@ -2381,21 +2261,17 @@ Friend NotInheritable Class LazySchemaStore
     End Sub
 
     Friend Function ReadDirectoryScalars(recordOffset As Long) As LazyDirectoryScalarData
-        Dim header As LazyDirectoryHeader = ReadDirectoryHeader(recordOffset)
+        Dim handle As IntPtr = EnsureNativeStore()
+        Dim info As NativeSchemaXml.NativeStoreDirectoryInfo = NativeSchemaXml.ReadStoreDirectoryInfo(handle, recordOffset)
         Dim result As New LazyDirectoryScalarData
-        Using stream As New IO.FileStream(_directoryRecordsPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, IoBufferSize, IO.FileOptions.RandomAccess)
-            stream.Seek(header.ScalarOffset, IO.SeekOrigin.Begin)
-            Using reader As New IO.BinaryReader(stream, New Text.UTF8Encoding(False, True), leaveOpen:=False)
-                result.Name = ReadNullableString(reader)
-                result.ReadOnly = reader.ReadBoolean()
-                result.CreationTime = ReadNullableString(reader)
-                result.ChangeTime = ReadNullableString(reader)
-                result.ModifyTime = ReadNullableString(reader)
-                result.AccessTime = ReadNullableString(reader)
-                result.BackupTime = ReadNullableString(reader)
-                result.FileUid = reader.ReadInt64()
-            End Using
-        End Using
+        result.Name = NativeSchemaXml.CopyStoreDirectoryString(handle, recordOffset, 1UI)
+        result.ReadOnly = info.[ReadOnly] <> 0UI
+        result.CreationTime = NativeSchemaXml.CopyStoreDirectoryString(handle, recordOffset, 2UI)
+        result.ChangeTime = NativeSchemaXml.CopyStoreDirectoryString(handle, recordOffset, 3UI)
+        result.ModifyTime = NativeSchemaXml.CopyStoreDirectoryString(handle, recordOffset, 4UI)
+        result.AccessTime = NativeSchemaXml.CopyStoreDirectoryString(handle, recordOffset, 5UI)
+        result.BackupTime = NativeSchemaXml.CopyStoreDirectoryString(handle, recordOffset, 6UI)
+        result.FileUid = info.FileUid
         Return result
     End Function
 
@@ -2496,6 +2372,18 @@ Friend NotInheritable Class LazySchemaStore
         End SyncLock
     End Function
 
+    Friend Function GetDirectoryDirectFileByteCount(recordOffset As Long) As Long
+        If recordOffset < 0 Then Throw New IO.InvalidDataException("Lazy schema directory record is outside the backing file.")
+        Dim handle As IntPtr = EnsureNativeStore()
+        SyncLock _readCacheLock
+            Dim cached As Long
+            If _directoryDirectFileByteCountCache.TryGetValue(recordOffset, cached) Then Return cached
+            Dim result As Long = NativeSchemaXml.ReadStoreDirectoryFileBytes(handle, recordOffset)
+            _directoryDirectFileByteCountCache(recordOffset) = result
+            Return result
+        End SyncLock
+    End Function
+
     Private Function FlushSortChunk(items As List(Of LazySortItem),
                                     nameComparer As Comparison(Of String)) As String
         If items Is Nothing OrElse items.Count = 0 Then Return Nothing
@@ -2553,170 +2441,8 @@ Friend NotInheritable Class LazySchemaStore
         End Try
     End Sub
 
-    Private NotInheritable Class LazyFileNameScanner
-        Private Const ScanBufferSize As Integer = 1 << 16
-        Private ReadOnly _stream As IO.FileStream
-        Private ReadOnly _buffer As Byte() = New Byte(ScanBufferSize - 1) {}
-        Private ReadOnly _tagText As New Text.StringBuilder(128)
-        Private _bufferIndex As Integer
-        Private _bufferCount As Integer
-        Private _remaining As Long
-        Private _nameBytes As Byte() = New Byte(256 - 1) {}
-        Private _nameLength As Integer
-
-        Public Sub New(stream As IO.FileStream)
-            _stream = stream
-        End Sub
-
-        Private Function ReadByte() As Integer
-            If _remaining <= 0 Then Return -1
-            If _bufferIndex >= _bufferCount Then
-                Dim wanted As Integer = CInt(Math.Min(CLng(_buffer.Length), _remaining))
-                _bufferCount = _stream.Read(_buffer, 0, wanted)
-                _bufferIndex = 0
-                If _bufferCount <= 0 Then
-                    _remaining = 0
-                    Return -1
-                End If
-            End If
-
-            Dim result As Integer = _buffer(_bufferIndex)
-            _bufferIndex += 1
-            _remaining -= 1
-            Return result
-        End Function
-
-        Private Function ReadTag() As String
-            _tagText.Length = 0
-            Dim quote As Integer = 0
-            While True
-                Dim value As Integer = ReadByte()
-                If value < 0 Then Return Nothing
-                If quote = 0 AndAlso (value = AscW("'"c) OrElse value = AscW(""""c)) Then
-                    quote = value
-                ElseIf quote <> 0 AndAlso value = quote Then
-                    quote = 0
-                ElseIf quote = 0 AndAlso value = AscW(">"c) Then
-                    Return _tagText.ToString()
-                End If
-                If _tagText.Length < 4096 Then _tagText.Append(ChrW(value))
-            End While
-            Return Nothing
-        End Function
-
-        Private Shared Function IsNameStartTag(tag As String) As Boolean
-            If tag Is Nothing Then Return False
-            Dim value As String = tag.Trim()
-            If value.StartsWith("/", StringComparison.Ordinal) OrElse value.StartsWith("!", StringComparison.Ordinal) Then Return False
-            Dim separator As Integer = value.LastIndexOf(":"c)
-            Dim nameStart As Integer = If(separator >= 0, separator + 1, 0)
-            If value.Length < nameStart + 4 OrElse Not String.Equals(value.Substring(nameStart, 4), "name", StringComparison.OrdinalIgnoreCase) Then Return False
-            If value.Length = nameStart + 4 Then Return True
-            Dim nextCharacter As Char = value(nameStart + 4)
-            Return Char.IsWhiteSpace(nextCharacter) OrElse nextCharacter = "/"c
-        End Function
-
-        Private Shared Function IsNameEndTag(tag As String) As Boolean
-            If tag Is Nothing Then Return False
-            Dim value As String = tag.Trim()
-            If Not value.StartsWith("/", StringComparison.Ordinal) Then Return False
-            value = value.Substring(1).Trim()
-            Dim separator As Integer = value.LastIndexOf(":"c)
-            If separator >= 0 Then value = value.Substring(separator + 1)
-            Return String.Equals(value, "name", StringComparison.OrdinalIgnoreCase)
-        End Function
-
-        Private Sub AppendNameByte(value As Integer)
-            If _nameLength >= _nameBytes.Length Then ReDim Preserve _nameBytes((_nameBytes.Length * 2) - 1)
-            _nameBytes(_nameLength) = CByte(value)
-            _nameLength += 1
-        End Sub
-
-        Private Function DecodeName() As String
-            Dim result As String = StrictUtf8.GetString(_nameBytes, 0, _nameLength)
-            result = System.Net.WebUtility.HtmlDecode(result)
-            Return LazySchemaStore.DecodeSchemaValue(result)
-        End Function
-
-        Private Function TryReadFast(recordOffset As Long, recordLength As Long, ByRef result As String) As Boolean
-            If _stream Is Nothing OrElse recordOffset < 0 OrElse recordLength <= 0 OrElse
-               recordOffset > _stream.Length OrElse recordLength > _stream.Length - recordOffset Then
-                Throw New IO.InvalidDataException("Invalid lazy schema file record.")
-            End If
-
-            _stream.Seek(recordOffset, IO.SeekOrigin.Begin)
-            _bufferIndex = 0
-            _bufferCount = 0
-            _remaining = recordLength
-            _nameLength = 0
-
-            While True
-                Dim value As Integer = ReadByte()
-                If value < 0 Then Return False
-                If value <> AscW("<"c) Then Continue While
-                Dim tag As String = ReadTag()
-                If IsNameStartTag(tag) Then
-                    If tag.Trim().EndsWith("/", StringComparison.Ordinal) Then
-                        result = String.Empty
-                        Return True
-                    End If
-                    Exit While
-                End If
-            End While
-
-            While True
-                Dim value As Integer = ReadByte()
-                If value < 0 Then Return False
-                If value = AscW("<"c) Then
-                    Dim tag As String = ReadTag()
-                    If IsNameEndTag(tag) Then
-                        result = DecodeName()
-                        Return True
-                    End If
-                    'CDATA or nested XML is uncommon for a file name.  Let the
-                    'XML fallback handle it without making the fast path fragile.
-                    Return False
-                End If
-                AppendNameByte(value)
-            End While
-            Return False
-        End Function
-
-        Private Function ReadXmlFallback(recordOffset As Long, recordLength As Long) As String
-            _stream.Seek(recordOffset, IO.SeekOrigin.Begin)
-            Using limited As New LazySchemaLimitedStream(_stream, recordLength, leaveInnerOpen:=True)
-                Using reader As XmlReader = XmlReader.Create(limited, LazyNameReaderSettings)
-                    reader.MoveToContent()
-                    If reader.NodeType <> XmlNodeType.Element Then Return Nothing
-                    Dim rootDepth As Integer = reader.Depth
-                    If reader.IsEmptyElement Then Return Nothing
-
-                    While reader.Read()
-                        If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = rootDepth Then Exit While
-                        If reader.NodeType <> XmlNodeType.Element OrElse reader.Depth <> rootDepth + 1 Then Continue While
-                        If String.Equals(reader.LocalName, "name", StringComparison.OrdinalIgnoreCase) Then
-                            Return LazySchemaStore.DecodeSchemaValue(ReadElementText(reader))
-                        End If
-                        SkipElement(reader)
-                    End While
-                End Using
-            End Using
-            Return Nothing
-        End Function
-
-        Public Function Read(recordOffset As Long, recordLength As Long) As String
-            Dim result As String = Nothing
-            If TryReadFast(recordOffset, recordLength, result) Then Return result
-            Return ReadXmlFallback(recordOffset, recordLength)
-        End Function
-    End Class
-
-    Private Function ReadDirectoryName(stream As IO.FileStream, recordOffset As Long) As String
-        Dim header As LazyDirectoryHeader = ReadDirectoryHeader(stream, recordOffset)
-        stream.Seek(header.ScalarOffset, IO.SeekOrigin.Begin)
-        Using reader As New IO.BinaryReader(stream, StrictUtf8, leaveOpen:=True)
-            Return ReadNullableString(reader)
-        End Using
+    Private Function ReadDirectoryName(recordOffset As Long) As String
+        Return NativeSchemaXml.CopyStoreDirectoryString(EnsureNativeStore(), recordOffset, 1UI)
     End Function
 
     Private Sub SortIndexChain(recordOffset As Long,
@@ -2736,53 +2462,46 @@ Friend NotInheritable Class LazySchemaStore
         Dim items As New List(Of LazySortItem)(Math.Min(SortChunkSize, itemCount))
         Dim sortedIndexPath As String = Nothing
         Try
-            'Read the index chain and all sort keys with one record stream.  The
-            'old implementation opened and parsed a backing file once per
-            'entry, which turns a million-file sort into a million file opens.
-            Using indexStream As New IO.FileStream(indexPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.ReadWrite,
-                                                   IoBufferSize, IO.FileOptions.SequentialScan)
-                Using reader As New IO.BinaryReader(indexStream, StrictUtf8, leaveOpen:=True)
-                    Dim recordPath As String = If(isFile, _fileRecordsPath, _directoryRecordsPath)
-                    Using recordStream As New IO.FileStream(recordPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read,
-                                                           IoBufferSize, IO.FileOptions.RandomAccess)
-                        Dim nameScanner As LazyFileNameScanner = Nothing
-                        If isFile Then nameScanner = New LazyFileNameScanner(recordStream)
-                        Dim indexOffset As Long = firstIndexOffset
-                        For sequence As Long = 0 To itemCount - 1
-                            If indexOffset < 0 OrElse indexOffset > indexStream.Length - entrySize Then
-                                Throw New IO.InvalidDataException("Invalid lazy schema index chain.")
-                            End If
+            'Read all backing index entries through the native store handle.
+            Dim indexOffset As Long = firstIndexOffset
+            For sequence As Long = 0 To itemCount - 1
+                If indexOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema index chain.")
 
-                            indexStream.Seek(indexOffset, IO.SeekOrigin.Begin)
-                            Dim nextIndexOffset As Long = reader.ReadInt64()
-                            Dim childRecordOffset As Long = reader.ReadInt64()
-                            Dim childRecordLength As Long = If(isFile, reader.ReadInt64(), 0L)
-                            reader.ReadInt64()
+                Dim nextIndexOffset As Long
+                Dim childRecordOffset As Long
+                Dim childRecordLength As Long = 0L
+                If isFile Then
+                    Dim entry As NativeSchemaXml.NativeStoreFileIndexEntry = NativeSchemaXml.ReadStoreFileIndexEntry(EnsureNativeStore(), indexOffset)
+                    nextIndexOffset = entry.NextOffset
+                    childRecordOffset = entry.RecordOffset
+                    childRecordLength = entry.RecordLength
+                Else
+                    Dim entry As NativeSchemaXml.NativeStoreDirectoryIndexEntry = NativeSchemaXml.ReadStoreDirectoryIndexEntry(EnsureNativeStore(), indexOffset)
+                    nextIndexOffset = entry.NextOffset
+                    childRecordOffset = entry.RecordOffset
+                End If
 
-                            Dim childName As String
-                            If isFile Then
-                                childName = nameScanner.Read(childRecordOffset, childRecordLength)
-                            Else
-                                childName = ReadDirectoryName(recordStream, childRecordOffset)
-                            End If
-                            items.Add(New LazySortItem With {
-                                          .Name = If(childName, String.Empty),
-                                          .IndexOffset = indexOffset,
-                                          .Sequence = sequence})
+                Dim childName As String
+                If isFile Then
+                    childName = NativeSchemaXml.CopyStoreFileName(EnsureNativeStore(), childRecordOffset, childRecordLength)
+                Else
+                    childName = ReadDirectoryName(childRecordOffset)
+                End If
+                items.Add(New LazySortItem With {
+                              .Name = If(childName, String.Empty),
+                              .IndexOffset = indexOffset,
+                              .Sequence = sequence})
 
-                            If items.Count >= SortChunkSize Then
-                                Dim runPath As String = FlushSortChunk(items, nameComparer)
-                                If runPath IsNot Nothing Then runPaths.Add(runPath)
-                            End If
-                            indexOffset = nextIndexOffset
-                        Next
-                        If items.Count > 0 Then
-                            Dim runPath As String = FlushSortChunk(items, nameComparer)
-                            If runPath IsNot Nothing Then runPaths.Add(runPath)
-                        End If
-                    End Using
-                End Using
-            End Using
+                If items.Count >= SortChunkSize Then
+                    Dim runPath As String = FlushSortChunk(items, nameComparer)
+                    If runPath IsNot Nothing Then runPaths.Add(runPath)
+                End If
+                indexOffset = nextIndexOffset
+            Next
+            If items.Count > 0 Then
+                Dim runPath As String = FlushSortChunk(items, nameComparer)
+                If runPath IsNot Nothing Then runPaths.Add(runPath)
+            End If
 
             If runPaths.Count = 0 Then Exit Sub
 
@@ -2795,43 +2514,44 @@ Friend NotInheritable Class LazySchemaStore
             Dim firstTempOffset As Long = -1
             Dim lastTempOffset As Long = -1
             Dim sortedCount As Integer = 0
-            Using sourceIndexStream As New IO.FileStream(indexPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.ReadWrite,
-                                                         IoBufferSize, IO.FileOptions.RandomAccess)
-                Using sourceReader As New IO.BinaryReader(sourceIndexStream, StrictUtf8, leaveOpen:=True)
-                    Using sortedStream As New IO.FileStream(sortedIndexPath, IO.FileMode.Create, IO.FileAccess.Write, IO.FileShare.Read,
-                                                           IoBufferSize, IO.FileOptions.SequentialScan)
-                        Using sortedWriter As New IO.BinaryWriter(sortedStream, StrictUtf8, leaveOpen:=True)
-                            MergeSortRuns(runPaths, nameComparer,
-                                          Sub(sortedIndexOffset As Long)
-                                              If sortedIndexOffset < 0 OrElse sortedIndexOffset > sourceIndexStream.Length - entrySize Then
-                                                  Throw New IO.InvalidDataException("Invalid lazy schema sort entry.")
-                                              End If
+            Using sortedStream As New IO.FileStream(sortedIndexPath, IO.FileMode.Create, IO.FileAccess.Write, IO.FileShare.Read,
+                                                    IoBufferSize, IO.FileOptions.SequentialScan)
+                Using sortedWriter As New IO.BinaryWriter(sortedStream, StrictUtf8, leaveOpen:=True)
+                    MergeSortRuns(runPaths, nameComparer,
+                                  Sub(sortedIndexOffset As Long)
+                                      If sortedIndexOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema sort entry.")
 
-                                              sourceIndexStream.Seek(sortedIndexOffset, IO.SeekOrigin.Begin)
-                                              sourceReader.ReadInt64()
-                                              Dim childRecordOffset As Long = sourceReader.ReadInt64()
-                                              Dim childRecordLength As Long = If(isFile, sourceReader.ReadInt64(), 0L)
-                                              Dim selectionIndex As Long = sourceReader.ReadInt64()
+                                      Dim childRecordOffset As Long
+                                      Dim childRecordLength As Long = 0L
+                                      Dim selectionIndex As Long
+                                      If isFile Then
+                                          Dim entry As NativeSchemaXml.NativeStoreFileIndexEntry = NativeSchemaXml.ReadStoreFileIndexEntry(EnsureNativeStore(), sortedIndexOffset)
+                                          childRecordOffset = entry.RecordOffset
+                                          childRecordLength = entry.RecordLength
+                                          selectionIndex = entry.SelectionIndex
+                                      Else
+                                          Dim entry As NativeSchemaXml.NativeStoreDirectoryIndexEntry = NativeSchemaXml.ReadStoreDirectoryIndexEntry(EnsureNativeStore(), sortedIndexOffset)
+                                          childRecordOffset = entry.RecordOffset
+                                          selectionIndex = entry.SelectionIndex
+                                      End If
 
-                                              Dim newOffset As Long = sortedStream.Position
-                                              sortedWriter.Write(newOffset + entrySize)
-                                              sortedWriter.Write(childRecordOffset)
-                                              If isFile Then sortedWriter.Write(childRecordLength)
-                                              sortedWriter.Write(selectionIndex)
-                                              If firstTempOffset < 0 Then firstTempOffset = newOffset
-                                              lastTempOffset = newOffset
-                                              sortedCount += 1
-                                          End Sub)
+                                      Dim newOffset As Long = sortedStream.Position
+                                      sortedWriter.Write(newOffset + entrySize)
+                                      sortedWriter.Write(childRecordOffset)
+                                      If isFile Then sortedWriter.Write(childRecordLength)
+                                      sortedWriter.Write(selectionIndex)
+                                      If firstTempOffset < 0 Then firstTempOffset = newOffset
+                                      lastTempOffset = newOffset
+                                      sortedCount += 1
+                                  End Sub)
 
-                            If sortedCount <> itemCount Then Throw New IO.InvalidDataException("Lazy schema sort lost an index entry.")
-                            If lastTempOffset >= 0 Then
-                                sortedWriter.Flush()
-                                sortedStream.Seek(lastTempOffset, IO.SeekOrigin.Begin)
-                                sortedWriter.Write(CLng(-1))
-                                sortedWriter.Flush()
-                            End If
-                        End Using
-                    End Using
+                    If sortedCount <> itemCount Then Throw New IO.InvalidDataException("Lazy schema sort lost an index entry.")
+                    If lastTempOffset >= 0 Then
+                        sortedWriter.Flush()
+                        sortedStream.Seek(lastTempOffset, IO.SeekOrigin.Begin)
+                        sortedWriter.Write(CLng(-1))
+                        sortedWriter.Flush()
+                    End If
                 End Using
             End Using
 
@@ -2854,6 +2574,7 @@ Friend NotInheritable Class LazySchemaStore
                     writer.Flush()
                 End Using
             End Using
+            InvalidateDirectoryReadCaches(recordOffset)
         Finally
             For Each runPath As String In runPaths
                 Try
@@ -2868,6 +2589,14 @@ Friend NotInheritable Class LazySchemaStore
                 End Try
             End If
         End Try
+    End Sub
+
+    Private Sub InvalidateDirectoryReadCaches(recordOffset As Long)
+        If recordOffset < 0 Then Return
+        SyncLock _readCacheLock
+            _directoryHeaderCache.Remove(recordOffset)
+            _directoryDirectFileByteCountCache.Remove(recordOffset)
+        End SyncLock
     End Sub
 
     Friend Sub SortFileChildren(recordOffset As Long, nameComparer As Comparison(Of String))
@@ -2890,32 +2619,26 @@ Friend NotInheritable Class LazySchemaStore
         If index < 0 OrElse index >= header.FileCount Then Throw New ArgumentOutOfRangeException(NameOf(index))
         If header.FileIndexOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema file index.")
 
-        Using stream As New IO.FileStream(_fileIndexPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, IoBufferSize, IO.FileOptions.RandomAccess)
-            Dim entryOffset As Long = header.FileIndexOffset
-            Using reader As New IO.BinaryReader(stream, New Text.UTF8Encoding(False, True), leaveOpen:=False)
-                Dim currentIndex As Integer = 0
-                If cursorIndex >= 0 AndAlso index >= cursorIndex Then
-                    currentIndex = cursorIndex
-                    entryOffset = cursorOffset
-                End If
-                For i As Integer = currentIndex To index - 1
-                    If entryOffset < 0 OrElse entryOffset > stream.Length - FileIndexEntrySize Then Throw New IO.InvalidDataException("Invalid lazy schema file index chain.")
-                    stream.Seek(entryOffset, IO.SeekOrigin.Begin)
-                    entryOffset = reader.ReadInt64()
-                Next
-                If entryOffset < 0 OrElse entryOffset > stream.Length - FileIndexEntrySize Then Throw New IO.InvalidDataException("Lazy schema file index is outside the backing file.")
-                stream.Seek(entryOffset, IO.SeekOrigin.Begin)
-                reader.ReadInt64()
-                Dim result As New LazySchemaChildData With {
-                    .Kind = LazySchemaChildKind.FileRecord,
-                    .RecordOffset = reader.ReadInt64(),
-                    .RecordLength = reader.ReadInt64(),
-                    .SelectionIndex = reader.ReadInt64()}
-                cursorIndex = index
-                cursorOffset = entryOffset
-                Return result
-            End Using
-        End Using
+        Dim entryOffset As Long = header.FileIndexOffset
+        Dim currentIndex As Integer = 0
+        If cursorIndex >= 0 AndAlso index >= cursorIndex Then
+            currentIndex = cursorIndex
+            entryOffset = cursorOffset
+        End If
+        For i As Integer = currentIndex To index - 1
+            If entryOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema file index chain.")
+            entryOffset = NativeSchemaXml.ReadStoreFileIndexEntry(EnsureNativeStore(), entryOffset).NextOffset
+        Next
+        If entryOffset < 0 Then Throw New IO.InvalidDataException("Lazy schema file index is outside the backing file.")
+        Dim entry As NativeSchemaXml.NativeStoreFileIndexEntry = NativeSchemaXml.ReadStoreFileIndexEntry(EnsureNativeStore(), entryOffset)
+        Dim result As New LazySchemaChildData With {
+            .Kind = LazySchemaChildKind.FileRecord,
+            .RecordOffset = entry.RecordOffset,
+            .RecordLength = entry.RecordLength,
+            .SelectionIndex = entry.SelectionIndex}
+        cursorIndex = index
+        cursorOffset = entryOffset
+        Return result
     End Function
 
     Friend Function ReadDirectoryAt(recordOffset As Long,
@@ -2926,32 +2649,26 @@ Friend NotInheritable Class LazySchemaStore
         If index < 0 OrElse index >= header.DirectoryCount Then Throw New ArgumentOutOfRangeException(NameOf(index))
         If header.DirectoryIndexOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema directory index.")
 
-        Using stream As New IO.FileStream(_directoryIndexPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, IoBufferSize, IO.FileOptions.RandomAccess)
-            Dim entryOffset As Long = header.DirectoryIndexOffset
-            Using reader As New IO.BinaryReader(stream, New Text.UTF8Encoding(False, True), leaveOpen:=False)
-                Dim currentIndex As Integer = 0
-                If cursorIndex >= 0 AndAlso index >= cursorIndex Then
-                    currentIndex = cursorIndex
-                    entryOffset = cursorOffset
-                End If
-                For i As Integer = currentIndex To index - 1
-                    If entryOffset < 0 OrElse entryOffset > stream.Length - DirectoryIndexEntrySize Then Throw New IO.InvalidDataException("Invalid lazy schema directory index chain.")
-                    stream.Seek(entryOffset, IO.SeekOrigin.Begin)
-                    entryOffset = reader.ReadInt64()
-                Next
-                If entryOffset < 0 OrElse entryOffset > stream.Length - DirectoryIndexEntrySize Then Throw New IO.InvalidDataException("Lazy schema directory index is outside the backing file.")
-                stream.Seek(entryOffset, IO.SeekOrigin.Begin)
-                reader.ReadInt64()
-                Dim result As New LazySchemaChildData With {
-                    .Kind = LazySchemaChildKind.DirectoryRecord,
-                    .RecordOffset = reader.ReadInt64(),
-                    .RecordLength = 0,
-                    .SelectionIndex = reader.ReadInt64()}
-                cursorIndex = index
-                cursorOffset = entryOffset
-                Return result
-            End Using
-        End Using
+        Dim entryOffset As Long = header.DirectoryIndexOffset
+        Dim currentIndex As Integer = 0
+        If cursorIndex >= 0 AndAlso index >= cursorIndex Then
+            currentIndex = cursorIndex
+            entryOffset = cursorOffset
+        End If
+        For i As Integer = currentIndex To index - 1
+            If entryOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema directory index chain.")
+            entryOffset = NativeSchemaXml.ReadStoreDirectoryIndexEntry(EnsureNativeStore(), entryOffset).NextOffset
+        Next
+        If entryOffset < 0 Then Throw New IO.InvalidDataException("Lazy schema directory index is outside the backing file.")
+        Dim entry As NativeSchemaXml.NativeStoreDirectoryIndexEntry = NativeSchemaXml.ReadStoreDirectoryIndexEntry(EnsureNativeStore(), entryOffset)
+        Dim result As New LazySchemaChildData With {
+            .Kind = LazySchemaChildKind.DirectoryRecord,
+            .RecordOffset = entry.RecordOffset,
+            .RecordLength = 0,
+            .SelectionIndex = entry.SelectionIndex}
+        cursorIndex = index
+        cursorOffset = entryOffset
+        Return result
     End Function
 
     Friend Iterator Function EnumerateFileReferences(recordOffset As Long) As IEnumerable(Of LazySchemaChildData)
@@ -2959,23 +2676,18 @@ Friend NotInheritable Class LazySchemaStore
         If header.FileCount = 0 Then Exit Function
         If header.FileIndexOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema file index.")
 
-        Using stream As New IO.FileStream(_fileIndexPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
-            Using reader As New IO.BinaryReader(stream, New Text.UTF8Encoding(False, True), leaveOpen:=False)
-                Dim entryOffset As Long = header.FileIndexOffset
-                For i As Integer = 0 To header.FileCount - 1
-                    If entryOffset < 0 OrElse entryOffset > stream.Length - FileIndexEntrySize Then Throw New IO.InvalidDataException("Invalid lazy schema file index chain.")
-                    stream.Seek(entryOffset, IO.SeekOrigin.Begin)
-                    Dim nextOffset As Long = reader.ReadInt64()
-                    Dim result As New LazySchemaChildData With {
-                        .Kind = LazySchemaChildKind.FileRecord,
-                        .RecordOffset = reader.ReadInt64(),
-                        .RecordLength = reader.ReadInt64(),
-                        .SelectionIndex = reader.ReadInt64()}
-                    Yield result
-                    entryOffset = nextOffset
-                Next
-            End Using
-        End Using
+        Dim entryOffset As Long = header.FileIndexOffset
+        For i As Integer = 0 To header.FileCount - 1
+            If entryOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema file index chain.")
+            Dim entry As NativeSchemaXml.NativeStoreFileIndexEntry = NativeSchemaXml.ReadStoreFileIndexEntry(EnsureNativeStore(), entryOffset)
+            Dim result As New LazySchemaChildData With {
+                .Kind = LazySchemaChildKind.FileRecord,
+                .RecordOffset = entry.RecordOffset,
+                .RecordLength = entry.RecordLength,
+                .SelectionIndex = entry.SelectionIndex}
+            Yield result
+            entryOffset = entry.NextOffset
+        Next
     End Function
 
     Friend Iterator Function EnumerateDirectoryReferences(recordOffset As Long) As IEnumerable(Of LazySchemaChildData)
@@ -2983,196 +2695,69 @@ Friend NotInheritable Class LazySchemaStore
         If header.DirectoryCount = 0 Then Exit Function
         If header.DirectoryIndexOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema directory index.")
 
-        Using stream As New IO.FileStream(_directoryIndexPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
-            Using reader As New IO.BinaryReader(stream, New Text.UTF8Encoding(False, True), leaveOpen:=False)
-                Dim entryOffset As Long = header.DirectoryIndexOffset
-                For i As Integer = 0 To header.DirectoryCount - 1
-                    If entryOffset < 0 OrElse entryOffset > stream.Length - DirectoryIndexEntrySize Then Throw New IO.InvalidDataException("Invalid lazy schema directory index chain.")
-                    stream.Seek(entryOffset, IO.SeekOrigin.Begin)
-                    Dim nextOffset As Long = reader.ReadInt64()
-                    Dim result As New LazySchemaChildData With {
-                        .Kind = LazySchemaChildKind.DirectoryRecord,
-                        .RecordOffset = reader.ReadInt64(),
-                        .RecordLength = 0,
-                        .SelectionIndex = reader.ReadInt64()}
-                    Yield result
-                    entryOffset = nextOffset
-                Next
-            End Using
-        End Using
+        Dim entryOffset As Long = header.DirectoryIndexOffset
+        For i As Integer = 0 To header.DirectoryCount - 1
+            If entryOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema directory index chain.")
+            Dim entry As NativeSchemaXml.NativeStoreDirectoryIndexEntry = NativeSchemaXml.ReadStoreDirectoryIndexEntry(EnsureNativeStore(), entryOffset)
+            Dim result As New LazySchemaChildData With {
+                .Kind = LazySchemaChildKind.DirectoryRecord,
+                .RecordOffset = entry.RecordOffset,
+                .RecordLength = 0,
+                .SelectionIndex = entry.SelectionIndex}
+            Yield result
+            entryOffset = entry.NextOffset
+        Next
+    End Function
+
+    Friend Iterator Function EnumerateNativeRootFileReferences(firstOffset As Long, count As Integer) As IEnumerable(Of LazySchemaChildData)
+        If count <= 0 Then Exit Function
+        If firstOffset < 0 Then Throw New IO.InvalidDataException("Invalid native schema root file index.")
+        Dim entryOffset As Long = firstOffset
+        For i As Integer = 0 To count - 1
+            If entryOffset < 0 Then Throw New IO.InvalidDataException("Invalid native schema root file index chain.")
+            Dim entry As NativeSchemaXml.NativeStoreFileIndexEntry = NativeSchemaXml.ReadStoreFileIndexEntry(EnsureNativeStore(), entryOffset)
+            Dim result As New LazySchemaChildData With {
+                .Kind = LazySchemaChildKind.FileRecord,
+                .RecordOffset = entry.RecordOffset,
+                .RecordLength = entry.RecordLength,
+                .SelectionIndex = entry.SelectionIndex}
+            Yield result
+            entryOffset = entry.NextOffset
+        Next
+    End Function
+
+    Friend Iterator Function EnumerateNativeRootDirectoryReferences(firstOffset As Long, count As Integer) As IEnumerable(Of LazySchemaChildData)
+        If count <= 0 Then Exit Function
+        If firstOffset < 0 Then Throw New IO.InvalidDataException("Invalid native schema root directory index.")
+        Dim entryOffset As Long = firstOffset
+        For i As Integer = 0 To count - 1
+            If entryOffset < 0 Then Throw New IO.InvalidDataException("Invalid native schema root directory index chain.")
+            Dim entry As NativeSchemaXml.NativeStoreDirectoryIndexEntry = NativeSchemaXml.ReadStoreDirectoryIndexEntry(EnsureNativeStore(), entryOffset)
+            Dim result As New LazySchemaChildData With {
+                .Kind = LazySchemaChildKind.DirectoryRecord,
+                .RecordOffset = entry.RecordOffset,
+                .RecordLength = 0,
+                .SelectionIndex = entry.SelectionIndex}
+            Yield result
+            entryOffset = entry.NextOffset
+        Next
+    End Function
+
+    Friend Function ReadFileRecordBytes(recordOffset As Long, recordLength As Long) As Byte()
+        If recordOffset < 0 OrElse recordLength <= 0 OrElse recordLength > Integer.MaxValue Then Throw New IO.InvalidDataException("Invalid lazy schema file record.")
+        Return NativeSchemaXml.ReadStoreFileRecord(EnsureNativeStore(), recordOffset, recordLength)
     End Function
 
     Friend Function ReadFileScalars(recordOffset As Long, recordLength As Long) As LazyFileScalarData
-        Dim result As New LazyFileScalarData
-        Using reader As XmlReader = OpenFileRecordReader(recordOffset, recordLength)
-            reader.MoveToContent()
-            If reader.NodeType <> XmlNodeType.Element Then Return result
-            Dim rootDepth As Integer = reader.Depth
-            If reader.IsEmptyElement Then Return result
-
-            While reader.Read()
-                If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = rootDepth Then Exit While
-                If reader.NodeType <> XmlNodeType.Element OrElse reader.Depth <> rootDepth + 1 Then Continue While
-
-                Dim value As String
-                Dim parsedLong As Long
-                Dim parsedBoolean As Boolean
-                Select Case reader.LocalName
-                    Case "name"
-                        result.Name = DecodeSchemaValue(ReadElementText(reader))
-                    Case "length"
-                        value = ReadElementText(reader)
-                        If Long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, parsedLong) Then result.Length = parsedLong
-                    Case "readonly"
-                        value = ReadElementText(reader)
-                        If Boolean.TryParse(value, parsedBoolean) Then result.ReadOnly = parsedBoolean
-                    Case "openforwrite"
-                        value = ReadElementText(reader)
-                        If Boolean.TryParse(value, parsedBoolean) Then result.OpenForWrite = parsedBoolean
-                    Case "creationtime"
-                        result.CreationTime = DecodeSchemaValue(ReadElementText(reader))
-                    Case "changetime"
-                        result.ChangeTime = DecodeSchemaValue(ReadElementText(reader))
-                    Case "modifytime"
-                        result.ModifyTime = DecodeSchemaValue(ReadElementText(reader))
-                    Case "accesstime"
-                        result.AccessTime = DecodeSchemaValue(ReadElementText(reader))
-                    Case "backuptime"
-                        result.BackupTime = DecodeSchemaValue(ReadElementText(reader))
-                    Case "fileuid"
-                        value = ReadElementText(reader)
-                        If Long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, parsedLong) Then result.FileUid = parsedLong
-                    Case "symlink"
-                        result.Symlink = DecodeSchemaValue(ReadElementText(reader))
-                    Case Else
-                        SkipElement(reader)
-                End Select
-            End While
-        End Using
-        Return result
+        Return NativeSchemaXml.ParseFileRecord(ReadFileRecordBytes(recordOffset, recordLength)).Scalars
     End Function
 
     Friend Function ReadFileExtendedAttributes(recordOffset As Long, recordLength As Long) As List(Of ltfsindex.file.xattr)
-        Dim result As New List(Of ltfsindex.file.xattr)
-        Using reader As XmlReader = OpenFileRecordReader(recordOffset, recordLength)
-            reader.MoveToContent()
-            If reader.NodeType <> XmlNodeType.Element Then Return result
-            Dim rootDepth As Integer = reader.Depth
-            If reader.IsEmptyElement Then Return result
-
-            While reader.Read()
-                If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = rootDepth Then Exit While
-                If reader.NodeType = XmlNodeType.Element AndAlso reader.Depth = rootDepth + 1 AndAlso reader.LocalName = "extendedattributes" Then
-                    ReadXattrContainer(reader, result)
-                End If
-            End While
-        End Using
-        Return result
+        Return NativeSchemaXml.ParseFileRecord(ReadFileRecordBytes(recordOffset, recordLength)).ExtendedAttributes
     End Function
 
     Friend Function ReadFileExtentInfo(recordOffset As Long, recordLength As Long) As List(Of ltfsindex.file.extent)
-        Dim result As New List(Of ltfsindex.file.extent)
-        Using reader As XmlReader = OpenFileRecordReader(recordOffset, recordLength)
-            reader.MoveToContent()
-            If reader.NodeType <> XmlNodeType.Element Then Return result
-            Dim rootDepth As Integer = reader.Depth
-            If reader.IsEmptyElement Then Return result
-
-            While reader.Read()
-                If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = rootDepth Then Exit While
-                If reader.NodeType = XmlNodeType.Element AndAlso reader.Depth = rootDepth + 1 AndAlso reader.LocalName = "extentinfo" Then
-                    ReadExtentContainer(reader, result)
-                End If
-            End While
-        End Using
-        Return result
-    End Function
-
-    Private Function OpenFileRecordReader(recordOffset As Long, recordLength As Long) As XmlReader
-        If recordOffset < 0 OrElse recordLength <= 0 Then Throw New IO.InvalidDataException("Invalid lazy schema file record.")
-        Dim stream As New IO.FileStream(_fileRecordsPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, IoBufferSize, IO.FileOptions.RandomAccess)
-        If recordOffset > stream.Length OrElse recordLength > stream.Length - recordOffset Then
-            stream.Dispose()
-            Throw New IO.InvalidDataException("Lazy schema file record is outside the backing file.")
-        End If
-        stream.Seek(recordOffset, IO.SeekOrigin.Begin)
-        Dim limited As New LazySchemaLimitedStream(stream, recordLength)
-        Dim settings As New XmlReaderSettings With {
-            .IgnoreComments = True,
-            .IgnoreWhitespace = True,
-            .IgnoreProcessingInstructions = True,
-            .DtdProcessing = DtdProcessing.Prohibit,
-            .XmlResolver = Nothing,
-            .CloseInput = True}
-        Return XmlReader.Create(limited, settings)
-    End Function
-
-    Private Shared Sub ReadXattrContainer(reader As XmlReader, result As List(Of ltfsindex.file.xattr))
-        Dim containerDepth As Integer = reader.Depth
-        If reader.IsEmptyElement Then Exit Sub
-        While reader.Read()
-            If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = containerDepth Then Exit While
-            If reader.NodeType = XmlNodeType.Element AndAlso reader.Depth = containerDepth + 1 AndAlso reader.LocalName = "xattr" Then
-                result.Add(ReadXattr(reader))
-            End If
-        End While
-    End Sub
-
-    Private Shared Function ReadXattr(reader As XmlReader) As ltfsindex.file.xattr
-        Dim result As New ltfsindex.file.xattr
-        Dim itemDepth As Integer = reader.Depth
-        If reader.IsEmptyElement Then Return result
-        While reader.Read()
-            If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = itemDepth Then Exit While
-            If reader.NodeType <> XmlNodeType.Element OrElse reader.Depth <> itemDepth + 1 Then Continue While
-            Select Case reader.LocalName
-                Case "key"
-                    result.key = DecodeSchemaValue(ReadElementText(reader))
-                Case "value"
-                    result.value = DecodeSchemaValue(ReadElementText(reader))
-                Case Else
-                    SkipElement(reader)
-            End Select
-        End While
-        Return result
-    End Function
-
-    Private Shared Sub ReadExtentContainer(reader As XmlReader, result As List(Of ltfsindex.file.extent))
-        Dim containerDepth As Integer = reader.Depth
-        If reader.IsEmptyElement Then Exit Sub
-        While reader.Read()
-            If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = containerDepth Then Exit While
-            If reader.NodeType = XmlNodeType.Element AndAlso reader.Depth = containerDepth + 1 AndAlso reader.LocalName = "extent" Then
-                result.Add(ReadExtent(reader))
-            End If
-        End While
-    End Sub
-
-    Private Shared Function ReadExtent(reader As XmlReader) As ltfsindex.file.extent
-        Dim result As New ltfsindex.file.extent
-        Dim itemDepth As Integer = reader.Depth
-        Dim parsedLong As Long
-        Dim parsedPartition As ltfsindex.PartitionLabel
-        If reader.IsEmptyElement Then Return result
-        While reader.Read()
-            If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = itemDepth Then Exit While
-            If reader.NodeType <> XmlNodeType.Element OrElse reader.Depth <> itemDepth + 1 Then Continue While
-            Dim fieldName As String = reader.LocalName
-            Dim value As String = ReadElementText(reader)
-            Select Case fieldName
-                Case "fileoffset"
-                    If Long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, parsedLong) Then result.fileoffset = parsedLong
-                Case "partition"
-                    If [Enum].TryParse(value, True, parsedPartition) Then result.partition = parsedPartition
-                Case "startblock"
-                    If Long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, parsedLong) Then result.startblock = parsedLong
-                Case "byteoffset"
-                    If Long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, parsedLong) Then result.byteoffset = parsedLong
-                Case "bytecount"
-                    If Long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, parsedLong) Then result.bytecount = parsedLong
-            End Select
-        End While
-        Return result
+        Return NativeSchemaXml.ParseFileRecord(ReadFileRecordBytes(recordOffset, recordLength)).Extents
     End Function
 
     Private Structure LazyDirectoryHeader
@@ -3187,34 +2772,28 @@ Friend NotInheritable Class LazySchemaStore
     End Structure
 
     Private Function ReadDirectoryHeader(recordOffset As Long) As LazyDirectoryHeader
-        If recordOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema directory record.")
-        Using stream As New IO.FileStream(_directoryRecordsPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, IoBufferSize, IO.FileOptions.RandomAccess)
-            Return ReadDirectoryHeader(stream, recordOffset)
-        End Using
-    End Function
+        If recordOffset < 0 Then Throw New IO.InvalidDataException("Lazy schema directory record is outside the backing file.")
+        Dim handle As IntPtr = EnsureNativeStore()
+        SyncLock _readCacheLock
+            Dim cached As LazyDirectoryHeader
+            If _directoryHeaderCache.TryGetValue(recordOffset, cached) Then Return cached
 
-    Private Function ReadDirectoryHeader(stream As IO.FileStream, recordOffset As Long) As LazyDirectoryHeader
-        If stream Is Nothing OrElse recordOffset < 0 OrElse recordOffset > stream.Length - DirectoryHeaderSize Then
-            Throw New IO.InvalidDataException("Lazy schema directory record is outside the backing file.")
-        End If
-        stream.Seek(recordOffset, IO.SeekOrigin.Begin)
-        Using reader As New IO.BinaryReader(stream, StrictUtf8, leaveOpen:=True)
-            If reader.ReadInt32() <> DirectoryMagic OrElse reader.ReadInt32() <> DirectoryVersion Then Throw New IO.InvalidDataException("Invalid lazy schema directory header.")
+            Dim info As NativeSchemaXml.NativeStoreDirectoryInfo = NativeSchemaXml.ReadStoreDirectoryInfo(handle, recordOffset)
+            If info.ScalarLength > Integer.MaxValue OrElse info.FileCount > Integer.MaxValue OrElse info.DirectoryCount > Integer.MaxValue Then
+                Throw New IO.InvalidDataException("Native schema directory metadata is too large.")
+            End If
             Dim result As New LazyDirectoryHeader With {
-                .ScalarOffset = reader.ReadInt64(),
-                .ScalarLength = reader.ReadInt32()
-                }
-            reader.ReadInt32()
-            result.FileIndexOffset = reader.ReadInt64()
-            result.FileCount = reader.ReadInt32()
-            result.DirectoryIndexOffset = reader.ReadInt64()
-            result.DirectoryCount = reader.ReadInt32()
-            result.TotalFileCount = reader.ReadInt64()
-            result.TotalDirectoryCount = reader.ReadInt64()
-            If result.ScalarOffset < recordOffset + DirectoryHeaderSize OrElse result.ScalarLength < 0 OrElse result.ScalarOffset > stream.Length - result.ScalarLength Then Throw New IO.InvalidDataException("Invalid lazy schema directory scalar record.")
-            If result.FileCount < 0 OrElse result.DirectoryCount < 0 OrElse result.TotalFileCount < 0 OrElse result.TotalDirectoryCount < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema directory counts.")
+                .ScalarOffset = info.ScalarOffset,
+                .ScalarLength = CInt(info.ScalarLength),
+                .FileIndexOffset = info.FileIndexOffset,
+                .FileCount = CInt(info.FileCount),
+                .DirectoryIndexOffset = info.DirectoryIndexOffset,
+                .DirectoryCount = CInt(info.DirectoryCount),
+                .TotalFileCount = info.TotalFileCount,
+                .TotalDirectoryCount = info.TotalDirectoryCount}
+            _directoryHeaderCache(recordOffset) = result
             Return result
-        End Using
+        End SyncLock
     End Function
 
     Private Shared Sub WriteDirectoryScalars(writer As IO.BinaryWriter, values As LazyDirectoryScalarData)
@@ -3238,147 +2817,120 @@ Friend NotInheritable Class LazySchemaStore
         writer.Write(bytes)
     End Sub
 
-    Private Shared Function ReadNullableString(reader As IO.BinaryReader) As String
-        Dim length As Integer = reader.ReadInt32()
+    Private Shared Function ReadNullableString(stream As IO.Stream) As String
+        Dim length As Integer = ReadInt32(stream)
         If length = -1 Then Return Nothing
         If length < 0 OrElse length > 64 * 1024 * 1024 Then Throw New IO.InvalidDataException("Invalid lazy schema string length.")
-        Dim bytes As Byte() = reader.ReadBytes(length)
-        If bytes.Length <> length Then Throw New IO.EndOfStreamException()
+        If length = 0 Then Return String.Empty
+        Dim bytes(length - 1) As Byte
+        ReadExactly(stream, bytes, 0, bytes.Length)
         Return StrictUtf8.GetString(bytes)
     End Function
 
-    Friend Shared Function ReadElementText(reader As XmlReader) As String
-        If reader.IsEmptyElement Then Return String.Empty
-        Dim elementDepth As Integer = reader.Depth
-        Dim result As New Text.StringBuilder
-        While reader.Read()
-            If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = elementDepth Then Exit While
-            Select Case reader.NodeType
-                Case XmlNodeType.Text, XmlNodeType.CDATA, XmlNodeType.Whitespace, XmlNodeType.SignificantWhitespace
-                    result.Append(reader.Value)
-                Case XmlNodeType.Element
-                    SkipElement(reader)
-            End Select
-        End While
-        Return result.ToString()
-    End Function
-
-    Friend Shared Function DecodeSchemaValue(value As String) As String
-        If value Is Nothing Then Return Nothing
-        Return value.Replace("%25", "%")
-    End Function
-
-    Friend Shared Sub SkipElement(reader As XmlReader)
-        If reader.IsEmptyElement Then Exit Sub
-        Dim elementDepth As Integer = reader.Depth
-        While reader.Read()
-            If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = elementDepth Then Exit While
-        End While
+    Friend Sub WriteSchemaNative(index As ltfsindex, output As IO.TextWriter, reduceSize As Boolean)
+        Dim temporaryPath As String = CreateTempFilePath("schema-output")
+        Try
+            WriteSchemaNative(index, temporaryPath, reduceSize)
+            output.Write(IO.File.ReadAllText(temporaryPath, Text.Encoding.UTF8))
+            output.Flush()
+        Finally
+            Try
+                If IO.File.Exists(temporaryPath) Then IO.File.Delete(temporaryPath)
+            Catch
+            End Try
+        End Try
     End Sub
 
-    Friend Sub WriteSchema(index As ltfsindex, output As IO.TextWriter, reduceSize As Boolean)
-        Dim settings As New XmlWriterSettings With {
-            .Encoding = New Text.UTF8Encoding(False),
-            .OmitXmlDeclaration = True,
-            .Indent = False,
-            .CloseOutput = False}
-        Dim fileSerializer As New Xml.Serialization.XmlSerializer(GetType(ltfsindex.file))
-        Dim fileNamespaces As New Xml.Serialization.XmlSerializerNamespaces
-        fileNamespaces.Add(String.Empty, String.Empty)
-
-        Using writer As XmlWriter = XmlWriter.Create(output, settings)
-            writer.WriteStartElement("ltfsindex")
-            writer.WriteAttributeString("version", "2.4.0")
-            WriteElement(writer, "creator", index.creator)
-            WriteElement(writer, "volumeuuid", index.volumeuuid.ToString())
-            WriteElement(writer, "generationnumber", index.generationnumber.ToString(CultureInfo.InvariantCulture))
-            WriteElement(writer, "updatetime", index.updatetime)
-            WriteLocation(writer, "location", index.location)
-            WriteLocation(writer, "previousgenerationlocation", index.previousgenerationlocation)
-            WriteElement(writer, "allowpolicyupdate", index.allowpolicyupdate.ToString())
-            If index.dataplacementpolicy IsNot Nothing Then
-                writer.WriteStartElement("dataplacementpolicy")
-                writer.WriteEndElement()
-            End If
-            WriteElement(writer, "volumelockstate", index.volumelockstate.ToString())
-            WriteElement(writer, "highestfileuid", index.highestfileuid.ToString(CultureInfo.InvariantCulture))
-
+    Friend Sub WriteSchemaNative(index As ltfsindex, outputPath As String, reduceSize As Boolean)
+        Using writer As NativeSchemaWriter = NativeSchemaWriter.Open(outputPath)
+            writer.StartElement("ltfsindex", "version", "2.4.0")
+            writer.WriteElement("creator", index.creator)
+            writer.WriteElement("volumeuuid", index.volumeuuid.ToString())
+            writer.WriteElement("generationnumber", index.generationnumber.ToString(CultureInfo.InvariantCulture))
+            writer.WriteElement("updatetime", index.updatetime)
+            WriteNativeLocation(writer, "location", index.location)
+            WriteNativeLocation(writer, "previousgenerationlocation", index.previousgenerationlocation)
+            writer.WriteElement("allowpolicyupdate", index.allowpolicyupdate.ToString())
+            If index.dataplacementpolicy IsNot Nothing Then writer.EmptyElement("dataplacementpolicy")
+            writer.WriteElement("volumelockstate", index.volumelockstate.ToString())
+            writer.WriteElement("highestfileuid", index.highestfileuid.ToString(CultureInfo.InvariantCulture))
             If index._file IsNot Nothing Then
                 For Each rootFile As ltfsindex.file In index._file
-                    WriteFileObject(writer, rootFile, fileSerializer, fileNamespaces)
+                    writer.WriteFile(rootFile)
                 Next
             End If
             If index._directory IsNot Nothing Then
                 For Each rootDirectory As ltfsindex.directory In index._directory
-                    WriteDirectory(writer, rootDirectory, useCollectionWrappers:=False, fileSerializer, fileNamespaces)
+                    WriteNativeDirectory(writer, rootDirectory, useCollectionWrappers:=False)
                 Next
             End If
-            writer.WriteEndElement()
+            writer.EndElement("ltfsindex")
+            writer.Finish()
         End Using
-        output.Flush()
     End Sub
 
-    Friend Sub WriteDirectory(directory As ltfsindex.directory,
-                               output As IO.TextWriter,
-                               useCollectionWrappers As Boolean)
-        Dim settings As New XmlWriterSettings With {
-            .Encoding = New Text.UTF8Encoding(False),
-            .OmitXmlDeclaration = True,
-            .Indent = False,
-            .CloseOutput = False}
-        Dim fileSerializer As New Xml.Serialization.XmlSerializer(GetType(ltfsindex.file))
-        Dim fileNamespaces As New Xml.Serialization.XmlSerializerNamespaces
-        fileNamespaces.Add(String.Empty, String.Empty)
-
-        Using writer As XmlWriter = XmlWriter.Create(output, settings)
-            WriteDirectory(writer, directory, useCollectionWrappers, fileSerializer, fileNamespaces)
-        End Using
-        output.Flush()
+    Friend Sub WriteDirectoryNative(directory As ltfsindex.directory,
+                                     output As IO.TextWriter,
+                                     useCollectionWrappers As Boolean)
+        Dim temporaryPath As String = CreateTempFilePath("directory-output")
+        Try
+            WriteDirectoryNative(directory, temporaryPath, useCollectionWrappers)
+            output.Write(IO.File.ReadAllText(temporaryPath, Text.Encoding.UTF8))
+            output.Flush()
+        Finally
+            Try
+                If IO.File.Exists(temporaryPath) Then IO.File.Delete(temporaryPath)
+            Catch
+            End Try
+        End Try
     End Sub
 
-    Private Sub WriteDirectory(writer As XmlWriter,
-                                directory As ltfsindex.directory,
-                                useCollectionWrappers As Boolean,
-                                fileSerializer As Xml.Serialization.XmlSerializer,
-                                fileNamespaces As Xml.Serialization.XmlSerializerNamespaces)
+    Friend Sub WriteDirectoryNative(directory As ltfsindex.directory,
+                                     outputPath As String,
+                                     useCollectionWrappers As Boolean)
+        Using writer As NativeSchemaWriter = NativeSchemaWriter.Open(outputPath)
+            WriteNativeDirectory(writer, directory, useCollectionWrappers)
+            writer.Finish()
+        End Using
+    End Sub
+
+    Private Sub WriteNativeDirectory(writer As NativeSchemaWriter,
+                                      directory As ltfsindex.directory,
+                                      useCollectionWrappers As Boolean)
         If directory Is Nothing Then Exit Sub
-        writer.WriteStartElement("directory")
+        writer.StartElement("directory")
 
         If directory.HasUnmaterializedLazyContents Then
             Dim modifiedDirectory As ltfsindex.directory = GetModifiedDirectory(directory.LazyRecordOffset)
             Dim values As LazyDirectoryScalarData = If(modifiedDirectory Is Nothing,
                                                         ReadDirectoryScalars(directory.LazyRecordOffset),
                                                         modifiedDirectory.GetLazyScalarDataForWrite())
-            WriteDirectoryScalars(writer, values)
-            writer.WriteStartElement("contents")
-            If useCollectionWrappers Then writer.WriteStartElement("_file")
-            Using fileStream As IO.FileStream = OpenFileRecordStream()
-                For Each child As LazySchemaChildData In EnumerateFileReferences(directory.LazyRecordOffset)
-                    If IsFileRemoved(directory.LazyRecordOffset, child.RecordOffset) Then Continue For
-                    Dim modifiedFile As ltfsindex.file = GetModifiedFile(child.RecordOffset)
-                    If modifiedFile Is Nothing Then
-                        WriteFileRecord(writer, fileStream, child.RecordOffset, child.RecordLength)
-                    Else
-                        WriteFileObject(writer, modifiedFile, fileSerializer, fileNamespaces)
-                    End If
-                Next
-            End Using
+            WriteNativeDirectoryScalars(writer, values)
+            writer.StartElement("contents")
+            If useCollectionWrappers Then writer.StartElement("_file")
+            For Each child As LazySchemaChildData In EnumerateFileReferences(directory.LazyRecordOffset)
+                If IsFileRemoved(directory.LazyRecordOffset, child.RecordOffset) Then Continue For
+                Dim modifiedFile As ltfsindex.file = GetModifiedFile(child.RecordOffset)
+                If modifiedFile Is Nothing Then
+                    writer.WriteRaw(ReadFileRecordBytes(child.RecordOffset, child.RecordLength))
+                Else
+                    writer.WriteFile(modifiedFile)
+                End If
+            Next
             For Each addedFile As ltfsindex.file In EnumerateAddedFiles(directory.LazyRecordOffset)
                 If addedFile.HasLazyRecord AndAlso ReferenceEquals(addedFile.LazyStoreReference, Me) Then
                     Dim modifiedFile As ltfsindex.file = GetModifiedFile(addedFile.LazyRecordOffset)
                     If modifiedFile Is Nothing Then
-                        Using fileStream As IO.FileStream = OpenFileRecordStream()
-                            WriteFileRecord(writer, fileStream, addedFile.LazyRecordOffset, addedFile.LazyRecordLength)
-                        End Using
+                        writer.WriteRaw(ReadFileRecordBytes(addedFile.LazyRecordOffset, addedFile.LazyRecordLength))
                     Else
-                        WriteFileObject(writer, modifiedFile, fileSerializer, fileNamespaces)
+                        writer.WriteFile(modifiedFile)
                     End If
                 Else
-                    WriteFileObject(writer, addedFile, fileSerializer, fileNamespaces)
+                    writer.WriteFile(addedFile)
                 End If
-                Next
-            If useCollectionWrappers Then writer.WriteEndElement()
-            If useCollectionWrappers Then writer.WriteStartElement("_directory")
+            Next
+            If useCollectionWrappers Then writer.EndElement("_file")
+            If useCollectionWrappers Then writer.StartElement("_directory")
             For Each child As LazySchemaChildData In EnumerateDirectoryReferences(directory.LazyRecordOffset)
                 If IsDirectoryRemoved(directory.LazyRecordOffset, child.RecordOffset) Then Continue For
                 Dim childDirectory As ltfsindex.directory = GetModifiedDirectory(child.RecordOffset)
@@ -3386,103 +2938,62 @@ Friend NotInheritable Class LazySchemaStore
                     childDirectory = New ltfsindex.directory
                     childDirectory.AttachLazyRecord(Me, child.RecordOffset, selectionIndex:=child.SelectionIndex)
                 End If
-                WriteDirectory(writer, childDirectory, useCollectionWrappers, fileSerializer, fileNamespaces)
+                WriteNativeDirectory(writer, childDirectory, useCollectionWrappers)
             Next
             For Each addedDirectory As ltfsindex.directory In EnumerateAddedDirectories(directory.LazyRecordOffset)
-                WriteDirectory(writer, addedDirectory, useCollectionWrappers, fileSerializer, fileNamespaces)
+                WriteNativeDirectory(writer, addedDirectory, useCollectionWrappers)
             Next
-            If useCollectionWrappers Then writer.WriteEndElement()
-            writer.WriteEndElement()
+            If useCollectionWrappers Then writer.EndElement("_directory")
+            writer.EndElement("contents")
         Else
-            WriteElement(writer, "name", directory.name)
-            WriteElement(writer, "readonly", directory.readonly.ToString())
-            WriteElement(writer, "creationtime", directory.creationtime)
-            WriteElement(writer, "changetime", directory.changetime)
-            WriteElement(writer, "modifytime", directory.modifytime)
-            WriteElement(writer, "accesstime", directory.accesstime)
-            WriteElement(writer, "backuptime", directory.backuptime)
-            WriteElement(writer, "fileuid", directory.fileuid.ToString(CultureInfo.InvariantCulture))
-            writer.WriteStartElement("contents")
-            If useCollectionWrappers Then writer.WriteStartElement("_file")
+            writer.WriteElement("name", directory.name)
+            writer.WriteElement("readonly", directory.readonly.ToString())
+            writer.WriteElement("creationtime", directory.creationtime)
+            writer.WriteElement("changetime", directory.changetime)
+            writer.WriteElement("modifytime", directory.modifytime)
+            writer.WriteElement("accesstime", directory.accesstime)
+            writer.WriteElement("backuptime", directory.backuptime)
+            writer.WriteElement("fileuid", directory.fileuid.ToString(CultureInfo.InvariantCulture))
+            writer.StartElement("contents")
+            If useCollectionWrappers Then writer.StartElement("_file")
             For Each childFile As ltfsindex.file In directory.EnumerateLazyFiles()
-                WriteFileObject(writer, childFile, fileSerializer, fileNamespaces)
+                writer.WriteFile(childFile)
             Next
-            If useCollectionWrappers Then writer.WriteEndElement()
-            If useCollectionWrappers Then writer.WriteStartElement("_directory")
+            If useCollectionWrappers Then writer.EndElement("_file")
+            If useCollectionWrappers Then writer.StartElement("_directory")
             For Each childDirectory As ltfsindex.directory In directory.EnumerateLazyDirectories()
-                WriteDirectory(writer, childDirectory, useCollectionWrappers, fileSerializer, fileNamespaces)
+                WriteNativeDirectory(writer, childDirectory, useCollectionWrappers)
             Next
-            If useCollectionWrappers Then writer.WriteEndElement()
-            writer.WriteEndElement()
+            If useCollectionWrappers Then writer.EndElement("_directory")
+            writer.EndElement("contents")
         End If
 
-        writer.WriteEndElement()
+        writer.EndElement("directory")
     End Sub
 
-    Private Sub WriteDirectoryScalars(writer As XmlWriter, values As LazyDirectoryScalarData)
-        WriteElement(writer, "name", values.Name)
-        WriteElement(writer, "readonly", values.ReadOnly.ToString())
-        WriteElement(writer, "creationtime", values.CreationTime)
-        WriteElement(writer, "changetime", values.ChangeTime)
-        WriteElement(writer, "modifytime", values.ModifyTime)
-        WriteElement(writer, "accesstime", values.AccessTime)
-        WriteElement(writer, "backuptime", values.BackupTime)
-        WriteElement(writer, "fileuid", values.FileUid.ToString(CultureInfo.InvariantCulture))
+    Private Shared Sub WriteNativeDirectoryScalars(writer As NativeSchemaWriter, values As LazyDirectoryScalarData)
+        writer.WriteElement("name", values.Name)
+        writer.WriteElement("readonly", values.ReadOnly.ToString())
+        writer.WriteElement("creationtime", values.CreationTime)
+        writer.WriteElement("changetime", values.ChangeTime)
+        writer.WriteElement("modifytime", values.ModifyTime)
+        writer.WriteElement("accesstime", values.AccessTime)
+        writer.WriteElement("backuptime", values.BackupTime)
+        writer.WriteElement("fileuid", values.FileUid.ToString(CultureInfo.InvariantCulture))
     End Sub
 
-    Private Shared Sub WriteLocation(writer As XmlWriter, elementName As String, value As ltfsindex.LocationDef)
+    Private Shared Sub WriteNativeLocation(writer As NativeSchemaWriter, elementName As String, value As ltfsindex.LocationDef)
         If value Is Nothing Then Exit Sub
-        writer.WriteStartElement(elementName)
-        WriteElement(writer, "partition", value.partition.ToString())
-        WriteElement(writer, "startblock", value.startblock.ToString(CultureInfo.InvariantCulture))
-        writer.WriteEndElement()
-    End Sub
-
-    Private Shared Sub WriteElement(writer As XmlWriter, elementName As String, value As String)
-        writer.WriteStartElement(elementName)
-        If value IsNot Nothing Then writer.WriteString(value)
-        writer.WriteEndElement()
-    End Sub
-
-    Private Shared Sub WriteFileObject(writer As XmlWriter,
-                                       value As ltfsindex.file,
-                                       serializer As Xml.Serialization.XmlSerializer,
-                                       namespaces As Xml.Serialization.XmlSerializerNamespaces)
-        If value Is Nothing Then Exit Sub
-        serializer.Serialize(writer, value, namespaces)
-    End Sub
-
-    Private Function OpenFileRecordStream() As IO.FileStream
-        Return New IO.FileStream(_fileRecordsPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, IoBufferSize, IO.FileOptions.SequentialScan)
-    End Function
-
-    Private Sub WriteFileRecord(writer As XmlWriter,
-                                stream As IO.FileStream,
-                                recordOffset As Long,
-                                recordLength As Long)
-        If recordOffset < 0 OrElse recordLength <= 0 OrElse recordOffset > stream.Length OrElse recordLength > stream.Length - recordOffset Then
-            Throw New IO.InvalidDataException("Invalid lazy schema file record.")
-        End If
-        stream.Seek(recordOffset, IO.SeekOrigin.Begin)
-        Using limited As New LazySchemaLimitedStream(stream, recordLength, leaveInnerOpen:=True)
-            Dim settings As New XmlReaderSettings With {
-                .IgnoreComments = True,
-                .IgnoreWhitespace = True,
-                .IgnoreProcessingInstructions = True,
-                .DtdProcessing = DtdProcessing.Prohibit,
-                .XmlResolver = Nothing,
-                .CloseInput = False}
-            Using reader As XmlReader = XmlReader.Create(limited, settings)
-                reader.MoveToContent()
-                If reader.NodeType <> XmlNodeType.Element Then Throw New IO.InvalidDataException("Invalid lazy schema file record.")
-                writer.WriteNode(reader, True)
-            End Using
-        End Using
+        writer.StartElement(elementName)
+        writer.WriteElement("partition", value.partition.ToString())
+        writer.WriteElement("startblock", value.startblock.ToString(CultureInfo.InvariantCulture))
+        writer.EndElement(elementName)
     End Sub
 
     Protected Overrides Sub Finalize()
         Try
             SyncLock _buildLock
+                CloseNativeStore()
                 CloseBuildStreams()
                 CloseSelectionStream()
                 DeleteBackingFiles()
@@ -3493,82 +3004,7 @@ Friend NotInheritable Class LazySchemaStore
     End Sub
 End Class
 
-Friend NotInheritable Class LazySchemaLimitedStream
-    Inherits IO.Stream
-
-    Private ReadOnly _inner As IO.Stream
-    Private ReadOnly _leaveInnerOpen As Boolean
-    Private _remaining As Long
-    Private _position As Long
-
-    Public Sub New(inner As IO.Stream, length As Long, Optional leaveInnerOpen As Boolean = False)
-        _inner = inner
-        _leaveInnerOpen = leaveInnerOpen
-        _remaining = length
-    End Sub
-
-    Public Overrides ReadOnly Property CanRead As Boolean
-        Get
-            Return True
-        End Get
-    End Property
-    Public Overrides ReadOnly Property CanSeek As Boolean
-        Get
-            Return False
-        End Get
-    End Property
-    Public Overrides ReadOnly Property CanWrite As Boolean
-        Get
-            Return False
-        End Get
-    End Property
-    Public Overrides ReadOnly Property Length As Long
-        Get
-            Return _position + _remaining
-        End Get
-    End Property
-    Public Overrides Property Position As Long
-        Get
-            Return _position
-        End Get
-        Set(value As Long)
-            Throw New NotSupportedException()
-        End Set
-    End Property
-
-    Public Overrides Sub Flush()
-    End Sub
-
-    Public Overrides Function Read(buffer() As Byte, offset As Integer, count As Integer) As Integer
-        If _remaining <= 0 Then Return 0
-        Dim readCount As Integer = CInt(Math.Min(CLng(count), _remaining))
-        Dim bytesRead As Integer = _inner.Read(buffer, offset, readCount)
-        If bytesRead > 0 Then
-            _position += bytesRead
-            _remaining -= bytesRead
-        End If
-        Return bytesRead
-    End Function
-
-    Public Overrides Function Seek(offset As Long, origin As IO.SeekOrigin) As Long
-        Throw New NotSupportedException()
-    End Function
-
-    Public Overrides Sub SetLength(value As Long)
-        Throw New NotSupportedException()
-    End Sub
-
-    Public Overrides Sub Write(buffer() As Byte, offset As Integer, count As Integer)
-        Throw New NotSupportedException()
-    End Sub
-
-    Protected Overrides Sub Dispose(disposing As Boolean)
-        If disposing AndAlso _inner IsNot Nothing AndAlso Not _leaveInnerOpen Then _inner.Dispose()
-        MyBase.Dispose(disposing)
-    End Sub
-End Class
-
-Friend NotInheritable Class LazySchemaReader
+Friend NotInheritable Class LazySchemaBuilder
     Private Sub New()
     End Sub
 
@@ -3611,15 +3047,8 @@ Friend NotInheritable Class LazySchemaReader
     End Function
 
     Private Shared Function WriteFileRecord(store As LazySchemaStore,
-                                             value As ltfsindex.file,
-                                             serializer As Xml.Serialization.XmlSerializer,
-                                             namespaces As Xml.Serialization.XmlSerializerNamespaces) As Tuple(Of Long, Long)
-        Dim recordOffset As Long = store.BeginFileRecord()
-        Using writer As XmlWriter = store.CreateFileXmlWriter()
-            serializer.Serialize(writer, value, namespaces)
-        End Using
-        Dim recordLength As Long = store.EndFileRecord(recordOffset)
-        Return Tuple.Create(recordOffset, recordLength)
+                                             value As ltfsindex.file) As Tuple(Of Long, Long)
+        Return store.AppendNativeFileRecord(value)
     End Function
 
     Friend Shared Function BuildFromDirectory(root As IO.DirectoryInfo,
@@ -3633,9 +3062,6 @@ Friend NotInheritable Class LazySchemaReader
         Dim frames As New Stack(Of FileSystemDirectoryBuildFrame)
         Try
             Dim result As New ltfsindex
-            Dim serializer As New Xml.Serialization.XmlSerializer(GetType(ltfsindex.file))
-            Dim namespaces As New Xml.Serialization.XmlSerializerNamespaces
-            namespaces.Add(String.Empty, String.Empty)
 
             Dim rootState As LazyDirectoryBuildState = store.BeginDirectoryRecord()
             frames.Push(New FileSystemDirectoryBuildFrame(root, rootState))
@@ -3650,7 +3076,7 @@ Friend NotInheritable Class LazySchemaReader
                         fileCount += 1
                         Dim outputFile As ltfsindex.file = createFile(sourceFile, fileCount)
                         If outputFile Is Nothing Then Continue While
-                        Dim record As Tuple(Of Long, Long) = WriteFileRecord(store, outputFile, serializer, namespaces)
+                        Dim record As Tuple(Of Long, Long) = WriteFileRecord(store, outputFile)
                         store.AddChild(current.State,
                                        LazySchemaChildKind.FileRecord,
                                        record.Item1,
@@ -3698,286 +3124,6 @@ Friend NotInheritable Class LazySchemaReader
         End Try
     End Function
 
-    Friend Shared Function Load(fileName As String) As ltfsindex
-        Dim store As LazySchemaStore = LazySchemaStore.CreateForBuild()
-        Try
-            Dim result As New ltfsindex
-            Using input As New IO.FileStream(fileName, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, 1 << 16, IO.FileOptions.SequentialScan)
-                Dim settings As New XmlReaderSettings With {
-                    .IgnoreComments = True,
-                    .IgnoreWhitespace = True,
-                    .IgnoreProcessingInstructions = True,
-                    .DtdProcessing = DtdProcessing.Prohibit,
-                    .XmlResolver = Nothing,
-                    .CloseInput = False}
-                Using reader As XmlReader = XmlReader.Create(input, settings)
-                    reader.MoveToContent()
-                    ParseIndex(reader, result, store)
-                End Using
-            End Using
-            store.FinishBuild()
-            result.AttachLazyStore(store)
-            Return result
-        Catch
-            store.AbortBuild()
-            Throw
-        End Try
-    End Function
-
-    Friend Shared Function LoadDirectory(fileName As String) As ltfsindex.directory
-        Dim store As LazySchemaStore = LazySchemaStore.CreateForBuild()
-        Try
-            Dim reference As LazyDirectoryReference
-            Using input As New IO.FileStream(fileName, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, 1 << 16, IO.FileOptions.SequentialScan)
-                Dim settings As New XmlReaderSettings With {
-                    .IgnoreComments = True,
-                    .IgnoreWhitespace = True,
-                    .IgnoreProcessingInstructions = True,
-                    .DtdProcessing = DtdProcessing.Prohibit,
-                    .XmlResolver = Nothing,
-                    .CloseInput = False}
-                Using reader As XmlReader = XmlReader.Create(input, settings)
-                    reader.MoveToContent()
-                    If reader.NodeType <> XmlNodeType.Element OrElse reader.LocalName <> "directory" Then
-                        Throw New IO.InvalidDataException("Directory root element was not found.")
-                    End If
-                    reference = ParseDirectory(reader, store)
-                End Using
-            End Using
-
-            store.FinishBuild()
-            Dim result As New ltfsindex.directory
-            result.AttachLazyRecord(store, reference.Offset, selectionIndex:=reference.SelectionIndex)
-            Return result
-        Catch
-            store.AbortBuild()
-            Throw
-        End Try
-    End Function
-
-    Private Shared Sub ParseIndex(reader As XmlReader, result As ltfsindex, store As LazySchemaStore)
-        If reader.NodeType <> XmlNodeType.Element Then Throw New IO.InvalidDataException("Schema root element was not found.")
-        Dim rootDepth As Integer = reader.Depth
-        If reader.IsEmptyElement Then Exit Sub
-        Dim textValue As String
-        Dim parsedBoolean As Boolean
-        Dim parsedLong As Long
-        Dim parsedLockState As ltfsindex.volumelockstateValue
-
-        While reader.Read()
-            If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = rootDepth Then Exit While
-            If reader.NodeType <> XmlNodeType.Element OrElse reader.Depth <> rootDepth + 1 Then Continue While
-
-            Select Case reader.LocalName
-                Case "creator"
-                    result.creator = LazySchemaStore.DecodeSchemaValue(LazySchemaStore.ReadElementText(reader))
-                Case "volumeuuid"
-                    Dim guidValue As Guid
-                    If Guid.TryParse(LazySchemaStore.ReadElementText(reader), guidValue) Then result.volumeuuid = guidValue
-                Case "generationnumber"
-                    Dim ulongValue As ULong
-                    If ULong.TryParse(LazySchemaStore.ReadElementText(reader), NumberStyles.Integer, CultureInfo.InvariantCulture, ulongValue) Then result.generationnumber = ulongValue
-                Case "updatetime"
-                    result.updatetime = LazySchemaStore.DecodeSchemaValue(LazySchemaStore.ReadElementText(reader))
-                Case "location"
-                    result.location = ParseLocation(reader)
-                Case "previousgenerationlocation"
-                    result.previousgenerationlocation = ParseLocation(reader)
-                Case "allowpolicyupdate"
-                    textValue = LazySchemaStore.ReadElementText(reader)
-                    If Boolean.TryParse(textValue, parsedBoolean) Then result.allowpolicyupdate = parsedBoolean
-                Case "volumelockstate"
-                    textValue = LazySchemaStore.ReadElementText(reader)
-                    If [Enum].TryParse(textValue, True, parsedLockState) Then result.volumelockstate = parsedLockState
-                Case "highestfileuid"
-                    textValue = LazySchemaStore.ReadElementText(reader)
-                    If Long.TryParse(textValue, NumberStyles.Integer, CultureInfo.InvariantCulture, parsedLong) Then result.highestfileuid = parsedLong
-                Case "directory"
-                    result._directory.Add(CreateDirectory(ParseDirectory(reader, store), store))
-                Case "file"
-                    Dim fileReference As LazyFileRecordReference = ParseFile(reader, store)
-                    Dim rootFile As New ltfsindex.file
-                    rootFile.AttachLazyRecord(store, fileReference.Offset, fileReference.Length, fileReference.SelectionIndex)
-                    result._file.Add(rootFile)
-                Case "_directory", "contents"
-                    ParseRootContainer(reader, result, store)
-                Case "_file"
-                    ParseRootFileContainer(reader, result, store)
-                Case Else
-                    LazySchemaStore.SkipElement(reader)
-            End Select
-        End While
-    End Sub
-
-    Private Shared Sub ParseRootContainer(reader As XmlReader, result As ltfsindex, store As LazySchemaStore)
-        Dim containerDepth As Integer = reader.Depth
-        If reader.IsEmptyElement Then Exit Sub
-        While reader.Read()
-            If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = containerDepth Then Exit While
-            If reader.NodeType <> XmlNodeType.Element OrElse reader.Depth <> containerDepth + 1 Then Continue While
-            Select Case reader.LocalName
-                Case "directory"
-                    result._directory.Add(CreateDirectory(ParseDirectory(reader, store), store))
-                Case "file"
-                    Dim fileReference As LazyFileRecordReference = ParseFile(reader, store)
-                    Dim rootFile As New ltfsindex.file
-                    rootFile.AttachLazyRecord(store, fileReference.Offset, fileReference.Length, fileReference.SelectionIndex)
-                    result._file.Add(rootFile)
-                Case "_directory", "contents"
-                    ParseRootContainer(reader, result, store)
-                Case "_file"
-                    ParseRootFileContainer(reader, result, store)
-                Case Else
-                    LazySchemaStore.SkipElement(reader)
-            End Select
-        End While
-    End Sub
-
-    Private Shared Sub ParseRootFileContainer(reader As XmlReader, result As ltfsindex, store As LazySchemaStore)
-        Dim containerDepth As Integer = reader.Depth
-        If reader.IsEmptyElement Then Exit Sub
-        While reader.Read()
-            If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = containerDepth Then Exit While
-            If reader.NodeType = XmlNodeType.Element AndAlso reader.Depth = containerDepth + 1 AndAlso reader.LocalName = "file" Then
-                Dim fileReference As LazyFileRecordReference = ParseFile(reader, store)
-                Dim rootFile As New ltfsindex.file
-                rootFile.AttachLazyRecord(store, fileReference.Offset, fileReference.Length, fileReference.SelectionIndex)
-                result._file.Add(rootFile)
-            End If
-        End While
-    End Sub
-
-    Private Shared Function ParseDirectory(reader As XmlReader, store As LazySchemaStore) As LazyDirectoryReference
-        Dim state As LazyDirectoryBuildState = store.BeginDirectoryRecord()
-        Dim values As New LazyDirectoryScalarData
-        Dim directoryDepth As Integer = reader.Depth
-        Dim textValue As String
-        Dim parsedBoolean As Boolean
-        Dim parsedLong As Long
-
-        If Not reader.IsEmptyElement Then
-            While reader.Read()
-                If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = directoryDepth Then Exit While
-                If reader.NodeType <> XmlNodeType.Element OrElse reader.Depth <> directoryDepth + 1 Then Continue While
-
-                Select Case reader.LocalName
-                    Case "name"
-                        values.Name = LazySchemaStore.DecodeSchemaValue(LazySchemaStore.ReadElementText(reader))
-                    Case "readonly"
-                        textValue = LazySchemaStore.ReadElementText(reader)
-                        If Boolean.TryParse(textValue, parsedBoolean) Then values.ReadOnly = parsedBoolean
-                    Case "creationtime"
-                        values.CreationTime = LazySchemaStore.DecodeSchemaValue(LazySchemaStore.ReadElementText(reader))
-                    Case "changetime"
-                        values.ChangeTime = LazySchemaStore.DecodeSchemaValue(LazySchemaStore.ReadElementText(reader))
-                    Case "modifytime"
-                        values.ModifyTime = LazySchemaStore.DecodeSchemaValue(LazySchemaStore.ReadElementText(reader))
-                    Case "accesstime"
-                        values.AccessTime = LazySchemaStore.DecodeSchemaValue(LazySchemaStore.ReadElementText(reader))
-                    Case "backuptime"
-                        values.BackupTime = LazySchemaStore.DecodeSchemaValue(LazySchemaStore.ReadElementText(reader))
-                    Case "fileuid"
-                        textValue = LazySchemaStore.ReadElementText(reader)
-                        If Long.TryParse(textValue, NumberStyles.Integer, CultureInfo.InvariantCulture, parsedLong) Then values.FileUid = parsedLong
-                    Case "contents", "_directory", "_file"
-                        ParseDirectoryContainer(reader, state, store)
-                    Case "directory"
-                        Dim childDirectory As LazyDirectoryReference = ParseDirectory(reader, store)
-                        store.AddChild(state, LazySchemaChildKind.DirectoryRecord, childDirectory.Offset, 0,
-                                       childDirectory.TotalFileCount, childDirectory.TotalDirectoryCount,
-                                       childDirectory.SelectionIndex)
-                    Case "file"
-                        Dim fileReference As LazyFileRecordReference = ParseFile(reader, store)
-                        store.AddChild(state, LazySchemaChildKind.FileRecord, fileReference.Offset, fileReference.Length,
-                                       selectionIndex:=fileReference.SelectionIndex)
-                    Case Else
-                        LazySchemaStore.SkipElement(reader)
-                End Select
-            End While
-        End If
-
-        Return New LazyDirectoryReference With {
-            .Offset = store.FinishDirectoryRecord(state, values),
-            .SelectionIndex = state.SelectionIndex,
-            .TotalFileCount = state.TotalFileCount,
-            .TotalDirectoryCount = state.TotalDirectoryCount}
-    End Function
-
-    Private Shared Sub ParseDirectoryContainer(reader As XmlReader,
-                                                ByRef parentState As LazyDirectoryBuildState,
-                                                store As LazySchemaStore)
-        Dim containerDepth As Integer = reader.Depth
-        If reader.IsEmptyElement Then Exit Sub
-        While reader.Read()
-            If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = containerDepth Then Exit While
-            If reader.NodeType <> XmlNodeType.Element OrElse reader.Depth <> containerDepth + 1 Then Continue While
-            Select Case reader.LocalName
-                Case "directory"
-                    Dim childDirectory As LazyDirectoryReference = ParseDirectory(reader, store)
-                    store.AddChild(parentState, LazySchemaChildKind.DirectoryRecord, childDirectory.Offset, 0,
-                                   childDirectory.TotalFileCount, childDirectory.TotalDirectoryCount,
-                                   childDirectory.SelectionIndex)
-                Case "file"
-                    Dim fileReference As LazyFileRecordReference = ParseFile(reader, store)
-                    store.AddChild(parentState, LazySchemaChildKind.FileRecord, fileReference.Offset, fileReference.Length,
-                                   selectionIndex:=fileReference.SelectionIndex)
-                Case "contents", "_directory", "_file"
-                    ParseDirectoryContainer(reader, parentState, store)
-                Case Else
-                    LazySchemaStore.SkipElement(reader)
-            End Select
-        End While
-    End Sub
-
-    Private Structure LazyFileRecordReference
-        Public Offset As Long
-        Public Length As Long
-        Public SelectionIndex As Long
-    End Structure
-
-    Private Shared Function ParseFile(reader As XmlReader, store As LazySchemaStore) As LazyFileRecordReference
-        Dim result As New LazyFileRecordReference With {
-            .Offset = store.BeginFileRecord(),
-            .SelectionIndex = store.AllocateSelectionIndex()}
-        Using subtree As XmlReader = reader.ReadSubtree()
-            subtree.MoveToContent()
-            Using writer As XmlWriter = store.CreateFileXmlWriter()
-                writer.WriteNode(subtree, True)
-            End Using
-        End Using
-        result.Length = store.EndFileRecord(result.Offset)
-        Return result
-    End Function
-
-    Private Shared Function CreateDirectory(reference As LazyDirectoryReference, store As LazySchemaStore) As ltfsindex.directory
-        Dim result As New ltfsindex.directory
-        result.AttachLazyRecord(store, reference.Offset, selectionIndex:=reference.SelectionIndex)
-        Return result
-    End Function
-
-    Private Shared Function ParseLocation(reader As XmlReader) As ltfsindex.LocationDef
-        Dim result As New ltfsindex.LocationDef
-        Dim locationDepth As Integer = reader.Depth
-        Dim textValue As String
-        Dim parsedPartition As ltfsindex.PartitionLabel
-        Dim parsedULong As ULong
-        If reader.IsEmptyElement Then Return result
-        While reader.Read()
-            If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = locationDepth Then Exit While
-            If reader.NodeType <> XmlNodeType.Element OrElse reader.Depth <> locationDepth + 1 Then Continue While
-            Select Case reader.LocalName
-                Case "partition"
-                    textValue = LazySchemaStore.ReadElementText(reader)
-                    If [Enum].TryParse(textValue, True, parsedPartition) Then result.partition = parsedPartition
-                Case "startblock"
-                    textValue = LazySchemaStore.ReadElementText(reader)
-                    If ULong.TryParse(textValue, NumberStyles.Integer, CultureInfo.InvariantCulture, parsedULong) Then result.startblock = parsedULong
-                Case Else
-                    LazySchemaStore.SkipElement(reader)
-            End Select
-        End While
-        Return result
-    End Function
 End Class
 
 <Serializable>

@@ -376,6 +376,7 @@
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
     </Compile>
     <Compile Include="Core\Schema.vb" />
+    <Compile Include="Core\SchemaNative.vb" />
     <Compile Include="Core\SCSIDeviceLockManager.vb" />
     <Compile Include="Forms\SettingPanel.Designer.vb">
       <DependentUpon>SettingPanel.vb</DependentUpon>
@@ -526,11 +527,20 @@
     <FastReaderCargoOutputDirectory>release</FastReaderCargoOutputDirectory>
     <FastReaderCargoProfile Condition="'$(Configuration)' == 'Debug'">dev</FastReaderCargoProfile>
     <FastReaderCargoOutputDirectory Condition="'$(Configuration)' == 'Debug'">debug</FastReaderCargoOutputDirectory>
+    <SchemaCargoProfile>release</SchemaCargoProfile>
+    <SchemaCargoOutputDirectory>release</SchemaCargoOutputDirectory>
+    <SchemaCargoProfile Condition="'$(Configuration)' == 'Debug'">dev</SchemaCargoProfile>
+    <SchemaCargoOutputDirectory Condition="'$(Configuration)' == 'Debug'">debug</SchemaCargoOutputDirectory>
   </PropertyGroup>
   <Target Name="BuildFastReader" AfterTargets="Build">
     <Exec Command="cargo +nightly build -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --profile $(FastReaderCargoProfile) --lib --manifest-path &quot;$(MSBuildProjectDirectory)\..\LtfsFastReader\Cargo.toml&quot;" WorkingDirectory="$(MSBuildProjectDirectory)\..\LtfsFastReader" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LtfsFastReader\target\x86_64-win7-windows-msvc\$(FastReaderCargoOutputDirectory)\ltfscopy_fastreader.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LtfsFastReader\target\x86_64-win7-windows-msvc\$(FastReaderCargoOutputDirectory)\ltfscopy_fastreader.pdb" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(MSBuildProjectDirectory)\..\LtfsFastReader\target\x86_64-win7-windows-msvc\$(FastReaderCargoOutputDirectory)\ltfscopy_fastreader.pdb')" />
+  </Target>
+  <Target Name="BuildSchemaNative" AfterTargets="Build">
+    <Exec Command="cargo +nightly build -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --profile $(SchemaCargoProfile) --lib --manifest-path &quot;$(MSBuildProjectDirectory)\..\LtfsSchema\Cargo.toml&quot;" WorkingDirectory="$(MSBuildProjectDirectory)\..\LtfsSchema" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LtfsSchema\target\x86_64-win7-windows-msvc\$(SchemaCargoOutputDirectory)\ltfscopy_schema.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LtfsSchema\target\x86_64-win7-windows-msvc\$(SchemaCargoOutputDirectory)\ltfscopy_schema.pdb" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(MSBuildProjectDirectory)\..\LtfsSchema\target\x86_64-win7-windows-msvc\$(SchemaCargoOutputDirectory)\ltfscopy_schema.pdb')" />
   </Target>
   <PropertyGroup>
     <PreBuildEvent>"$(ProjectDir)Build\BuildVersionPropagator.exe" "$(ProjectDir)Build\Build.vb"</PreBuildEvent>

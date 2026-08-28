@@ -636,7 +636,7 @@ Public Class Form1
             'The merge writer emits standard XML directly.  Load it through
             'the lazy reader instead of routing small results through the
             'legacy compact-format line converter.
-            Return LazySchemaReader.Load(tempPath)
+            Return NativeSchemaXml.LoadIndex(tempPath)
         Finally
             If fragments IsNot Nothing Then
                 For Each fragment As MergeFragment In fragments
@@ -1125,7 +1125,7 @@ Public Class Form1
         Try
             Dim RootDir As IO.DirectoryInfo = New IO.DirectoryInfo(TextBox3.Text)
             Dim fid As Long = 0
-            schema = LazySchemaReader.BuildFromDirectory(
+            schema = LazySchemaBuilder.BuildFromDirectory(
                 RootDir,
                 Function(sourceFile As IO.FileInfo, sequenceNumber As Long) As ltfsindex.file
                     Dim outputFile As New ltfsindex.file With {

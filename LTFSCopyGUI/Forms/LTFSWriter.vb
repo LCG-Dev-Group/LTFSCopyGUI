@@ -9460,31 +9460,69 @@ Public Class LTFSWriter
     Private Sub 统计ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 统计ToolStripMenuItem.Click
         Dim Nodes As List(Of TreeNode) = SelectedNodes
         If Nodes.Count = 0 Then Exit Sub
-        Dim fnum As Long = 0, fbytes As Long = 0
-        Dim dirNames As String = ""
-        Dim maxlen As Integer = 40
+
+        Dim directories As New List(Of ltfsindex.directory)
+        Dim names As New List(Of String)
         For Each n As TreeNode In Nodes
             If TypeOf n.Tag IsNot ltfsindex.directory Then Exit For
             Dim d As ltfsindex.directory = DirectCast(n.Tag, ltfsindex.directory)
-            If dirNames.Length <= maxlen Then dirNames = dirNames & d.name & "; "
-            Dim q As New Stack(Of ltfsindex.directory)
-            q.Push(d)
-            While q.Count > 0
-                Dim qd As ltfsindex.directory = q.Pop()
-                Threading.Interlocked.Add(fnum, qd.GetLazyDirectFileCount())
-                For Each qf As ltfsindex.file In qd.EnumerateLazyFiles()
-                    Threading.Interlocked.Add(fbytes, qf.length)
-                Next
-                For Each childDirectory As ltfsindex.directory In qd.EnumerateLazyDirectories()
-                    q.Push(childDirectory)
-                Next
-            End While
+            directories.Add(d)
+            If names.Count = 0 OrElse String.Join("; ", names).Length <= 40 Then names.Add(If(d.name, String.Empty))
         Next
-        dirNames = dirNames.Substring(0, dirNames.Length - 2)
+        If directories.Count = 0 Then Exit Sub
+
+        Dim dirNames As String = String.Join("; ", names)
+        Dim maxlen As Integer = 40
         If dirNames.Length > maxlen Then
             dirNames = dirNames.Substring(0, maxlen - 3) & "..."
         End If
-        MessageBox.Show(New Form With {.TopMost = True}, $"{dirNames}{vbCrLf}{My.Resources.ResText_FCountP}{fnum}{vbCrLf}{My.Resources.ResText_FSizeP}{fbytes} {My.Resources.ResText_Byte} ({IOManager.FormatSize(fbytes)})")
+
+        'Statistics used to run synchronously on the UI thread and parsed
+        'every file record (including xattrs and extents).  The lazy store can
+        'sum the persisted file lengths natively, so only the directory chain
+        'is walked here.  Keep the UI responsive while that first calculation
+        'warms the backing-store caches.
+        LockGUI(True)
+        Task.Run(
+            Sub()
+                Try
+                    Dim fnum As Long = 0
+                    Dim fbytes As Long = 0
+                    For Each d As ltfsindex.directory In directories
+                        Dim q As New Stack(Of ltfsindex.directory)
+                        q.Push(d)
+                        While q.Count > 0
+                            Dim qd As ltfsindex.directory = q.Pop()
+                            fnum += qd.GetLazyDirectFileCount()
+                            fbytes += qd.GetLazyDirectFileByteCount()
+                            For Each childDirectory As ltfsindex.directory In qd.EnumerateLazyDirectories()
+                                q.Push(childDirectory)
+                            Next
+                        End While
+                    Next
+
+                    Invoke(
+                        Sub()
+                            Try
+                                MessageBox.Show(New Form With {.TopMost = True}, $"{dirNames}{vbCrLf}{My.Resources.ResText_FCountP}{fnum}{vbCrLf}{My.Resources.ResText_FSizeP}{fbytes} {My.Resources.ResText_Byte} ({IOManager.FormatSize(fbytes)})")
+                            Finally
+                                LockGUI(False)
+                            End Try
+                        End Sub)
+                Catch ex As Exception
+                    Try
+                        Invoke(
+                            Sub()
+                                Try
+                                    PrintMsg($"Statistics failed: {ex}", ForceLog:=True)
+                                Finally
+                                    LockGUI(False)
+                                End Try
+                            End Sub)
+                    Catch
+                    End Try
+                End Try
+            End Sub)
     End Sub
 
     Private Sub 预读文件数5ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 预读文件数5ToolStripMenuItem.Click
@@ -11249,7 +11287,11 @@ Public Class LTFSWriter
                      Dim hit As SearchEntry = Nothing
                      Try
                          For Each entry As SearchEntry In EnumerateSearchEntries(searchRoot, rootPath)
-                             If entry.Directory Is searchRoot Then Continue For
+                             'The first yielded entry represents searchRoot itself.
+                             'Do not skip files whose parent is searchRoot: those
+                             'files are often outside the currently materialized
+                             'ListView page and still have to be searchable.
+                             If entry.File Is Nothing AndAlso entry.Directory Is searchRoot Then Continue For
                              If entry.File Is Nothing Then
                                  If MatchesSearchEntry(entry, searchKeyword, fidMode, fid, caseSensitive) Then
                                      hit = entry
