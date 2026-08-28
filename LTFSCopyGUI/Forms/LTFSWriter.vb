@@ -5,6 +5,7 @@ Imports System.IO
 Imports System.IO.Pipelines
 Imports System.Runtime
 Imports System.Runtime.InteropServices
+Imports System.Runtime.CompilerServices
 Imports System.Security.Cryptography
 Imports System.Text
 Imports System.Threading
@@ -255,6 +256,11 @@ Public Class LTFSWriter
     Public Property Session_Start_Time As Date = Now
     Private _logSessionId As String = $"writer-{Guid.NewGuid().ToString("N").Substring(0, 8)}"
     Private ReadOnly _messageStateLock As New Object()
+    Private ReadOnly _pendingQueueLock As New Object()
+    Private ReadOnly _pendingByDirectory As New Dictionary(Of ltfsindex.directory, Dictionary(Of String, FileRecord))(DirectoryReferenceComparer.Instance)
+    Private _pendingSize As Long
+    Private _activeAddFileLookup As Dictionary(Of ltfsindex.directory, Dictionary(Of String, List(Of ltfsindex.file)))
+    Private _activeAddFileLookupCalls As Dictionary(Of ltfsindex.directory, Integer)
     Private _lastMessage As String = String.Empty
     <Category("LTFSWriter")>
     Public Property SilentMode As Boolean = False
@@ -1056,7 +1062,10 @@ Public Class LTFSWriter
         Public Property IsOpened As Boolean = False
         Private OperationLock As New Object
         Public Sub RemoveUnwritten()
-            ParentDirectory.UnwrittenFiles.Remove(File)
+            If ParentDirectory Is Nothing OrElse ParentDirectory.UnwrittenFiles Is Nothing Then Return
+            SyncLock ParentDirectory.UnwrittenFiles
+                ParentDirectory.UnwrittenFiles.Remove(File)
+            End SyncLock
         End Sub
         Public Sub New()
 
@@ -1118,7 +1127,9 @@ Public Class LTFSWriter
                     ActiveFrm.Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString()}{vbCrLf}{ex.StackTrace}"))
                 End Try
             End With
-            ParentDirectory.UnwrittenFiles.Add(File)
+            SyncLock ParentDirectory.UnwrittenFiles
+                ParentDirectory.UnwrittenFiles.Add(File)
+            End SyncLock
         End Sub
         Public Property fs As IO.FileStream
         Public Property fsB As IO.BufferedStream
@@ -1229,6 +1240,302 @@ Public Class LTFSWriter
             End If
         End Function
     End Class
+
+    Private NotInheritable Class DirectoryReferenceComparer
+        Implements IEqualityComparer(Of ltfsindex.directory)
+
+        Public Shared ReadOnly Instance As New DirectoryReferenceComparer
+
+        Public Overloads Function Equals(left As ltfsindex.directory,
+                                          right As ltfsindex.directory) As Boolean _
+            Implements IEqualityComparer(Of ltfsindex.directory).Equals
+            Return Object.ReferenceEquals(left, right)
+        End Function
+
+        Public Shadows Function GetHashCode(value As ltfsindex.directory) As Integer _
+            Implements IEqualityComparer(Of ltfsindex.directory).GetHashCode
+            If value Is Nothing Then Return 0
+            Return RuntimeHelpers.GetHashCode(value)
+        End Function
+    End Class
+
+    Private Sub RegisterPendingRecordUnsafe(record As FileRecord)
+        If record Is Nothing OrElse record.ParentDirectory Is Nothing OrElse record.File Is Nothing Then Return
+
+        Dim byName As Dictionary(Of String, FileRecord) = Nothing
+        If Not _pendingByDirectory.TryGetValue(record.ParentDirectory, byName) Then
+            byName = New Dictionary(Of String, FileRecord)(StringComparer.OrdinalIgnoreCase)
+            _pendingByDirectory(record.ParentDirectory) = byName
+        End If
+        byName(If(record.File.name, String.Empty)) = record
+    End Sub
+
+    Private Function GetPendingDirectoryIndexUnsafe(directory As ltfsindex.directory) As Dictionary(Of String, FileRecord)
+        Dim byName As Dictionary(Of String, FileRecord) = Nothing
+        If _pendingByDirectory.TryGetValue(directory, byName) Then Return byName
+
+        byName = New Dictionary(Of String, FileRecord)(StringComparer.OrdinalIgnoreCase)
+        If UnwrittenFiles IsNot Nothing Then
+            For Each record As FileRecord In UnwrittenFiles
+                If record IsNot Nothing AndAlso record.ParentDirectory Is directory AndAlso record.File IsNot Nothing Then
+                    byName(If(record.File.name, String.Empty)) = record
+                End If
+            Next
+        End If
+        _pendingByDirectory(directory) = byName
+        Return byName
+    End Function
+
+    Private Sub RemovePendingIndexUnsafe(record As FileRecord)
+        If record Is Nothing OrElse record.ParentDirectory Is Nothing Then Return
+        Dim byName As Dictionary(Of String, FileRecord) = Nothing
+        If Not _pendingByDirectory.TryGetValue(record.ParentDirectory, byName) Then Return
+
+        Dim staleKeys As New List(Of String)
+        For Each pair As KeyValuePair(Of String, FileRecord) In byName
+            If Object.ReferenceEquals(pair.Value, record) Then staleKeys.Add(pair.Key)
+        Next
+        For Each key As String In staleKeys
+            byName.Remove(key)
+        Next
+        If byName.Count = 0 Then _pendingByDirectory.Remove(record.ParentDirectory)
+    End Sub
+
+    Private Sub AddPendingRecord(record As FileRecord)
+        If record Is Nothing Then Return
+        SyncLock _pendingQueueLock
+            If UnwrittenFiles Is Nothing Then UnwrittenFiles = New List(Of FileRecord)
+            UnwrittenFiles.Add(record)
+            If record.File IsNot Nothing Then _pendingSize += record.File.length
+            RegisterPendingRecordUnsafe(record)
+        End SyncLock
+    End Sub
+
+    Private Function RemovePendingRecord(record As FileRecord) As Boolean
+        If record Is Nothing Then Return False
+        SyncLock _pendingQueueLock
+            Dim removed As Boolean = False
+            If record.ParentDirectory IsNot Nothing AndAlso record.ParentDirectory.UnwrittenFiles IsNot Nothing Then
+                SyncLock record.ParentDirectory.UnwrittenFiles
+                    removed = record.ParentDirectory.UnwrittenFiles.Remove(record.File) OrElse removed
+                End SyncLock
+            End If
+            If UnwrittenFiles IsNot Nothing AndAlso UnwrittenFiles.Remove(record) Then
+                If record.File IsNot Nothing Then _pendingSize -= record.File.length
+                removed = True
+            End If
+            RemovePendingIndexUnsafe(record)
+            Return removed
+        End SyncLock
+    End Function
+
+    Private Function RemovePendingByFile(directory As ltfsindex.directory, file As ltfsindex.file) As Boolean
+        If directory Is Nothing OrElse file Is Nothing Then Return False
+        SyncLock _pendingQueueLock
+            Dim removed As Boolean = False
+            If directory.UnwrittenFiles IsNot Nothing Then
+                SyncLock directory.UnwrittenFiles
+                    removed = directory.UnwrittenFiles.Remove(file) OrElse removed
+                End SyncLock
+            End If
+            If UnwrittenFiles IsNot Nothing Then
+                For i As Integer = UnwrittenFiles.Count - 1 To 0 Step -1
+                    Dim record As FileRecord = UnwrittenFiles(i)
+                    If record IsNot Nothing AndAlso record.ParentDirectory Is directory AndAlso record.File Is file Then
+                        UnwrittenFiles.RemoveAt(i)
+                        If record.File IsNot Nothing Then _pendingSize -= record.File.length
+                        RemovePendingIndexUnsafe(record)
+                        removed = True
+                    End If
+                Next
+            End If
+            Return removed
+        End SyncLock
+    End Function
+
+    Private Function RemovePendingByName(directory As ltfsindex.directory, fileName As String) As Boolean
+        If directory Is Nothing OrElse fileName Is Nothing Then Return False
+        SyncLock _pendingQueueLock
+            Dim byName As Dictionary(Of String, FileRecord) = GetPendingDirectoryIndexUnsafe(directory)
+            Dim record As FileRecord = Nothing
+            If byName.TryGetValue(fileName, record) AndAlso record IsNot Nothing AndAlso record.File IsNot Nothing AndAlso
+               String.Equals(record.File.name, fileName, StringComparison.OrdinalIgnoreCase) Then
+                Return RemovePendingRecord(record)
+            End If
+
+            ' Direct list edits are still supported by the old public model.  The
+            ' indexed path handles normal adds; this fallback keeps those edits
+            ' correct without making every add scan the whole global queue.
+            Dim removedFiles As New HashSet(Of ltfsindex.file)
+            If directory.UnwrittenFiles IsNot Nothing Then
+                SyncLock directory.UnwrittenFiles
+                    For i As Integer = directory.UnwrittenFiles.Count - 1 To 0 Step -1
+                        Dim pendingFile As ltfsindex.file = directory.UnwrittenFiles(i)
+                        If pendingFile IsNot Nothing AndAlso String.Equals(pendingFile.name, fileName, StringComparison.OrdinalIgnoreCase) Then
+                            removedFiles.Add(pendingFile)
+                            directory.UnwrittenFiles.RemoveAt(i)
+                        End If
+                    Next
+                End SyncLock
+            End If
+
+            If UnwrittenFiles IsNot Nothing Then
+                For i As Integer = UnwrittenFiles.Count - 1 To 0 Step -1
+                    Dim pendingRecord As FileRecord = UnwrittenFiles(i)
+                    If pendingRecord IsNot Nothing AndAlso pendingRecord.ParentDirectory Is directory AndAlso
+                       pendingRecord.File IsNot Nothing AndAlso
+                       (removedFiles.Contains(pendingRecord.File) OrElse String.Equals(pendingRecord.File.name, fileName, StringComparison.OrdinalIgnoreCase)) Then
+                        UnwrittenFiles.RemoveAt(i)
+                        _pendingSize -= pendingRecord.File.length
+                        RemovePendingIndexUnsafe(pendingRecord)
+                        removedFiles.Add(pendingRecord.File)
+                    End If
+                Next
+            End If
+            _pendingByDirectory.Remove(directory)
+            Return removedFiles.Count > 0
+        End SyncLock
+    End Function
+
+    Private Sub RemovePendingRecords(records As IList(Of FileRecord))
+        If records Is Nothing OrElse records.Count = 0 Then Return
+        SyncLock _pendingQueueLock
+            Dim recordSet As New HashSet(Of FileRecord)
+            Dim filesByDirectory As New Dictionary(Of ltfsindex.directory, HashSet(Of ltfsindex.file))(DirectoryReferenceComparer.Instance)
+            For Each record As FileRecord In records
+                If record Is Nothing Then Continue For
+                recordSet.Add(record)
+                If record.ParentDirectory Is Nothing OrElse record.File Is Nothing Then Continue For
+                Dim files As HashSet(Of ltfsindex.file) = Nothing
+                If Not filesByDirectory.TryGetValue(record.ParentDirectory, files) Then
+                    files = New HashSet(Of ltfsindex.file)
+                    filesByDirectory(record.ParentDirectory) = files
+                End If
+                files.Add(record.File)
+            Next
+
+            For Each pair As KeyValuePair(Of ltfsindex.directory, HashSet(Of ltfsindex.file)) In filesByDirectory
+                If pair.Key.UnwrittenFiles Is Nothing Then Continue For
+                SyncLock pair.Key.UnwrittenFiles
+                    pair.Key.UnwrittenFiles.RemoveAll(Function(value As ltfsindex.file) pair.Value.Contains(value))
+                End SyncLock
+            Next
+
+            If UnwrittenFiles IsNot Nothing Then
+                For i As Integer = UnwrittenFiles.Count - 1 To 0 Step -1
+                    Dim value As FileRecord = UnwrittenFiles(i)
+                    If recordSet.Contains(value) Then
+                        UnwrittenFiles.RemoveAt(i)
+                        If value IsNot Nothing AndAlso value.File IsNot Nothing Then _pendingSize -= value.File.length
+                    End If
+                Next
+            End If
+            For Each record As FileRecord In recordSet
+                RemovePendingIndexUnsafe(record)
+            Next
+        End SyncLock
+    End Sub
+
+    Private Sub BeginAddFileLookup()
+        _activeAddFileLookup = New Dictionary(Of ltfsindex.directory, Dictionary(Of String, List(Of ltfsindex.file)))(DirectoryReferenceComparer.Instance)
+        _activeAddFileLookupCalls = New Dictionary(Of ltfsindex.directory, Integer)(DirectoryReferenceComparer.Instance)
+    End Sub
+
+    Private Sub EndAddFileLookup()
+        _activeAddFileLookup = Nothing
+        _activeAddFileLookupCalls = Nothing
+    End Sub
+
+    Private Function GetExistingFilesForAdd(directory As ltfsindex.directory, fileName As String) As List(Of ltfsindex.file)
+        If directory Is Nothing Then Return New List(Of ltfsindex.file)
+        If _activeAddFileLookup Is Nothing Then Return directory.FindFilesByName(fileName)
+
+        Dim byName As Dictionary(Of String, List(Of ltfsindex.file)) = Nothing
+        If Not _activeAddFileLookup.TryGetValue(directory, byName) Then
+            Dim lookupCalls As Integer = 0
+            If _activeAddFileLookupCalls IsNot Nothing Then _activeAddFileLookupCalls.TryGetValue(directory, lookupCalls)
+            If lookupCalls = 0 Then
+                _activeAddFileLookupCalls(directory) = 1
+                'A one-file add should retain the old early-exit behavior.  If
+                'the same directory receives another file, the next call builds
+                'one reusable name map instead of rescanning it for every file.
+                Return directory.FindFilesByName(fileName)
+            End If
+
+            byName = New Dictionary(Of String, List(Of ltfsindex.file))(StringComparer.OrdinalIgnoreCase)
+            For Each existing As ltfsindex.file In directory.EnumerateLazyFiles()
+                If existing Is Nothing Then Continue For
+                Dim key As String = If(existing.name, String.Empty)
+                Dim sameName As List(Of ltfsindex.file) = Nothing
+                If Not byName.TryGetValue(key, sameName) Then
+                    sameName = New List(Of ltfsindex.file)
+                    byName(key) = sameName
+                End If
+                sameName.Add(existing)
+            Next
+            _activeAddFileLookup(directory) = byName
+        End If
+
+        Dim result As List(Of ltfsindex.file) = Nothing
+        If byName.TryGetValue(If(fileName, String.Empty), result) Then Return New List(Of ltfsindex.file)(result)
+        Return New List(Of ltfsindex.file)
+    End Function
+
+    Private Sub RemoveExistingFileFromAddLookup(directory As ltfsindex.directory, file As ltfsindex.file)
+        If _activeAddFileLookup Is Nothing OrElse directory Is Nothing OrElse file Is Nothing Then Return
+        Dim byName As Dictionary(Of String, List(Of ltfsindex.file)) = Nothing
+        If Not _activeAddFileLookup.TryGetValue(directory, byName) Then Return
+        Dim sameName As List(Of ltfsindex.file) = Nothing
+        If Not byName.TryGetValue(If(file.name, String.Empty), sameName) Then Return
+        sameName.Remove(file)
+        If sameName.Count = 0 Then byName.Remove(If(file.name, String.Empty))
+    End Sub
+
+    Private Sub ReindexPendingFile(directory As ltfsindex.directory, file As ltfsindex.file)
+        If directory Is Nothing OrElse file Is Nothing Then Return
+        SyncLock _pendingQueueLock
+            Dim byName As Dictionary(Of String, FileRecord) = Nothing
+            If Not _pendingByDirectory.TryGetValue(directory, byName) Then Return
+            Dim staleKeys As New List(Of String)
+            For Each pair As KeyValuePair(Of String, FileRecord) In byName
+                If pair.Value IsNot Nothing AndAlso pair.Value.File Is file Then staleKeys.Add(pair.Key)
+            Next
+            For Each key As String In staleKeys
+                byName.Remove(key)
+            Next
+            For Each record As FileRecord In UnwrittenFiles
+                If record IsNot Nothing AndAlso record.ParentDirectory Is directory AndAlso record.File Is file Then
+                    byName(If(file.name, String.Empty)) = record
+                    Exit For
+                End If
+            Next
+        End SyncLock
+    End Sub
+
+    Private Sub CommitWrittenFiles(records As IList(Of FileRecord))
+        If records Is Nothing OrElse records.Count = 0 Then Return
+
+        Dim filesByDirectory As New Dictionary(Of ltfsindex.directory, List(Of ltfsindex.file))(DirectoryReferenceComparer.Instance)
+        Dim committedRecords As New List(Of FileRecord)
+        Dim seenFiles As New HashSet(Of ltfsindex.file)
+        For Each record As FileRecord In records
+            If record Is Nothing OrElse record.ParentDirectory Is Nothing OrElse record.File Is Nothing Then Continue For
+            If Not seenFiles.Add(record.File) Then Continue For
+            Dim files As List(Of ltfsindex.file) = Nothing
+            If Not filesByDirectory.TryGetValue(record.ParentDirectory, files) Then
+                files = New List(Of ltfsindex.file)
+                filesByDirectory(record.ParentDirectory) = files
+            End If
+            files.Add(record.File)
+            committedRecords.Add(record)
+        Next
+
+        For Each pair As KeyValuePair(Of ltfsindex.directory, List(Of ltfsindex.file)) In filesByDirectory
+            pair.Key.AddFiles(pair.Value)
+        Next
+        RemovePendingRecords(committedRecords)
+    End Sub
+
     <TypeConverter(GetType(ExpandableObjectConverter))>
     Public Class IntLock
         Public Property Value As Integer = 0
@@ -1263,16 +1570,9 @@ Public Class LTFSWriter
         Get
             If UnwrittenSizeOverrideValue > 0 Then Return UnwrittenSizeOverrideValue
             If UnwrittenFiles Is Nothing Then Return 0
-            Dim result As Long = 0
-
-            UFReadCount.Inc()
-            If UnwrittenFiles.Count > 0 Then
-                For Each fr As FileRecord In UnwrittenFiles
-                    result += fr.File.length
-                Next
-            End If
-            UFReadCount.Dec()
-            Return CULng(result)
+            SyncLock _pendingQueueLock
+                Return CULng(Math.Max(0L, _pendingSize))
+            End SyncLock
         End Get
     End Property
     <Category("LTFSWriter")>
@@ -1281,7 +1581,9 @@ Public Class LTFSWriter
     Public ReadOnly Property UnwrittenCount As ULong
         Get
             If UnwrittenCountOverrideValue > 0 Then Return UnwrittenCountOverrideValue
-            Return CULng(UnwrittenFiles.Count)
+            SyncLock _pendingQueueLock
+                Return CULng(If(UnwrittenFiles Is Nothing, 0, UnwrittenFiles.Count))
+            End SyncLock
         End Get
     End Property
 
@@ -1291,24 +1593,36 @@ Public Class LTFSWriter
         ' queues keeps abort/cleanup O(pending writes), even for a multi-million
         ' file lazy schema.  extraDirectory covers the disk-image writer, whose
         ' temporary FileRecord is kept only in the selected directory queue.
-        Dim touchedDirectories As New HashSet(Of ltfsindex.directory)()
-        If UnwrittenFiles IsNot Nothing Then
-            For Each fr As FileRecord In UnwrittenFiles
-                If fr IsNot Nothing AndAlso fr.ParentDirectory IsNot Nothing Then
-                    touchedDirectories.Add(fr.ParentDirectory)
+        Dim touchedDirectories As New HashSet(Of ltfsindex.directory)(DirectoryReferenceComparer.Instance)
+        SyncLock _pendingQueueLock
+            If UnwrittenFiles IsNot Nothing Then
+                For Each fr As FileRecord In UnwrittenFiles
+                    If fr IsNot Nothing AndAlso fr.ParentDirectory IsNot Nothing Then
+                        touchedDirectories.Add(fr.ParentDirectory)
+                    End If
+                Next
+                UnwrittenFiles.Clear()
+            End If
+            _pendingSize = 0
+            _pendingByDirectory.Clear()
+            If extraDirectory IsNot Nothing Then touchedDirectories.Add(extraDirectory)
+
+            For Each directory As ltfsindex.directory In touchedDirectories
+                If directory.UnwrittenFiles IsNot Nothing Then
+                    SyncLock directory.UnwrittenFiles
+                        directory.UnwrittenFiles.Clear()
+                    End SyncLock
                 End If
             Next
-            UnwrittenFiles.Clear()
-        End If
-        If extraDirectory IsNot Nothing Then touchedDirectories.Add(extraDirectory)
+        End SyncLock
+    End Sub
 
-        For Each directory As ltfsindex.directory In touchedDirectories
-            If directory.UnwrittenFiles IsNot Nothing Then
-                SyncLock directory.UnwrittenFiles
-                    directory.UnwrittenFiles.Clear()
-                End SyncLock
-            End If
-        Next
+    Private Sub ClearGlobalPendingQueue()
+        SyncLock _pendingQueueLock
+            If UnwrittenFiles IsNot Nothing Then UnwrittenFiles.Clear()
+            _pendingSize = 0
+            _pendingByDirectory.Clear()
+        End SyncLock
     End Sub
 
     <Category("LTFSWriter")>
@@ -3499,7 +3813,7 @@ Public Class LTFSWriter
                        Optional ByVal XattrPath As String = Nothing)
         Try
             If StopFlag Then Exit Sub
-            If f.Extension.ToLower = ".xattr" Then Exit Sub
+            If f.Extension.Equals(".xattr", StringComparison.OrdinalIgnoreCase) Then Exit Sub
             'symlink
             If My.Settings.LTFSWriter_SkipSymlink AndAlso ((f.Attributes And IO.FileAttributes.ReparsePoint) <> 0) Then
                 Exit Sub
@@ -3507,41 +3821,20 @@ Public Class LTFSWriter
             Dim FileExist As Boolean = False
             Dim SameFile As Boolean = False
             '检查磁带已有文件
-            For Each oldf As ltfsindex.file In d.EnumerateFilesByName(f.Name)
+            For Each oldf As ltfsindex.file In GetExistingFilesForAdd(d, f.Name)
                 If String.Equals(oldf.name, f.Name, StringComparison.OrdinalIgnoreCase) Then
                     SameFile = IsSameFile(f, oldf)
-                    If OverWrite AndAlso Not SameFile Then d.RemoveFile(oldf)
+                    If OverWrite AndAlso Not SameFile Then
+                        d.RemoveFile(oldf)
+                        RemoveExistingFileFromAddLookup(d, oldf)
+                    End If
                     FileExist = True
                 End If
             Next
             If FileExist And (SameFile OrElse Not OverWrite) Then Exit Sub
             '检查写入队列
             If Not FileExist Then
-                While True
-                    Threading.Thread.Sleep(0)
-                    SyncLock UFReadCount
-                        If UFReadCount > 0 Then Continue While
-
-                        ' Only inspect the pending entries of the directory being written to.
-                        ' The old LastUnwrittenFilesCount was initialized by a full-schema WSort
-                        ' before every add operation, which materialized every lazy directory.
-                        For i As Integer = d.UnwrittenFiles.Count - 1 To 0 Step -1
-                            If f.Name.ToLower = d.UnwrittenFiles(i).name.ToLower Then
-                                d.UnwrittenFiles.RemoveAt(i)
-                                For j As Integer = UnwrittenFiles.Count - 1 To 0 Step -1
-                                    Dim oldf As FileRecord = UnwrittenFiles(j)
-                                    If oldf.ParentDirectory Is d AndAlso oldf.File.name.ToLower = f.Name.ToLower Then
-                                        UnwrittenFiles.RemoveAt(j)
-                                        FileExist = True
-                                        Exit For
-                                    End If
-                                Next
-                                Exit For
-                            End If
-                        Next
-                        Exit While
-                    End SyncLock
-                End While
+                FileExist = RemovePendingByName(d, f.Name)
             End If
             '添加到队列
             Dim xattrPathToUse As String = XattrPath
@@ -3551,14 +3844,7 @@ Public Class LTFSWriter
             End If
             If String.IsNullOrEmpty(xattrPathToUse) Then xattrPathToUse = Nothing
             Dim frnew As New FileRecord(f, d, xattrPathToUse)
-            While True
-                Threading.Thread.Sleep(0)
-                SyncLock UFReadCount
-                    If UFReadCount > 0 Then Continue While
-                    UnwrittenFiles.Add(frnew)
-                    Exit While
-                End SyncLock
-            End While
+            AddPendingRecord(frnew)
         Catch ex As Exception
             Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString()}{vbCrLf}{ex.StackTrace}"))
         End Try
@@ -3575,11 +3861,17 @@ Public Class LTFSWriter
     End Sub
 
     Public Sub AddDirectry(dnew1 As IO.DirectoryInfo, d1 As ltfsindex.directory, Optional ByVal OverWrite As Boolean = False, Optional ByVal exceptExtention As String() = Nothing)
-        If My.Settings.LTFSWriter_SkipSymlink AndAlso ((dnew1.Attributes And IO.FileAttributes.ReparsePoint) <> 0) Then
-            Exit Sub
-        End If
-        If StopFlag Then Exit Sub
-        AddScannedDirectory(dnew1, d1, OverWrite, exceptExtention)
+        Dim ownsLookup As Boolean = (_activeAddFileLookup Is Nothing)
+        If ownsLookup Then BeginAddFileLookup()
+        Try
+            If My.Settings.LTFSWriter_SkipSymlink AndAlso ((dnew1.Attributes And IO.FileAttributes.ReparsePoint) <> 0) Then
+                Exit Sub
+            End If
+            If StopFlag Then Exit Sub
+            AddScannedDirectory(dnew1, d1, OverWrite, exceptExtention)
+        Finally
+            If ownsLookup Then EndAddFileLookup()
+        End Try
     End Sub
 
     Private Function GetOrCreateTargetDirectory(sourceDirectory As IO.DirectoryInfo,
@@ -3642,43 +3934,28 @@ Public Class LTFSWriter
     End Sub
 
     Public Sub ConcatDirectory(dnew1 As IO.DirectoryInfo, d1 As ltfsindex.directory, Optional ByVal OverWrite As Boolean = False)
-        For Each f As IO.FileInfo In dnew1.EnumerateFiles()
+        Dim ownsLookup As Boolean = (_activeAddFileLookup Is Nothing)
+        If ownsLookup Then BeginAddFileLookup()
+        Try
+            For Each f As IO.FileInfo In dnew1.EnumerateFiles()
             Dim FileExist As Boolean = False
             '检查磁带已有文件
-            For Each fe As ltfsindex.file In d1.EnumerateFilesByName(f.Name)
+            For Each fe As ltfsindex.file In GetExistingFilesForAdd(d1, f.Name)
                 FileExist = True
-                If OverWrite Then d1.RemoveFile(fe)
+                If OverWrite Then
+                    d1.RemoveFile(fe)
+                    RemoveExistingFileFromAddLookup(d1, fe)
+                End If
             Next
             If (Not OverWrite) And FileExist Then Continue For
             '检查写入队列
             If Not FileExist Then
-                While True
-                    Threading.Thread.Sleep(0)
-                    SyncLock UFReadCount
-                        If UFReadCount > 0 Then Continue While
-                        For Each oldf As FileRecord In UnwrittenFiles
-                            If oldf.ParentDirectory Is d1 AndAlso oldf.File.name.ToLower = f.Name.ToLower Then
-                                oldf.RemoveUnwritten()
-                                UnwrittenFiles.Remove(oldf)
-                                FileExist = True
-                                Exit For
-                            End If
-                        Next
-                        Exit While
-                    End SyncLock
-                End While
+                FileExist = RemovePendingByName(d1, f.Name)
             End If
             '添加到队列
-            While True
-                Threading.Thread.Sleep(0)
-                SyncLock UFReadCount
-                    If UFReadCount > 0 Then Continue While
-                    UnwrittenFiles.Add(New FileRecord(f.FullName, d1))
-                    Exit While
-                End SyncLock
-            End While
-        Next
-        For Each dn As IO.DirectoryInfo In dnew1.EnumerateDirectories()
+            AddPendingRecord(New FileRecord(f.FullName, d1))
+            Next
+            For Each dn As IO.DirectoryInfo In dnew1.EnumerateDirectories()
             Dim dT As ltfsindex.directory = d1.FindDirectoryByName(dn.Name)
             If dT Is Nothing Then
                 dT = New ltfsindex.directory With {
@@ -3694,47 +3971,67 @@ Public Class LTFSWriter
                 d1.AddDirectory(dT)
                 schema.highestfileuid += 1
             End If
-            ConcatDirectory(dn, dT, OverWrite)
-        Next
+                ConcatDirectory(dn, dT, OverWrite)
+            Next
+        Finally
+            If ownsLookup Then EndAddFileLookup()
+        End Try
     End Sub
 
     Private Sub RemoveUnwrittenForDirectoryTree(root As ltfsindex.directory)
         If root Is Nothing Then Return
 
-        'Remove pending records as a stream.  The previous implementation first
-        'built RList for every directory, which duplicated the pending entries
-        'and could allocate millions of references during a subtree delete.
+        'Collect the subtree once, then remove from the global queue in one
+        'linear pass.  The old implementation scanned the complete global
+        'queue for every pending file in the subtree (O(pending * queue)).
+        Dim pendingDirectories As New HashSet(Of ltfsindex.directory)(DirectoryReferenceComparer.Instance)
+        Dim lazyStore As Object = Nothing
+        Dim lazyDirectoryOffsets As New HashSet(Of Long)
         Dim pending As New Stack(Of ltfsindex.directory)
         pending.Push(root)
         While pending.Count > 0
             Dim current As ltfsindex.directory = pending.Pop()
-            While True
-                Threading.Thread.Sleep(0)
-                SyncLock UFReadCount
-                    If UFReadCount > 0 Then Continue While
-                    If current.UnwrittenFiles IsNot Nothing Then
-                        SyncLock current.UnwrittenFiles
-                            For i As Integer = current.UnwrittenFiles.Count - 1 To 0 Step -1
-                                Dim pendingFile As ltfsindex.file = current.UnwrittenFiles(i)
-                                current.UnwrittenFiles.RemoveAt(i)
-                                For j As Integer = UnwrittenFiles.Count - 1 To 0 Step -1
-                                    Dim fileRecord As FileRecord = UnwrittenFiles(j)
-                                    If fileRecord IsNot Nothing AndAlso fileRecord.File Is pendingFile Then
-                                        UnwrittenFiles.RemoveAt(j)
-                                        Exit For
-                                    End If
-                                Next
-                            Next
-                        End SyncLock
-                    End If
-                    Exit While
-                End SyncLock
-            End While
-
+            If current Is Nothing OrElse Not pendingDirectories.Add(current) Then Continue While
+            If current.HasLazyRecord Then
+                If lazyStore Is Nothing Then lazyStore = current.LazyStoreReference
+                If ReferenceEquals(lazyStore, current.LazyStoreReference) Then lazyDirectoryOffsets.Add(current.LazyRecordOffset)
+            End If
             For Each child As ltfsindex.directory In current.EnumerateLazyDirectories()
                 If child IsNot Nothing Then pending.Push(child)
             Next
         End While
+
+        SyncLock _pendingQueueLock
+            Dim directoriesToClear As New HashSet(Of ltfsindex.directory)(DirectoryReferenceComparer.Instance)
+            For Each directory As ltfsindex.directory In pendingDirectories
+                directoriesToClear.Add(directory)
+            Next
+            If UnwrittenFiles IsNot Nothing Then
+                For i As Integer = UnwrittenFiles.Count - 1 To 0 Step -1
+                    Dim record As FileRecord = UnwrittenFiles(i)
+                    If record Is Nothing OrElse record.ParentDirectory Is Nothing Then Continue For
+                    Dim inSubtree As Boolean = pendingDirectories.Contains(record.ParentDirectory)
+                    If Not inSubtree AndAlso record.ParentDirectory.HasLazyRecord AndAlso lazyStore IsNot Nothing Then
+                        inSubtree = ReferenceEquals(record.ParentDirectory.LazyStoreReference, lazyStore) AndAlso
+                                   lazyDirectoryOffsets.Contains(record.ParentDirectory.LazyRecordOffset)
+                    End If
+                    If inSubtree Then
+                        directoriesToClear.Add(record.ParentDirectory)
+                        UnwrittenFiles.RemoveAt(i)
+                        If record.File IsNot Nothing Then _pendingSize -= record.File.length
+                    End If
+                Next
+            End If
+
+            For Each directory As ltfsindex.directory In directoriesToClear
+                If directory.UnwrittenFiles IsNot Nothing Then
+                    SyncLock directory.UnwrittenFiles
+                        directory.UnwrittenFiles.Clear()
+                    End SyncLock
+                End If
+                _pendingByDirectory.Remove(directory)
+            Next
+        End SyncLock
     End Sub
 
     Public Sub DeleteDir()
@@ -3814,6 +4111,7 @@ Public Class LTFSWriter
                 End If
             Next
             f.name = newname
+            ReindexPendingFile(d, f)
             If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
             RefreshDisplay()
         End If
@@ -3823,29 +4121,16 @@ Public Class LTFSWriter
         If ListView1.Tag IsNot Nothing AndAlso
         selectedItems.Count > 0 AndAlso
         MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_DelConfrm}{selectedItems.Count}{My.Resources.ResText_Files_C}", My.Resources.ResText_Warning, MessageBoxButtons.OKCancel) = DialogResult.OK Then
+            Dim filesToRemove As New List(Of ltfsindex.file)
+            Dim d As ltfsindex.directory = DirectCast(ListView1.Tag, ltfsindex.directory)
             For Each ItemSelected As ListViewItem In selectedItems
                 If ItemSelected.Tag IsNot Nothing AndAlso TypeOf (ItemSelected.Tag) Is ltfsindex.file Then
                     Dim f As ltfsindex.file = DirectCast(ItemSelected.Tag, ltfsindex.file)
-                    Dim d As ltfsindex.directory = DirectCast(ListView1.Tag, ltfsindex.directory)
-                    If d.UnwrittenFiles.Contains(f) Then
-                        While True
-                            Threading.Thread.Sleep(0)
-                            SyncLock UFReadCount
-                                If UFReadCount > 0 Then Continue While
-                                For Each fr As FileRecord In UnwrittenFiles
-                                    If fr.File Is f Then
-                                        fr.RemoveUnwritten()
-                                        UnwrittenFiles.Remove(fr)
-                                        Exit For
-                                    End If
-                                Next
-                                Exit While
-                            End SyncLock
-                        End While
-                    End If
-                    If d.RemoveFile(f) AndAlso TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
+                    RemovePendingByFile(d, f)
+                    filesToRemove.Add(f)
                 End If
             Next
+            If filesToRemove.Count > 0 AndAlso d.RemoveFiles(filesToRemove) > 0 AndAlso TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
             UnwrittenCountOverrideValue = 0
             UnwrittenSizeOverrideValue = 0
             RefreshDisplay()
@@ -3904,6 +4189,7 @@ Public Class LTFSWriter
                                     itemCount As Integer)
         Dim succeeded As Boolean = False
         Try
+            BeginAddFileLookup()
             StopFlag = False
             If fileSeq Is Nothing Then fileSeq = Enumerable.Empty(Of GlobHelper.AddFile)()
             If itemCount >= 0 Then
@@ -3952,6 +4238,7 @@ Public Class LTFSWriter
             Catch
             End Try
         Finally
+            EndAddFileLookup()
             StopFlag = False
             UnwrittenSizeOverrideValue = 0
             UnwrittenCountOverrideValue = 0
@@ -4018,7 +4305,9 @@ Public Class LTFSWriter
         SetStatusLight(LWStatus.Busy)
         Dim th As New Threading.Thread(
                 Sub()
-                    StopFlag = False
+                    BeginAddFileLookup()
+                    Try
+                        StopFlag = False
                     If pathCount >= 0 Then
                         PrintMsg($"{My.Resources.ResText_Adding}{pathCount}{My.Resources.ResText_Items_x}")
                     Else
@@ -4036,7 +4325,7 @@ Public Class LTFSWriter
                                 Dim skip As Boolean = False
                                 If exceptExtension IsNot Nothing AndAlso exceptExtension.Count > 0 Then
                                     For Each ext As String In exceptExtension
-                                        If path.ToLower().EndsWith(ext.ToLower()) Then
+                                        If path.EndsWith(ext, StringComparison.OrdinalIgnoreCase) Then
                                             skip = True
                                             Exit For
                                         End If
@@ -4059,9 +4348,13 @@ Public Class LTFSWriter
                         End Try
                     Next
 
-                    If ParallelAdd Then UnwrittenFiles.Sort(New Comparison(Of FileRecord)(Function(a As FileRecord, b As FileRecord) As Integer
-                                                                                              Return ExplorerComparer.Compare(a.SourcePath, b.SourcePath)
-                                                                                          End Function))
+                    If ParallelAdd Then
+                        SyncLock _pendingQueueLock
+                            UnwrittenFiles.Sort(New Comparison(Of FileRecord)(Function(a As FileRecord, b As FileRecord) As Integer
+                                                                                  Return ExplorerComparer.Compare(a.SourcePath, b.SourcePath)
+                                                                              End Function))
+                        End SyncLock
+                    End If
                     StopFlag = False
                     UnwrittenSizeOverrideValue = 0
                     UnwrittenCountOverrideValue = 0
@@ -4069,6 +4362,9 @@ Public Class LTFSWriter
                     PrintMsg(My.Resources.ResText_AddFin)
                     SetStatusLight(LWStatus.Succ)
                     LockGUI(False)
+                    Finally
+                        EndAddFileLookup()
+                    End Try
                 End Sub)
         LockGUI()
         th.Start()
@@ -5986,16 +6282,14 @@ Public Class LTFSWriter
                     Dim provider As FileDataProvider = Nothing
                     Dim fastProvider As RustFastReaderProvider = Nothing
                     Dim useFastReader As Boolean = False
-                    If UnwrittenFiles.Count > 0 Then
+                    If UnwrittenCount > 0 Then
                         CurrentFilesProcessed = 0
                         CurrentBytesProcessed = 0
                         UnwrittenSizeOverrideValue = 0
                         UnwrittenCountOverrideValue = 0
-                        UFReadCount.Inc()
-                        For Each fr As FileRecord In UnwrittenFiles
-                            WriteList.Add(fr)
-                        Next
-                        UFReadCount.Dec()
+                        SyncLock _pendingQueueLock
+                            If UnwrittenFiles IsNot Nothing Then WriteList.AddRange(UnwrittenFiles)
+                        End SyncLock
                         UnwrittenCountOverrideValue = UnwrittenCount
                         UnwrittenSizeOverrideValue = UnwrittenSize
                         GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency
@@ -6099,7 +6393,7 @@ Public Class LTFSWriter
                                       .Arguments = $"/s {My.Settings.LTFSWriter_PowerPolicyOnWriteBegin.ToString()}",
                                       .WindowStyle = ProcessWindowStyle.Hidden})
                     End If
-                    If UnwrittenFiles.Count > 0 Then
+                    If WriteList.Count > 0 Then
                         Dim wBufferPtr As IntPtr = Marshal.AllocHGlobal(CInt(plabel.blocksize))
 
                         'Dim PNum As Integer = My.Settings.LTFSWriter_PreLoadFileCount
@@ -6110,6 +6404,7 @@ Public Class LTFSWriter
                         'End If
                         Dim HashTaskAwaitNumber As Integer = 0
                         Dim ExitForFlag As Boolean = False
+                        Dim completedWriteRecords As New List(Of FileRecord)
                         'DeDupe
 
                         Dim existingFiles As IEnumerable(Of ltfsindex.file) = Enumerable.Empty(Of ltfsindex.file)()
@@ -6748,9 +7043,10 @@ Public Class LTFSWriter
                                 If tarScanner IsNot Nothing AndAlso Not StopFlag Then
                                     CommitTarMetadata(fr, tarScanner)
                                 End If
-                                'mark as written
-                                fr.ParentDirectory.AddFile(fr.File)
-                                fr.RemoveUnwritten()
+                                'Commit several completed files together.  The
+                                'lazy schema store can then update one mutation
+                                'and propagate one aggregate count per parent.
+                                completedWriteRecords.Add(fr)
                                 Dim extentCount As Integer = If(fr.File.extentinfo Is Nothing, 0, fr.File.extentinfo.Count)
                                 Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSWriter))
                                     Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Writer")
@@ -6839,11 +7135,11 @@ Public Class LTFSWriter
                                            End Sub)
                                 End If
                             End While
-                            UnwrittenFiles.Remove(fr)
                             If StopFlag Then
                                 Exit For
                             End If
                         Next
+                        CommitWrittenFiles(completedWriteRecords)
                         Marshal.FreeHGlobal(wBufferPtr)
                         While HashTaskAwaitNumber > 0
                             Threading.Thread.Sleep(1)
@@ -7032,7 +7328,7 @@ Public Class LTFSWriter
                         Threading.Thread.Sleep(0)
                         SyncLock UFReadCount
                             If UFReadCount > 0 Then Continue While
-                            UnwrittenFiles.Clear()
+                            ClearGlobalPendingQueue()
                             CurrentFilesProcessed = 0
                             CurrentBytesProcessed = 0
                             Exit While
@@ -7097,7 +7393,7 @@ Public Class LTFSWriter
                         Threading.Thread.Sleep(0)
                         SyncLock UFReadCount
                             If UFReadCount > 0 Then Continue While
-                            UnwrittenFiles.Clear()
+                            ClearGlobalPendingQueue()
                             CurrentFilesProcessed = 0
                             CurrentBytesProcessed = 0
                             Exit While
@@ -7307,7 +7603,7 @@ Public Class LTFSWriter
                         Threading.Thread.Sleep(0)
                         SyncLock UFReadCount
                             If UFReadCount > 0 Then Continue While
-                            UnwrittenFiles.Clear()
+                            ClearGlobalPendingQueue()
                             CurrentFilesProcessed = 0
                             CurrentBytesProcessed = 0
                             TotalBytesUnindexed = 0
@@ -7417,7 +7713,7 @@ Public Class LTFSWriter
                         Threading.Thread.Sleep(0)
                         SyncLock UFReadCount
                             If UFReadCount > 0 Then Continue While
-                            UnwrittenFiles.Clear()
+                            ClearGlobalPendingQueue()
                             CurrentFilesProcessed = 0
                             CurrentBytesProcessed = 0
                             TotalBytesUnindexed = 0
@@ -7483,9 +7779,9 @@ Public Class LTFSWriter
                 Threading.Thread.Sleep(0)
                 SyncLock UFReadCount
                     If UFReadCount > 0 Then Continue While
-                    UnwrittenFiles.Clear()
-                    CurrentFilesProcessed = 0
-                    CurrentBytesProcessed = 0
+                            ClearGlobalPendingQueue()
+                            CurrentFilesProcessed = 0
+                            CurrentBytesProcessed = 0
                     Exit While
                 End SyncLock
             End While
@@ -7621,9 +7917,9 @@ Public Class LTFSWriter
                 Threading.Thread.Sleep(0)
                 SyncLock UFReadCount
                     If UFReadCount > 0 Then Continue While
-                    UnwrittenFiles.Clear()
-                    CurrentFilesProcessed = 0
-                    CurrentBytesProcessed = 0
+                            ClearGlobalPendingQueue()
+                            CurrentFilesProcessed = 0
+                            CurrentBytesProcessed = 0
                     Exit While
                 End SyncLock
             End While
@@ -9178,14 +9474,7 @@ Public Class LTFSWriter
                             .accesstime = .backuptime
                             .changetime = .modifytime
                         End With
-                        While True
-                            Threading.Thread.Sleep(0)
-                            SyncLock UFReadCount
-                                If UFReadCount > 0 Then Continue While
-                                UnwrittenFiles.Add(fnew)
-                                Exit While
-                            End SyncLock
-                        End While
+                        AddPendingRecord(fnew)
                     End If
                 End If
             Next
@@ -10527,16 +10816,18 @@ Public Class LTFSWriter
         Dim selectedItems As List(Of ListViewItem) = GetSelectedListViewItems()
         If selectedItems.Count > 0 Then
             Dim flist As New List(Of ltfsindex.file)
+            Dim filesToRemove As New List(Of ltfsindex.file)
             Dim d As ltfsindex.directory = DirectCast(ListView1.Tag, ltfsindex.directory)
             For Each SI As ListViewItem In selectedItems
                 If TypeOf SI.Tag Is ltfsindex.file Then
                     Dim f As ltfsindex.file = CType(SI.Tag, ltfsindex.file)
                     If Not d.UnwrittenFiles.Contains(f) Then
                         flist.Add(f)
-                        d.RemoveFile(f)
+                        filesToRemove.Add(f)
                     End If
                 End If
             Next
+            If d.RemoveFiles(filesToRemove) > 0 AndAlso TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
             MyClipBoard.Add(flist)
             RefreshDisplay()
         End If
@@ -10562,14 +10853,18 @@ Public Class LTFSWriter
     Private Sub 粘贴选中ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 粘贴选中ToolStripMenuItem.Click
         If TreeView1.SelectedNode IsNot Nothing Then
             Dim droot As ltfsindex.directory = DirectCast(TreeView1.SelectedNode.Tag, ltfsindex.directory)
+            Dim filesToPaste As New List(Of ltfsindex.file)
             For Each f As ltfsindex.file In MyClipBoard.File
                 schema.highestfileuid += 1
-                droot.AddFile(f)
+                filesToPaste.Add(f)
             Next
+            droot.AddFiles(filesToPaste)
+            Dim directoriesToPaste As New List(Of ltfsindex.directory)
             For Each d As ltfsindex.directory In MyClipBoard.Directory
                 schema.highestfileuid += 1
-                droot.AddDirectory(d)
+                directoriesToPaste.Add(d)
             Next
+            droot.AddDirectories(directoriesToPaste)
             MyClipBoard.Clear()
             If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
             RefreshDisplay()
@@ -10676,7 +10971,7 @@ Public Class LTFSWriter
                         Threading.Thread.Sleep(0)
                         SyncLock UFReadCount
                             If UFReadCount > 0 Then Continue While
-                            UnwrittenFiles.Clear()
+                            ClearGlobalPendingQueue()
                             CurrentFilesProcessed = 0
                             CurrentBytesProcessed = 0
                             TotalBytesUnindexed = 0
@@ -10744,7 +11039,7 @@ Public Class LTFSWriter
                     CurrentBytesProcessed = 0
                     UnwrittenSizeOverrideValue = 0
                     UnwrittenCountOverrideValue = 0
-                    If UnwrittenFiles.Count > 0 Then
+                    If UnwrittenCount > 0 Then
                         UFReadCount.Inc()
                         UFReadCount.Dec()
                         UnwrittenCountOverrideValue = UnwrittenCount
@@ -10931,8 +11226,7 @@ Public Class LTFSWriter
                             PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
                             CurrentHeight = CLng(p.BlockNumber)
                             'mark as written
-                            fr.ParentDirectory.AddFile(fr.File)
-                            fr.RemoveUnwritten()
+                            CommitWrittenFiles(New List(Of FileRecord) From {fr})
                             If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
                             If CheckUnindexedDataLimit() Then p = New TapeUtils.PositionData(driveHandle)
                             If CapacityRefreshInterval > 0 AndAlso (Now - LastRefresh).TotalSeconds > CapacityRefreshInterval Then
@@ -10980,7 +11274,7 @@ Public Class LTFSWriter
                         Threading.Thread.Sleep(0)
                         SyncLock UFReadCount
                             If UFReadCount > 0 Then Continue While
-                            UnwrittenFiles.Clear()
+                            ClearGlobalPendingQueue()
                             UnwrittenSizeOverrideValue = 0
                             UnwrittenCountOverrideValue = 0
                             CurrentFilesProcessed = 0
@@ -11670,13 +11964,17 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 导出待写列表ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 导出待写列表ToolStripMenuItem.Click
-        If UnwrittenFiles.Count > 0 Then
+        If UnwrittenCount > 0 Then
             Dim sfd1 As New SaveFileDialog With {.Filter = "txt|*.txt"}
             If sfd1.ShowDialog = DialogResult.OK Then
                 Dim sb As New StringBuilder
-                For i As Integer = 0 To UnwrittenFiles.Count - 1
-                    sb.AppendLine(UnwrittenFiles(i).SourcePath)
-                Next
+                SyncLock _pendingQueueLock
+                    If UnwrittenFiles IsNot Nothing Then
+                        For Each record As FileRecord In UnwrittenFiles
+                            If record IsNot Nothing Then sb.AppendLine(record.SourcePath)
+                        Next
+                    End If
+                End SyncLock
                 IO.File.WriteAllText(sfd1.FileName, sb.ToString())
                 MessageBox.Show(My.Resources.ResText_Succ)
             End If
@@ -12076,18 +12374,15 @@ Public Class LTFSWriter
                                 Next
 
                                 Dim deleteList As New List(Of String)
-                                UFReadCount.Inc()
-                                Try
+                                SyncLock _pendingQueueLock
                                     For Each fileRecord As FileRecord In UnwrittenFiles
                                         If batchKeys.Contains(NormalizeMonitorPath(fileRecord.SourcePath)) Then
                                             deleteList.Add(fileRecord.SourcePath)
                                         End If
                                     Next
-                                Finally
-                                    UFReadCount.Dec()
-                                End Try
+                                End SyncLock
 
-                                If UnwrittenFiles.Count > 0 Then
+                                If UnwrittenCount > 0 Then
                                     updateStatus($"正在写入：{batch.Count} 个稳定文件")
                                     Me.Invoke(Sub() 写入数据ToolStripMenuItem_Click(sender, e))
                                     If Not WaitForMonitorOperation(token) Then Exit While
@@ -12862,18 +13157,25 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 清除指定大小范围的待写文件ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 清除指定大小范围的待写文件ToolStripMenuItem.Click
-        If UnwrittenFiles.Count > 0 Then
+        If UnwrittenCount > 0 Then
             Static range As String = "268435456-10000000000000"
             If DisplayHelper.ShowInputDialog("Range (bytes)", "Input", range) = DialogResult.OK Then
                 Dim rangelim() As String = range.Split({",", "-", " ", vbTab}, StringSplitOptions.RemoveEmptyEntries)
                 If rangelim.Count < 2 Then Exit Sub
                 Dim dlim As Long = Long.Parse(rangelim(0))
                 Dim ulim As Long = Long.Parse(rangelim(1))
-                For i As Integer = UnwrittenFiles.Count - 1 To 1 Step -1
-                    If UnwrittenFiles(i).File.length < dlim OrElse UnwrittenFiles(i).File.length > ulim Then Continue For
-                    UnwrittenFiles(i).RemoveUnwritten()
-                    UnwrittenFiles.RemoveAt(i)
-                Next
+                Dim recordsToRemove As New List(Of FileRecord)
+                SyncLock _pendingQueueLock
+                    If UnwrittenFiles IsNot Nothing Then
+                        For i As Integer = UnwrittenFiles.Count - 1 To 0 Step -1
+                            Dim record As FileRecord = UnwrittenFiles(i)
+                            If record Is Nothing OrElse record.File Is Nothing OrElse
+                               record.File.length < dlim OrElse record.File.length > ulim Then Continue For
+                            recordsToRemove.Add(record)
+                        Next
+                    End If
+                End SyncLock
+                RemovePendingRecords(recordsToRemove)
                 MessageBox.Show(My.Resources.ResText_Succ)
             End If
         End If

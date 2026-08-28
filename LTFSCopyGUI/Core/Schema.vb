@@ -716,6 +716,23 @@ Public Class ltfsindex
             End If
         End Sub
 
+        Friend Sub AddFiles(values As IList(Of file))
+            If values Is Nothing OrElse values.Count = 0 Then Exit Sub
+
+            Dim delta As Long = 0
+            If _lazyStore IsNot Nothing AndAlso Not _lazyContentsLoaded Then
+                delta = _lazyStore.AddDirectoryFiles(_lazyRecordOffset, values)
+            Else
+                If _contents Is Nothing Then _contents = New contentsDef
+                For Each value As file In values
+                    If value Is Nothing Then Continue For
+                    _contents._file.Add(value)
+                    delta += 1
+                Next
+            End If
+            PropagateLazyTotalDelta(delta, 0)
+        End Sub
+
         Friend Function RemoveFile(value As file) As Boolean
             If value Is Nothing Then Return False
             If _lazyStore IsNot Nothing AndAlso Not _lazyContentsLoaded Then
@@ -729,6 +746,25 @@ Public Class ltfsindex
             Return removed
         End Function
 
+        Friend Function RemoveFiles(values As IList(Of file)) As Integer
+            If values Is Nothing OrElse values.Count = 0 Then Return 0
+
+            Dim fileDelta As Long = 0
+            If _lazyStore IsNot Nothing AndAlso Not _lazyContentsLoaded Then
+                fileDelta = _lazyStore.RemoveDirectoryFiles(_lazyRecordOffset, values)
+            ElseIf _contents IsNot Nothing AndAlso _contents._file IsNot Nothing Then
+                Dim requested As New HashSet(Of file)
+                For Each value As file In values
+                    If value IsNot Nothing Then requested.Add(value)
+                Next
+                If requested.Count > 0 Then
+                    fileDelta = -_contents._file.RemoveAll(Function(value As file) requested.Contains(value))
+                End If
+            End If
+            If fileDelta <> 0 Then PropagateLazyTotalDelta(fileDelta, 0)
+            Return CInt(Math.Min(Integer.MaxValue, -fileDelta))
+        End Function
+
         Friend Sub AddDirectory(value As directory)
             If value Is Nothing Then Exit Sub
             value.AttachLazyParent(Me)
@@ -740,6 +776,28 @@ Public Class ltfsindex
                 _contents._directory.Add(value)
                 PropagateLazyTotalDelta(value.TotalFiles, 1L + value.TotalDirectories)
             End If
+        End Sub
+
+        Friend Sub AddDirectories(values As IList(Of directory))
+            If values Is Nothing OrElse values.Count = 0 Then Exit Sub
+
+            Dim delta As New LazyTotalDelta
+            If _lazyStore IsNot Nothing AndAlso Not _lazyContentsLoaded Then
+                For Each value As directory In values
+                    If value IsNot Nothing Then value.AttachLazyParent(Me)
+                Next
+                delta = _lazyStore.AddDirectoryDirectories(_lazyRecordOffset, values)
+            Else
+                If _contents Is Nothing Then _contents = New contentsDef
+                For Each value As directory In values
+                    If value Is Nothing Then Continue For
+                    value.AttachLazyParent(Me)
+                    _contents._directory.Add(value)
+                    delta.FileCount += value.TotalFiles
+                    delta.DirectoryCount += 1L + value.TotalDirectories
+                Next
+            End If
+            PropagateLazyTotalDelta(delta.FileCount, delta.DirectoryCount)
         End Sub
 
         Friend Function RemoveDirectory(value As directory) As Boolean
@@ -1572,7 +1630,9 @@ End Structure
 
 Friend NotInheritable Class LazyDirectoryMutation
     Public ReadOnly AddedFiles As New List(Of ltfsindex.file)
+    Public ReadOnly AddedFileSet As New HashSet(Of ltfsindex.file)
     Public ReadOnly AddedDirectories As New List(Of ltfsindex.directory)
+    Public ReadOnly AddedDirectorySet As New HashSet(Of ltfsindex.directory)
     Public ReadOnly RemovedFileOffsets As New HashSet(Of Long)
     Public ReadOnly RemovedDirectoryOffsets As New HashSet(Of Long)
 End Class
@@ -2001,13 +2061,17 @@ Friend NotInheritable Class LazySchemaStore
 
     Private Function GetDirectoryMutation(recordOffset As Long, create As Boolean) As LazyDirectoryMutation
         SyncLock _mutationLock
-            Dim result As LazyDirectoryMutation = Nothing
-            If Not _directoryMutations.TryGetValue(recordOffset, result) AndAlso create Then
-                result = New LazyDirectoryMutation
-                _directoryMutations(recordOffset) = result
-            End If
-            Return result
+            Return GetDirectoryMutationUnsafe(recordOffset, create)
         End SyncLock
+    End Function
+
+    Private Function GetDirectoryMutationUnsafe(recordOffset As Long, create As Boolean) As LazyDirectoryMutation
+        Dim result As LazyDirectoryMutation = Nothing
+        If Not _directoryMutations.TryGetValue(recordOffset, result) AndAlso create Then
+            result = New LazyDirectoryMutation
+            _directoryMutations(recordOffset) = result
+        End If
+        Return result
     End Function
 
     Friend Sub ApplyDirectoryTotalDelta(recordOffset As Long, fileDelta As Long, directoryDelta As Long)
@@ -2074,8 +2138,8 @@ Friend NotInheritable Class LazySchemaStore
     Friend Function AddDirectoryFile(parentOffset As Long, value As ltfsindex.file) As Long
         If value Is Nothing Then Return 0
         SyncLock _mutationLock
-            Dim mutation As LazyDirectoryMutation = GetDirectoryMutation(parentOffset, True)
-            If mutation.AddedFiles.Contains(value) Then Return 0
+            Dim mutation As LazyDirectoryMutation = GetDirectoryMutationUnsafe(parentOffset, True)
+            If mutation.AddedFileSet.Contains(value) Then Return 0
 
             If value.HasLazyRecord AndAlso ReferenceEquals(value.LazyStoreReference, Me) Then
                 If mutation.RemovedFileOffsets.Remove(value.LazyRecordOffset) Then
@@ -2084,20 +2148,46 @@ Friend NotInheritable Class LazySchemaStore
             End If
 
             mutation.AddedFiles.Add(value)
+            mutation.AddedFileSet.Add(value)
             Return 1
+        End SyncLock
+    End Function
+
+    Friend Function AddDirectoryFiles(parentOffset As Long, values As IList(Of ltfsindex.file)) As Long
+        If values Is Nothing OrElse values.Count = 0 Then Return 0
+        SyncLock _mutationLock
+            Dim mutation As LazyDirectoryMutation = GetDirectoryMutationUnsafe(parentOffset, True)
+            Dim delta As Long = 0
+            For Each value As ltfsindex.file In values
+                If value Is Nothing OrElse mutation.AddedFileSet.Contains(value) Then Continue For
+
+                If value.HasLazyRecord AndAlso ReferenceEquals(value.LazyStoreReference, Me) Then
+                    If mutation.RemovedFileOffsets.Remove(value.LazyRecordOffset) Then
+                        delta += 1
+                        Continue For
+                    End If
+                End If
+
+                mutation.AddedFiles.Add(value)
+                mutation.AddedFileSet.Add(value)
+                delta += 1
+            Next
+            Return delta
         End SyncLock
     End Function
 
     Friend Function RemoveDirectoryFile(parentOffset As Long, value As ltfsindex.file) As Long
         If value Is Nothing Then Return 0
         SyncLock _mutationLock
-            Dim mutation As LazyDirectoryMutation = GetDirectoryMutation(parentOffset, True)
-            For i As Integer = mutation.AddedFiles.Count - 1 To 0 Step -1
-                If ReferenceEquals(mutation.AddedFiles(i), value) Then
-                    mutation.AddedFiles.RemoveAt(i)
-                    Return -1
-                End If
-            Next
+            Dim mutation As LazyDirectoryMutation = GetDirectoryMutationUnsafe(parentOffset, True)
+            If mutation.AddedFileSet.Remove(value) Then
+                For i As Integer = mutation.AddedFiles.Count - 1 To 0 Step -1
+                    If ReferenceEquals(mutation.AddedFiles(i), value) Then
+                        mutation.AddedFiles.RemoveAt(i)
+                        Return -1
+                    End If
+                Next
+            End If
 
             If value.HasLazyRecord AndAlso ReferenceEquals(value.LazyStoreReference, Me) Then
                 Dim removed As Boolean = mutation.RemovedFileOffsets.Add(value.LazyRecordOffset)
@@ -2107,11 +2197,39 @@ Friend NotInheritable Class LazySchemaStore
         End SyncLock
     End Function
 
+    Friend Function RemoveDirectoryFiles(parentOffset As Long, values As IList(Of ltfsindex.file)) As Long
+        If values Is Nothing OrElse values.Count = 0 Then Return 0
+        SyncLock _mutationLock
+            Dim mutation As LazyDirectoryMutation = GetDirectoryMutationUnsafe(parentOffset, True)
+            Dim delta As Long = 0
+            For Each value As ltfsindex.file In values
+                If value Is Nothing Then Continue For
+
+                If mutation.AddedFileSet.Remove(value) Then
+                    For i As Integer = mutation.AddedFiles.Count - 1 To 0 Step -1
+                        If ReferenceEquals(mutation.AddedFiles(i), value) Then
+                            mutation.AddedFiles.RemoveAt(i)
+                            delta -= 1
+                            Exit For
+                        End If
+                    Next
+                    Continue For
+                End If
+
+                If value.HasLazyRecord AndAlso ReferenceEquals(value.LazyStoreReference, Me) AndAlso
+                   mutation.RemovedFileOffsets.Add(value.LazyRecordOffset) Then
+                    delta -= 1
+                End If
+            Next
+            Return delta
+        End SyncLock
+    End Function
+
     Friend Function AddDirectoryDirectory(parentOffset As Long, value As ltfsindex.directory) As LazyTotalDelta
         If value Is Nothing Then Return New LazyTotalDelta
         SyncLock _mutationLock
-            Dim mutation As LazyDirectoryMutation = GetDirectoryMutation(parentOffset, True)
-            If mutation.AddedDirectories.Contains(value) Then Return New LazyTotalDelta
+            Dim mutation As LazyDirectoryMutation = GetDirectoryMutationUnsafe(parentOffset, True)
+            If mutation.AddedDirectorySet.Contains(value) Then Return New LazyTotalDelta
 
             If value.HasLazyRecord AndAlso ReferenceEquals(value.LazyStoreReference, Me) Then
                 If mutation.RemovedDirectoryOffsets.Remove(value.LazyRecordOffset) Then
@@ -2122,24 +2240,52 @@ Friend NotInheritable Class LazySchemaStore
             End If
 
             mutation.AddedDirectories.Add(value)
+            mutation.AddedDirectorySet.Add(value)
             Return New LazyTotalDelta With {
                 .FileCount = value.TotalFiles,
                 .DirectoryCount = 1L + value.TotalDirectories}
         End SyncLock
     End Function
 
+    Friend Function AddDirectoryDirectories(parentOffset As Long, values As IList(Of ltfsindex.directory)) As LazyTotalDelta
+        If values Is Nothing OrElse values.Count = 0 Then Return New LazyTotalDelta
+        SyncLock _mutationLock
+            Dim mutation As LazyDirectoryMutation = GetDirectoryMutationUnsafe(parentOffset, True)
+            Dim result As New LazyTotalDelta
+            For Each value As ltfsindex.directory In values
+                If value Is Nothing OrElse mutation.AddedDirectorySet.Contains(value) Then Continue For
+
+                If value.HasLazyRecord AndAlso ReferenceEquals(value.LazyStoreReference, Me) Then
+                    If mutation.RemovedDirectoryOffsets.Remove(value.LazyRecordOffset) Then
+                        result.FileCount += GetDirectoryTotalFileCount(value.LazyRecordOffset)
+                        result.DirectoryCount += 1L + GetDirectoryTotalDirectoryCount(value.LazyRecordOffset)
+                        Continue For
+                    End If
+                End If
+
+                mutation.AddedDirectories.Add(value)
+                mutation.AddedDirectorySet.Add(value)
+                result.FileCount += value.TotalFiles
+                result.DirectoryCount += 1L + value.TotalDirectories
+            Next
+            Return result
+        End SyncLock
+    End Function
+
     Friend Function RemoveDirectoryDirectory(parentOffset As Long, value As ltfsindex.directory) As LazyTotalDelta
         If value Is Nothing Then Return New LazyTotalDelta
         SyncLock _mutationLock
-            Dim mutation As LazyDirectoryMutation = GetDirectoryMutation(parentOffset, True)
-            For i As Integer = mutation.AddedDirectories.Count - 1 To 0 Step -1
-                If ReferenceEquals(mutation.AddedDirectories(i), value) Then
-                    mutation.AddedDirectories.RemoveAt(i)
-                    Return New LazyTotalDelta With {
-                        .FileCount = -value.TotalFiles,
-                        .DirectoryCount = -(1L + value.TotalDirectories)}
-                End If
-            Next
+            Dim mutation As LazyDirectoryMutation = GetDirectoryMutationUnsafe(parentOffset, True)
+            If mutation.AddedDirectorySet.Remove(value) Then
+                For i As Integer = mutation.AddedDirectories.Count - 1 To 0 Step -1
+                    If ReferenceEquals(mutation.AddedDirectories(i), value) Then
+                        mutation.AddedDirectories.RemoveAt(i)
+                        Return New LazyTotalDelta With {
+                            .FileCount = -value.TotalFiles,
+                            .DirectoryCount = -(1L + value.TotalDirectories)}
+                    End If
+                Next
+            End If
 
             If value.HasLazyRecord AndAlso ReferenceEquals(value.LazyStoreReference, Me) Then
                 Dim removed As Boolean = mutation.RemovedDirectoryOffsets.Add(value.LazyRecordOffset)
