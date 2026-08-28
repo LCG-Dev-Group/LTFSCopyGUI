@@ -2003,13 +2003,15 @@ Public Class LTFSWriter
                 nodeText = $"{$"{directory.TotalFiles.ToString}+{directory.TotalFilesUnwritten.ToString}".PadRight(6)}| {directory.name}"
             End If
         End If
+        'The tree shows directories; regular files are displayed in the
+        'list view and must not create an expandable placeholder here.
         Return New WriterTreeNode With {
             .Text = nodeText,
             .Tag = directory,
             .ImageIndex = If(rootNode, 0, 1),
             .SelectedImageIndex = If(rootNode, 0, 1),
             .StateImageIndex = If(rootNode, 0, 1),
-            .ChildrenComplete = Not directory.HasPotentialChildren()}
+            .ChildrenComplete = directory.GetLazyDirectDirectoryCount() = 0}
     End Function
 
     Private Function CreateArchiveTreeNode(file As ltfsindex.file) As TreeNode
@@ -2038,7 +2040,9 @@ Public Class LTFSWriter
         If node Is Nothing OrElse node.Tag Is Nothing Then Return False
         If TypeOf node.Tag Is ltfsindex.directory Then
             Dim directory As ltfsindex.directory = DirectCast(node.Tag, ltfsindex.directory)
-            Return directory.HasPotentialChildren()
+            'Only direct subdirectories are tree children.  Direct files are
+            'handled by the list view and must not produce an ellipsis node.
+            Return directory.GetLazyDirectDirectoryCount() > 0
         End If
         If TypeOf node.Tag Is TarVirtualDirectory Then
             Dim directory As TarVirtualDirectory = DirectCast(node.Tag, TarVirtualDirectory)
