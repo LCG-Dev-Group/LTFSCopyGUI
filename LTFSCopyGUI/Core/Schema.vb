@@ -1777,6 +1777,14 @@ Friend NotInheritable Class LazySchemaStore
     Private Const FileIndexEntrySize As Integer = 32
     Private Const DirectoryIndexEntrySize As Integer = 24
     Private Const IoBufferSize As Integer = 1 << 16
+    Private Shared ReadOnly StrictUtf8 As New Text.UTF8Encoding(False, True)
+    Private Shared ReadOnly LazyNameReaderSettings As New XmlReaderSettings With {
+        .IgnoreComments = True,
+        .IgnoreWhitespace = True,
+        .IgnoreProcessingInstructions = True,
+        .DtdProcessing = DtdProcessing.Prohibit,
+        .XmlResolver = Nothing,
+        .CloseInput = True}
 
     Private ReadOnly _fileRecordsPath As String
     Private ReadOnly _directoryRecordsPath As String
@@ -1804,13 +1812,15 @@ Friend NotInheritable Class LazySchemaStore
     Private ReadOnly _fileTotalDeltas As New Dictionary(Of Long, Long)
     Private ReadOnly _directoryTotalDeltas As New Dictionary(Of Long, Long)
 
-    Private Const SortChunkSize As Integer = 8192
+    'A larger run keeps the external merge fan-in small while retaining a
+    'bounded memory footprint (only one chunk is resident at a time).
+    Private Const SortChunkSize As Integer = 32768
 
-    Private NotInheritable Class LazySortItem
+    Private Structure LazySortItem
         Public Property Name As String
         Public Property IndexOffset As Long
         Public Property Sequence As Long
-    End Class
+    End Structure
 
     Private NotInheritable Class LazySortRunCursor
         Implements IDisposable
@@ -2543,6 +2553,172 @@ Friend NotInheritable Class LazySchemaStore
         End Try
     End Sub
 
+    Private NotInheritable Class LazyFileNameScanner
+        Private Const ScanBufferSize As Integer = 1 << 16
+        Private ReadOnly _stream As IO.FileStream
+        Private ReadOnly _buffer As Byte() = New Byte(ScanBufferSize - 1) {}
+        Private ReadOnly _tagText As New Text.StringBuilder(128)
+        Private _bufferIndex As Integer
+        Private _bufferCount As Integer
+        Private _remaining As Long
+        Private _nameBytes As Byte() = New Byte(256 - 1) {}
+        Private _nameLength As Integer
+
+        Public Sub New(stream As IO.FileStream)
+            _stream = stream
+        End Sub
+
+        Private Function ReadByte() As Integer
+            If _remaining <= 0 Then Return -1
+            If _bufferIndex >= _bufferCount Then
+                Dim wanted As Integer = CInt(Math.Min(CLng(_buffer.Length), _remaining))
+                _bufferCount = _stream.Read(_buffer, 0, wanted)
+                _bufferIndex = 0
+                If _bufferCount <= 0 Then
+                    _remaining = 0
+                    Return -1
+                End If
+            End If
+
+            Dim result As Integer = _buffer(_bufferIndex)
+            _bufferIndex += 1
+            _remaining -= 1
+            Return result
+        End Function
+
+        Private Function ReadTag() As String
+            _tagText.Length = 0
+            Dim quote As Integer = 0
+            While True
+                Dim value As Integer = ReadByte()
+                If value < 0 Then Return Nothing
+                If quote = 0 AndAlso (value = AscW("'"c) OrElse value = AscW(""""c)) Then
+                    quote = value
+                ElseIf quote <> 0 AndAlso value = quote Then
+                    quote = 0
+                ElseIf quote = 0 AndAlso value = AscW(">"c) Then
+                    Return _tagText.ToString()
+                End If
+                If _tagText.Length < 4096 Then _tagText.Append(ChrW(value))
+            End While
+            Return Nothing
+        End Function
+
+        Private Shared Function IsNameStartTag(tag As String) As Boolean
+            If tag Is Nothing Then Return False
+            Dim value As String = tag.Trim()
+            If value.StartsWith("/", StringComparison.Ordinal) OrElse value.StartsWith("!", StringComparison.Ordinal) Then Return False
+            Dim separator As Integer = value.LastIndexOf(":"c)
+            Dim nameStart As Integer = If(separator >= 0, separator + 1, 0)
+            If value.Length < nameStart + 4 OrElse Not String.Equals(value.Substring(nameStart, 4), "name", StringComparison.OrdinalIgnoreCase) Then Return False
+            If value.Length = nameStart + 4 Then Return True
+            Dim nextCharacter As Char = value(nameStart + 4)
+            Return Char.IsWhiteSpace(nextCharacter) OrElse nextCharacter = "/"c
+        End Function
+
+        Private Shared Function IsNameEndTag(tag As String) As Boolean
+            If tag Is Nothing Then Return False
+            Dim value As String = tag.Trim()
+            If Not value.StartsWith("/", StringComparison.Ordinal) Then Return False
+            value = value.Substring(1).Trim()
+            Dim separator As Integer = value.LastIndexOf(":"c)
+            If separator >= 0 Then value = value.Substring(separator + 1)
+            Return String.Equals(value, "name", StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Private Sub AppendNameByte(value As Integer)
+            If _nameLength >= _nameBytes.Length Then ReDim Preserve _nameBytes((_nameBytes.Length * 2) - 1)
+            _nameBytes(_nameLength) = CByte(value)
+            _nameLength += 1
+        End Sub
+
+        Private Function DecodeName() As String
+            Dim result As String = StrictUtf8.GetString(_nameBytes, 0, _nameLength)
+            result = System.Net.WebUtility.HtmlDecode(result)
+            Return LazySchemaStore.DecodeSchemaValue(result)
+        End Function
+
+        Private Function TryReadFast(recordOffset As Long, recordLength As Long, ByRef result As String) As Boolean
+            If _stream Is Nothing OrElse recordOffset < 0 OrElse recordLength <= 0 OrElse
+               recordOffset > _stream.Length OrElse recordLength > _stream.Length - recordOffset Then
+                Throw New IO.InvalidDataException("Invalid lazy schema file record.")
+            End If
+
+            _stream.Seek(recordOffset, IO.SeekOrigin.Begin)
+            _bufferIndex = 0
+            _bufferCount = 0
+            _remaining = recordLength
+            _nameLength = 0
+
+            While True
+                Dim value As Integer = ReadByte()
+                If value < 0 Then Return False
+                If value <> AscW("<"c) Then Continue While
+                Dim tag As String = ReadTag()
+                If IsNameStartTag(tag) Then
+                    If tag.Trim().EndsWith("/", StringComparison.Ordinal) Then
+                        result = String.Empty
+                        Return True
+                    End If
+                    Exit While
+                End If
+            End While
+
+            While True
+                Dim value As Integer = ReadByte()
+                If value < 0 Then Return False
+                If value = AscW("<"c) Then
+                    Dim tag As String = ReadTag()
+                    If IsNameEndTag(tag) Then
+                        result = DecodeName()
+                        Return True
+                    End If
+                    'CDATA or nested XML is uncommon for a file name.  Let the
+                    'XML fallback handle it without making the fast path fragile.
+                    Return False
+                End If
+                AppendNameByte(value)
+            End While
+            Return False
+        End Function
+
+        Private Function ReadXmlFallback(recordOffset As Long, recordLength As Long) As String
+            _stream.Seek(recordOffset, IO.SeekOrigin.Begin)
+            Using limited As New LazySchemaLimitedStream(_stream, recordLength, leaveInnerOpen:=True)
+                Using reader As XmlReader = XmlReader.Create(limited, LazyNameReaderSettings)
+                    reader.MoveToContent()
+                    If reader.NodeType <> XmlNodeType.Element Then Return Nothing
+                    Dim rootDepth As Integer = reader.Depth
+                    If reader.IsEmptyElement Then Return Nothing
+
+                    While reader.Read()
+                        If reader.NodeType = XmlNodeType.EndElement AndAlso reader.Depth = rootDepth Then Exit While
+                        If reader.NodeType <> XmlNodeType.Element OrElse reader.Depth <> rootDepth + 1 Then Continue While
+                        If String.Equals(reader.LocalName, "name", StringComparison.OrdinalIgnoreCase) Then
+                            Return LazySchemaStore.DecodeSchemaValue(ReadElementText(reader))
+                        End If
+                        SkipElement(reader)
+                    End While
+                End Using
+            End Using
+            Return Nothing
+        End Function
+
+        Public Function Read(recordOffset As Long, recordLength As Long) As String
+            Dim result As String = Nothing
+            If TryReadFast(recordOffset, recordLength, result) Then Return result
+            Return ReadXmlFallback(recordOffset, recordLength)
+        End Function
+    End Class
+
+    Private Function ReadDirectoryName(stream As IO.FileStream, recordOffset As Long) As String
+        Dim header As LazyDirectoryHeader = ReadDirectoryHeader(stream, recordOffset)
+        stream.Seek(header.ScalarOffset, IO.SeekOrigin.Begin)
+        Using reader As New IO.BinaryReader(stream, StrictUtf8, leaveOpen:=True)
+            Return ReadNullableString(reader)
+        End Using
+    End Function
+
     Private Sub SortIndexChain(recordOffset As Long,
                                indexPath As String,
                                entrySize As Integer,
@@ -2558,79 +2734,121 @@ Friend NotInheritable Class LazySchemaStore
 
         Dim runPaths As New List(Of String)
         Dim items As New List(Of LazySortItem)(Math.Min(SortChunkSize, itemCount))
+        Dim sortedIndexPath As String = Nothing
         Try
+            'Read the index chain and all sort keys with one record stream.  The
+            'old implementation opened and parsed a backing file once per
+            'entry, which turns a million-file sort into a million file opens.
             Using indexStream As New IO.FileStream(indexPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.ReadWrite,
                                                    IoBufferSize, IO.FileOptions.SequentialScan)
-                Using reader As New IO.BinaryReader(indexStream, New Text.UTF8Encoding(False, True), leaveOpen:=True)
-                    Dim indexOffset As Long = firstIndexOffset
-                    For sequence As Long = 0 To itemCount - 1
-                        If indexOffset < 0 OrElse indexOffset > indexStream.Length - entrySize Then
-                            Throw New IO.InvalidDataException("Invalid lazy schema index chain.")
-                        End If
+                Using reader As New IO.BinaryReader(indexStream, StrictUtf8, leaveOpen:=True)
+                    Dim recordPath As String = If(isFile, _fileRecordsPath, _directoryRecordsPath)
+                    Using recordStream As New IO.FileStream(recordPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read,
+                                                           IoBufferSize, IO.FileOptions.RandomAccess)
+                        Dim nameScanner As LazyFileNameScanner = Nothing
+                        If isFile Then nameScanner = New LazyFileNameScanner(recordStream)
+                        Dim indexOffset As Long = firstIndexOffset
+                        For sequence As Long = 0 To itemCount - 1
+                            If indexOffset < 0 OrElse indexOffset > indexStream.Length - entrySize Then
+                                Throw New IO.InvalidDataException("Invalid lazy schema index chain.")
+                            End If
 
-                        indexStream.Seek(indexOffset, IO.SeekOrigin.Begin)
-                        Dim nextIndexOffset As Long = reader.ReadInt64()
-                        Dim childRecordOffset As Long = reader.ReadInt64()
-                        Dim childRecordLength As Long = If(isFile, reader.ReadInt64(), 0L)
-                        If isFile Then
+                            indexStream.Seek(indexOffset, IO.SeekOrigin.Begin)
+                            Dim nextIndexOffset As Long = reader.ReadInt64()
+                            Dim childRecordOffset As Long = reader.ReadInt64()
+                            Dim childRecordLength As Long = If(isFile, reader.ReadInt64(), 0L)
                             reader.ReadInt64()
-                        Else
-                            reader.ReadInt64()
-                        End If
-                        Dim childName As String
-                        If isFile Then
-                            childName = ReadFileScalars(childRecordOffset, childRecordLength).Name
-                        Else
-                            childName = ReadDirectoryScalars(childRecordOffset).Name
-                        End If
-                        items.Add(New LazySortItem With {
-                                      .Name = If(childName, String.Empty),
-                                      .IndexOffset = indexOffset,
-                                      .Sequence = sequence})
 
-                        If items.Count >= SortChunkSize Then
+                            Dim childName As String
+                            If isFile Then
+                                childName = nameScanner.Read(childRecordOffset, childRecordLength)
+                            Else
+                                childName = ReadDirectoryName(recordStream, childRecordOffset)
+                            End If
+                            items.Add(New LazySortItem With {
+                                          .Name = If(childName, String.Empty),
+                                          .IndexOffset = indexOffset,
+                                          .Sequence = sequence})
+
+                            If items.Count >= SortChunkSize Then
+                                Dim runPath As String = FlushSortChunk(items, nameComparer)
+                                If runPath IsNot Nothing Then runPaths.Add(runPath)
+                            End If
+                            indexOffset = nextIndexOffset
+                        Next
+                        If items.Count > 0 Then
                             Dim runPath As String = FlushSortChunk(items, nameComparer)
                             If runPath IsNot Nothing Then runPaths.Add(runPath)
                         End If
-                        indexOffset = nextIndexOffset
-                    Next
-                    If items.Count > 0 Then
-                        Dim runPath As String = FlushSortChunk(items, nameComparer)
-                        If runPath IsNot Nothing Then runPaths.Add(runPath)
-                    End If
+                    End Using
                 End Using
             End Using
 
             If runPaths.Count = 0 Then Exit Sub
 
-            Dim firstSortedOffset As Long = -1
-            Dim previousSortedOffset As Long = -1
+            'Build a new linked chain sequentially.  Rewriting the previous
+            'entry's next pointer with a random seek for every item was the
+            'second major cost of the old external sort.  Since each output
+            'entry has a fixed size, its next offset is known when it is
+            'written; only the final pointer needs one small patch.
+            sortedIndexPath = CreateTempFilePath("sorted-index")
+            Dim firstTempOffset As Long = -1
+            Dim lastTempOffset As Long = -1
             Dim sortedCount As Integer = 0
-            Using indexStream As New IO.FileStream(indexPath, IO.FileMode.Open, IO.FileAccess.ReadWrite, IO.FileShare.Read,
-                                                   IoBufferSize, IO.FileOptions.RandomAccess)
-                Using writer As New IO.BinaryWriter(indexStream, New Text.UTF8Encoding(False, True), leaveOpen:=True)
-                    MergeSortRuns(runPaths, nameComparer,
-                                  Sub(sortedIndexOffset As Long)
-                                      If firstSortedOffset < 0 Then firstSortedOffset = sortedIndexOffset
-                                      If previousSortedOffset >= 0 Then
-                                          indexStream.Seek(previousSortedOffset, IO.SeekOrigin.Begin)
-                                          writer.Write(sortedIndexOffset)
-                                      End If
-                                      previousSortedOffset = sortedIndexOffset
-                                      sortedCount += 1
-                                  End Sub)
-                    If previousSortedOffset >= 0 Then
-                        indexStream.Seek(previousSortedOffset, IO.SeekOrigin.Begin)
-                        writer.Write(CLng(-1))
-                    End If
-                    writer.Flush()
+            Using sourceIndexStream As New IO.FileStream(indexPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.ReadWrite,
+                                                         IoBufferSize, IO.FileOptions.RandomAccess)
+                Using sourceReader As New IO.BinaryReader(sourceIndexStream, StrictUtf8, leaveOpen:=True)
+                    Using sortedStream As New IO.FileStream(sortedIndexPath, IO.FileMode.Create, IO.FileAccess.Write, IO.FileShare.Read,
+                                                           IoBufferSize, IO.FileOptions.SequentialScan)
+                        Using sortedWriter As New IO.BinaryWriter(sortedStream, StrictUtf8, leaveOpen:=True)
+                            MergeSortRuns(runPaths, nameComparer,
+                                          Sub(sortedIndexOffset As Long)
+                                              If sortedIndexOffset < 0 OrElse sortedIndexOffset > sourceIndexStream.Length - entrySize Then
+                                                  Throw New IO.InvalidDataException("Invalid lazy schema sort entry.")
+                                              End If
+
+                                              sourceIndexStream.Seek(sortedIndexOffset, IO.SeekOrigin.Begin)
+                                              sourceReader.ReadInt64()
+                                              Dim childRecordOffset As Long = sourceReader.ReadInt64()
+                                              Dim childRecordLength As Long = If(isFile, sourceReader.ReadInt64(), 0L)
+                                              Dim selectionIndex As Long = sourceReader.ReadInt64()
+
+                                              Dim newOffset As Long = sortedStream.Position
+                                              sortedWriter.Write(newOffset + entrySize)
+                                              sortedWriter.Write(childRecordOffset)
+                                              If isFile Then sortedWriter.Write(childRecordLength)
+                                              sortedWriter.Write(selectionIndex)
+                                              If firstTempOffset < 0 Then firstTempOffset = newOffset
+                                              lastTempOffset = newOffset
+                                              sortedCount += 1
+                                          End Sub)
+
+                            If sortedCount <> itemCount Then Throw New IO.InvalidDataException("Lazy schema sort lost an index entry.")
+                            If lastTempOffset >= 0 Then
+                                sortedWriter.Flush()
+                                sortedStream.Seek(lastTempOffset, IO.SeekOrigin.Begin)
+                                sortedWriter.Write(CLng(-1))
+                                sortedWriter.Flush()
+                            End If
+                        End Using
+                    End Using
                 End Using
             End Using
 
-            If sortedCount <> itemCount Then Throw New IO.InvalidDataException("Lazy schema sort lost an index entry.")
+            Dim firstSortedOffset As Long
+            Using targetIndexStream As New IO.FileStream(indexPath, IO.FileMode.Open, IO.FileAccess.ReadWrite, IO.FileShare.Read,
+                                                         IoBufferSize, IO.FileOptions.RandomAccess)
+                targetIndexStream.Seek(0, IO.SeekOrigin.End)
+                firstSortedOffset = targetIndexStream.Position + firstTempOffset
+                Using sortedStream As New IO.FileStream(sortedIndexPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read,
+                                                        IoBufferSize, IO.FileOptions.SequentialScan)
+                    sortedStream.CopyTo(targetIndexStream, IoBufferSize)
+                End Using
+            End Using
+
             Using directoryStream As New IO.FileStream(_directoryRecordsPath, IO.FileMode.Open, IO.FileAccess.ReadWrite, IO.FileShare.Read,
                                                        IoBufferSize, IO.FileOptions.RandomAccess)
-                Using writer As New IO.BinaryWriter(directoryStream, New Text.UTF8Encoding(False, True), leaveOpen:=True)
+                Using writer As New IO.BinaryWriter(directoryStream, StrictUtf8, leaveOpen:=True)
                     directoryStream.Seek(recordOffset + If(isFile, 24L, 36L), IO.SeekOrigin.Begin)
                     writer.Write(firstSortedOffset)
                     writer.Flush()
@@ -2643,6 +2861,12 @@ Friend NotInheritable Class LazySchemaStore
                 Catch
                 End Try
             Next
+            If Not String.IsNullOrEmpty(sortedIndexPath) Then
+                Try
+                    If IO.File.Exists(sortedIndexPath) Then IO.File.Delete(sortedIndexPath)
+                Catch
+                End Try
+            End If
         End Try
     End Sub
 
@@ -2965,25 +3189,31 @@ Friend NotInheritable Class LazySchemaStore
     Private Function ReadDirectoryHeader(recordOffset As Long) As LazyDirectoryHeader
         If recordOffset < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema directory record.")
         Using stream As New IO.FileStream(_directoryRecordsPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, IoBufferSize, IO.FileOptions.RandomAccess)
-            If recordOffset > stream.Length - DirectoryHeaderSize Then Throw New IO.InvalidDataException("Lazy schema directory record is outside the backing file.")
-            stream.Seek(recordOffset, IO.SeekOrigin.Begin)
-            Using reader As New IO.BinaryReader(stream, New Text.UTF8Encoding(False, True), leaveOpen:=False)
-                If reader.ReadInt32() <> DirectoryMagic OrElse reader.ReadInt32() <> DirectoryVersion Then Throw New IO.InvalidDataException("Invalid lazy schema directory header.")
-                Dim result As New LazyDirectoryHeader With {
-                    .ScalarOffset = reader.ReadInt64(),
-                    .ScalarLength = reader.ReadInt32()
-                    }
-                reader.ReadInt32()
-                result.FileIndexOffset = reader.ReadInt64()
-                result.FileCount = reader.ReadInt32()
-                result.DirectoryIndexOffset = reader.ReadInt64()
-                result.DirectoryCount = reader.ReadInt32()
-                result.TotalFileCount = reader.ReadInt64()
-                result.TotalDirectoryCount = reader.ReadInt64()
-                If result.ScalarOffset < recordOffset + DirectoryHeaderSize OrElse result.ScalarLength < 0 OrElse result.ScalarOffset > stream.Length - result.ScalarLength Then Throw New IO.InvalidDataException("Invalid lazy schema directory scalar record.")
-                If result.FileCount < 0 OrElse result.DirectoryCount < 0 OrElse result.TotalFileCount < 0 OrElse result.TotalDirectoryCount < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema directory counts.")
-                Return result
-            End Using
+            Return ReadDirectoryHeader(stream, recordOffset)
+        End Using
+    End Function
+
+    Private Function ReadDirectoryHeader(stream As IO.FileStream, recordOffset As Long) As LazyDirectoryHeader
+        If stream Is Nothing OrElse recordOffset < 0 OrElse recordOffset > stream.Length - DirectoryHeaderSize Then
+            Throw New IO.InvalidDataException("Lazy schema directory record is outside the backing file.")
+        End If
+        stream.Seek(recordOffset, IO.SeekOrigin.Begin)
+        Using reader As New IO.BinaryReader(stream, StrictUtf8, leaveOpen:=True)
+            If reader.ReadInt32() <> DirectoryMagic OrElse reader.ReadInt32() <> DirectoryVersion Then Throw New IO.InvalidDataException("Invalid lazy schema directory header.")
+            Dim result As New LazyDirectoryHeader With {
+                .ScalarOffset = reader.ReadInt64(),
+                .ScalarLength = reader.ReadInt32()
+                }
+            reader.ReadInt32()
+            result.FileIndexOffset = reader.ReadInt64()
+            result.FileCount = reader.ReadInt32()
+            result.DirectoryIndexOffset = reader.ReadInt64()
+            result.DirectoryCount = reader.ReadInt32()
+            result.TotalFileCount = reader.ReadInt64()
+            result.TotalDirectoryCount = reader.ReadInt64()
+            If result.ScalarOffset < recordOffset + DirectoryHeaderSize OrElse result.ScalarLength < 0 OrElse result.ScalarOffset > stream.Length - result.ScalarLength Then Throw New IO.InvalidDataException("Invalid lazy schema directory scalar record.")
+            If result.FileCount < 0 OrElse result.DirectoryCount < 0 OrElse result.TotalFileCount < 0 OrElse result.TotalDirectoryCount < 0 Then Throw New IO.InvalidDataException("Invalid lazy schema directory counts.")
+            Return result
         End Using
     End Function
 
@@ -3003,7 +3233,7 @@ Friend NotInheritable Class LazySchemaStore
             writer.Write(-1)
             Return
         End If
-        Dim bytes As Byte() = New Text.UTF8Encoding(False, True).GetBytes(value)
+        Dim bytes As Byte() = StrictUtf8.GetBytes(value)
         writer.Write(bytes.Length)
         writer.Write(bytes)
     End Sub
@@ -3014,7 +3244,7 @@ Friend NotInheritable Class LazySchemaStore
         If length < 0 OrElse length > 64 * 1024 * 1024 Then Throw New IO.InvalidDataException("Invalid lazy schema string length.")
         Dim bytes As Byte() = reader.ReadBytes(length)
         If bytes.Length <> length Then Throw New IO.EndOfStreamException()
-        Return New Text.UTF8Encoding(False, True).GetString(bytes)
+        Return StrictUtf8.GetString(bytes)
     End Function
 
     Friend Shared Function ReadElementText(reader As XmlReader) As String

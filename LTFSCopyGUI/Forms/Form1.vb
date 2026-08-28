@@ -311,109 +311,338 @@ Public Class Form1
         writer.WriteEndElement()
     End Sub
 
-    Private Shared Sub WriteMergedFile(writer As System.Xml.XmlWriter,
-                                        source As ltfsindex.file,
-                                        barcode As String,
-                                        serializer As System.Xml.Serialization.XmlSerializer,
-                                        namespaces As System.Xml.Serialization.XmlSerializerNamespaces)
-        If source Is Nothing Then Return
+    Private NotInheritable Class MergeFragment
+        Public Property IsMatch As Boolean
+        Public Property Path As String
+    End Class
 
-        'Do not modify a lazy source file just to add the merge barcode.  A
-        'mutation would register every visited source object in its backing
-        'store.  Clone one file at a time and release it after serialization.
-        Dim outputFile As ltfsindex.file = source.GetCopy(source.fileuid)
-        If Not String.IsNullOrEmpty(barcode) Then outputFile.SetXattr("Barcode", barcode)
-        serializer.Serialize(writer, outputFile, namespaces)
+    Private Shared Sub WriteMergeNode(reader As System.Xml.XmlReader, writer As System.Xml.XmlWriter)
+        Select Case reader.NodeType
+            Case System.Xml.XmlNodeType.Text
+                writer.WriteString(reader.Value)
+            Case System.Xml.XmlNodeType.CDATA
+                writer.WriteCData(reader.Value)
+            Case System.Xml.XmlNodeType.Whitespace, System.Xml.XmlNodeType.SignificantWhitespace
+                writer.WriteWhitespace(reader.Value)
+            Case System.Xml.XmlNodeType.Comment
+                writer.WriteComment(reader.Value)
+            Case System.Xml.XmlNodeType.ProcessingInstruction
+                writer.WriteProcessingInstruction(reader.Name, reader.Value)
+            Case System.Xml.XmlNodeType.EntityReference
+                writer.WriteEntityRef(reader.Name)
+        End Select
     End Sub
 
-    Private Shared Sub WriteMergedDirectory(writer As System.Xml.XmlWriter,
-                                             source As ltfsindex.directory,
-                                             barcode As String,
-                                             serializer As System.Xml.Serialization.XmlSerializer,
-                                             namespaces As System.Xml.Serialization.XmlSerializerNamespaces)
-        If source Is Nothing Then Return
-
-        writer.WriteStartElement("directory")
-        WriteMergeElement(writer, "name", source.name)
-        WriteMergeElement(writer, "readonly", source.[readonly].ToString())
-        WriteMergeElement(writer, "creationtime", source.creationtime)
-        WriteMergeElement(writer, "changetime", source.changetime)
-        WriteMergeElement(writer, "modifytime", source.modifytime)
-        WriteMergeElement(writer, "accesstime", source.accesstime)
-        WriteMergeElement(writer, "backuptime", source.backuptime)
-        WriteMergeElement(writer, "fileuid", source.fileuid.ToString(System.Globalization.CultureInfo.InvariantCulture))
-        writer.WriteStartElement("contents")
-        For Each childFile As ltfsindex.file In source.EnumerateLazyFiles()
-            WriteMergedFile(writer, childFile, barcode, serializer, namespaces)
-        Next
-        For Each childDirectory As ltfsindex.directory In source.EnumerateLazyDirectories()
-            WriteMergedDirectory(writer, childDirectory, barcode, serializer, namespaces)
-        Next
-        writer.WriteEndElement()
+    Private Shared Sub WriteMergeBarcode(writer As System.Xml.XmlWriter, barcode As String)
+        writer.WriteStartElement("xattr")
+        WriteMergeElement(writer, "key", "Barcode")
+        WriteMergeElement(writer, "value", barcode)
         writer.WriteEndElement()
     End Sub
+
+    Private Shared Sub WriteMergeBarcodeContainer(writer As System.Xml.XmlWriter, barcode As String)
+        writer.WriteStartElement("extendedattributes")
+        WriteMergeBarcode(writer, barcode)
+        writer.WriteEndElement()
+    End Sub
+
+    Private Shared Sub CopyMergeExtendedAttributes(reader As System.Xml.XmlReader,
+                                                    writer As System.Xml.XmlWriter,
+                                                    barcode As String)
+        writer.WriteStartElement(reader.Prefix, reader.LocalName, reader.NamespaceURI)
+        If reader.HasAttributes Then writer.WriteAttributes(reader, True)
+
+        If reader.IsEmptyElement Then
+            WriteMergeBarcode(writer, barcode)
+            writer.WriteEndElement()
+            Return
+        End If
+
+        Dim elementDepth As Integer = reader.Depth
+        While reader.Read()
+            If reader.NodeType = System.Xml.XmlNodeType.EndElement AndAlso reader.Depth = elementDepth Then
+                WriteMergeBarcode(writer, barcode)
+                writer.WriteEndElement()
+                Return
+            End If
+
+            If reader.NodeType = System.Xml.XmlNodeType.Element Then
+                CopyMergeElement(reader, writer, barcode)
+            Else
+                WriteMergeNode(reader, writer)
+            End If
+        End While
+
+        Throw New IO.InvalidDataException("Unexpected end of an extended attribute container.")
+    End Sub
+
+    Private Shared Sub CopyMergeElement(reader As System.Xml.XmlReader,
+                                         writer As System.Xml.XmlWriter,
+                                         barcode As String)
+        If reader.NodeType <> System.Xml.XmlNodeType.Element Then Return
+
+        Dim isFile As Boolean = String.Equals(reader.LocalName, "file", StringComparison.OrdinalIgnoreCase)
+        Dim hasExtendedAttributes As Boolean = False
+        writer.WriteStartElement(reader.Prefix, reader.LocalName, reader.NamespaceURI)
+        If reader.HasAttributes Then writer.WriteAttributes(reader, True)
+
+        If reader.IsEmptyElement Then
+            If isFile Then WriteMergeBarcodeContainer(writer, barcode)
+            writer.WriteEndElement()
+            Return
+        End If
+
+        Dim elementDepth As Integer = reader.Depth
+        While reader.Read()
+            If reader.NodeType = System.Xml.XmlNodeType.EndElement AndAlso reader.Depth = elementDepth Then
+                If isFile AndAlso Not hasExtendedAttributes Then
+                    writer.WriteStartElement("extendedattributes")
+                    WriteMergeBarcode(writer, barcode)
+                    writer.WriteEndElement()
+                End If
+                writer.WriteEndElement()
+                Return
+            End If
+
+            If reader.NodeType = System.Xml.XmlNodeType.Element Then
+                If isFile AndAlso String.Equals(reader.LocalName, "extendedattributes", StringComparison.OrdinalIgnoreCase) Then
+                    CopyMergeExtendedAttributes(reader, writer, barcode)
+                    hasExtendedAttributes = True
+                Else
+                    CopyMergeElement(reader, writer, barcode)
+                End If
+            Else
+                WriteMergeNode(reader, writer)
+            End If
+        End While
+
+        Throw New IO.InvalidDataException("Unexpected end of a schema element.")
+    End Sub
+
+    Private Shared Sub SkipMergeElement(reader As System.Xml.XmlReader)
+        If reader.IsEmptyElement Then Return
+        Dim elementDepth As Integer = reader.Depth
+        While reader.Read()
+            If reader.NodeType = System.Xml.XmlNodeType.EndElement AndAlso reader.Depth = elementDepth Then Return
+        End While
+        Throw New IO.InvalidDataException("Unexpected end of a schema container.")
+    End Sub
+
+    Private Shared Sub CopyMergeContainerChildren(reader As System.Xml.XmlReader,
+                                                   writer As System.Xml.XmlWriter,
+                                                   barcode As String)
+        If reader.IsEmptyElement Then Return
+        Dim containerDepth As Integer = reader.Depth
+        While reader.Read()
+            If reader.NodeType = System.Xml.XmlNodeType.EndElement AndAlso reader.Depth = containerDepth Then Return
+            If reader.NodeType <> System.Xml.XmlNodeType.Element OrElse reader.Depth <> containerDepth + 1 Then Continue While
+
+            Select Case reader.LocalName
+                Case "file", "directory"
+                    CopyMergeElement(reader, writer, barcode)
+                Case "contents", "_file", "_directory"
+                    CopyMergeContainerChildren(reader, writer, barcode)
+                Case Else
+                    SkipMergeElement(reader)
+            End Select
+        End While
+        Throw New IO.InvalidDataException("Unexpected end of a schema container.")
+    End Sub
+
+    Private Shared Sub CopyMergeRootContents(reader As System.Xml.XmlReader,
+                                              writer As System.Xml.XmlWriter,
+                                              barcode As String)
+        If reader.IsEmptyElement Then Return
+        Dim directoryDepth As Integer = reader.Depth
+        While reader.Read()
+            If reader.NodeType = System.Xml.XmlNodeType.EndElement AndAlso reader.Depth = directoryDepth Then Return
+            If reader.NodeType <> System.Xml.XmlNodeType.Element OrElse reader.Depth <> directoryDepth + 1 Then Continue While
+
+            Select Case reader.LocalName
+                Case "file", "directory"
+                    CopyMergeElement(reader, writer, barcode)
+                Case "contents", "_file", "_directory"
+                    CopyMergeContainerChildren(reader, writer, barcode)
+                Case Else
+                    SkipMergeElement(reader)
+            End Select
+        End While
+        Throw New IO.InvalidDataException("Unexpected end of the root directory.")
+    End Sub
+
+    Private Shared Sub WriteMergeSourceFragment(schemaFile As IO.FileInfo,
+                                                 barcode As String,
+                                                 fragmentPath As String)
+        Dim settings As New System.Xml.XmlWriterSettings With {
+            .Encoding = New Text.UTF8Encoding(False),
+            .OmitXmlDeclaration = True,
+            .Indent = False,
+            .ConformanceLevel = System.Xml.ConformanceLevel.Fragment,
+            .CloseOutput = False}
+
+        Using input As New IO.FileStream(schemaFile.FullName, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read,
+                                         1 << 16, IO.FileOptions.SequentialScan)
+            Dim readerSettings As New System.Xml.XmlReaderSettings With {
+                .IgnoreComments = True,
+                .IgnoreWhitespace = True,
+                .IgnoreProcessingInstructions = True,
+                .DtdProcessing = System.Xml.DtdProcessing.Prohibit,
+                .XmlResolver = Nothing,
+                .CloseInput = False}
+            Using reader As System.Xml.XmlReader = System.Xml.XmlReader.Create(input, readerSettings)
+                Using output As New IO.FileStream(fragmentPath, IO.FileMode.Create, IO.FileAccess.Write, IO.FileShare.Read,
+                                                  1 << 16, IO.FileOptions.SequentialScan)
+                    Using writer As System.Xml.XmlWriter = System.Xml.XmlWriter.Create(output, settings)
+                        reader.MoveToContent()
+                        If reader.NodeType <> System.Xml.XmlNodeType.Element Then
+                            Throw New IO.InvalidDataException("Schema root element was not found.")
+                        End If
+
+                        If String.Equals(reader.LocalName, "directory", StringComparison.OrdinalIgnoreCase) Then
+                            CopyMergeRootContents(reader, writer, barcode)
+                        Else
+                            Dim foundRoot As Boolean = False
+                            While reader.Read()
+                                If reader.NodeType = System.Xml.XmlNodeType.Element AndAlso
+                                   String.Equals(reader.LocalName, "directory", StringComparison.OrdinalIgnoreCase) Then
+                                    CopyMergeRootContents(reader, writer, barcode)
+                                    foundRoot = True
+                                    Exit While
+                                End If
+                            End While
+                            If Not foundRoot Then Throw New IO.InvalidDataException("Schema has no root directory.")
+                        End If
+                    End Using
+                End Using
+            End Using
+        End Using
+    End Sub
+
+    Private Shared Function CreateMergeFragmentPath() As String
+        For attempt As Integer = 0 To 7
+            Dim path As String = IO.Path.Combine(IO.Path.GetTempPath(), $"LCG_MERGE_{Guid.NewGuid():N}.part")
+            Try
+                Using stream As New IO.FileStream(path, IO.FileMode.CreateNew, IO.FileAccess.Write, IO.FileShare.None,
+                                                  1, IO.FileOptions.SequentialScan)
+                End Using
+                Return path
+            Catch
+                Try
+                    If IO.File.Exists(path) Then IO.File.Delete(path)
+                Catch
+                End Try
+            End Try
+        Next
+        Throw New IO.IOException("Unable to create a merge fragment.")
+    End Function
+
+    Private Shared Function BuildMergeFragment(schemaFile As IO.FileInfo,
+                                               pattern As String,
+                                               caseSensitive As Boolean) As MergeFragment
+        Dim result As New MergeFragment
+        If schemaFile Is Nothing OrElse Not FileContainsText(schemaFile.FullName, pattern, caseSensitive) Then Return result
+
+        result.IsMatch = True
+        result.Path = CreateMergeFragmentPath()
+        Try
+            WriteMergeSourceFragment(schemaFile,
+                                     IO.Path.GetFileNameWithoutExtension(schemaFile.Name),
+                                     result.Path)
+            Return result
+        Catch
+            Try
+                If IO.File.Exists(result.Path) Then IO.File.Delete(result.Path)
+            Catch
+            End Try
+            result.Path = Nothing
+            result.IsMatch = False
+            Throw
+        End Try
+    End Function
+
+    Private Shared Sub DeleteMergeFragment(fragment As MergeFragment)
+        If fragment Is Nothing OrElse String.IsNullOrEmpty(fragment.Path) Then Return
+        Try
+            If IO.File.Exists(fragment.Path) Then IO.File.Delete(fragment.Path)
+        Catch
+        End Try
+    End Sub
+
+    Private Shared Function EscapeMergeText(value As String) As String
+        If value Is Nothing Then Return String.Empty
+        Dim escaped As New Text.StringBuilder(value.Length + 16)
+        Using textWriter As New IO.StringWriter(escaped, Globalization.CultureInfo.InvariantCulture)
+            Using xmlWriter As System.Xml.XmlWriter = System.Xml.XmlWriter.Create(textWriter, New System.Xml.XmlWriterSettings With {
+                .OmitXmlDeclaration = True,
+                .ConformanceLevel = System.Xml.ConformanceLevel.Fragment})
+                xmlWriter.WriteString(value)
+            End Using
+        End Using
+        Return escaped.ToString()
+    End Function
 
     Private Function BuildMergedSchema(schemaFiles As IO.FileInfo(),
                                        pattern As String,
                                        infoText As Text.StringBuilder,
-                                       ByRef progressValue As Integer) As ltfsindex
+                                       progressCallback As Action) As ltfsindex
         Dim tempPath As String = IO.Path.Combine(IO.Path.GetTempPath(), $"LCG_MERGE_{Guid.NewGuid():N}.schema")
+        Dim fragments As MergeFragment() = If(schemaFiles Is Nothing, Nothing, New MergeFragment(schemaFiles.Length - 1) {})
         Try
-            Dim settings As New System.Xml.XmlWriterSettings With {
-                .Encoding = New Text.UTF8Encoding(False),
-                .OmitXmlDeclaration = True,
-                .Indent = False,
-                .CloseOutput = False}
-            Dim serializer As New System.Xml.Serialization.XmlSerializer(GetType(ltfsindex.file))
-            Dim namespaces As New System.Xml.Serialization.XmlSerializerNamespaces
-            namespaces.Add(String.Empty, String.Empty)
+            If schemaFiles Is Nothing OrElse schemaFiles.Length = 0 Then Return Nothing
+
+            Dim parallelOptions As New Threading.Tasks.ParallelOptions With {
+                .MaxDegreeOfParallelism = Math.Max(1, Math.Min(Environment.ProcessorCount, 4))}
+            Threading.Tasks.Parallel.For(0, schemaFiles.Length, parallelOptions,
+                Sub(index As Integer)
+                    Try
+                        fragments(index) = BuildMergeFragment(schemaFiles(index), pattern, My.Settings.Application_CaseSensitiveSearch)
+                    Catch ex As Exception
+                        LogFileOperationWarning("Merge", schemaFiles(index).FullName, ex)
+                    Finally
+                        If progressCallback IsNot Nothing Then progressCallback()
+                    End Try
+                End Sub)
+
+            Dim utf8 As New Text.UTF8Encoding(False)
+            Dim header As String = "<ltfsindex version=""2.4.0""><directory><name>" &
+                                   EscapeMergeText("Search_" & pattern) &
+                                   "</name><readonly>False</readonly><contents>"
+            Dim footer As String = "</contents></directory></ltfsindex>"
+            Dim headerBytes As Byte() = utf8.GetBytes(header)
+            Dim footerBytes As Byte() = utf8.GetBytes(footer)
 
             Using output As New IO.FileStream(tempPath, IO.FileMode.CreateNew, IO.FileAccess.Write, IO.FileShare.Read,
                                               1 << 16, IO.FileOptions.SequentialScan)
-                Using writer As System.Xml.XmlWriter = System.Xml.XmlWriter.Create(output, settings)
-                    writer.WriteStartElement("ltfsindex")
-                    writer.WriteAttributeString("version", "2.4.0")
-                    writer.WriteStartElement("directory")
-                    WriteMergeElement(writer, "name", $"Search_{pattern}")
-                    WriteMergeElement(writer, "readonly", False.ToString())
-                    writer.WriteStartElement("contents")
+                output.Write(headerBytes, 0, headerBytes.Length)
+                For index As Integer = 0 To fragments.Length - 1
+                    Dim fragment As MergeFragment = fragments(index)
+                    If fragment Is Nothing OrElse Not fragment.IsMatch OrElse String.IsNullOrEmpty(fragment.Path) Then Continue For
+                    Try
+                        SyncLock infoText
+                            infoText.AppendLine(schemaFiles(index).Name)
+                        End SyncLock
 
-                    For Each schemaFile As IO.FileInfo In schemaFiles
-                        Try
-                            If Not FileContainsText(schemaFile.FullName, pattern, My.Settings.Application_CaseSensitiveSearch) Then Continue For
-
-                            SyncLock infoText
-                                infoText.AppendLine(schemaFile.Name)
-                            End SyncLock
-
-                            Dim sourceSchema As ltfsindex = ltfsindex.FromSchemaFile(schemaFile.FullName)
-                            If sourceSchema Is Nothing OrElse sourceSchema._directory Is Nothing OrElse sourceSchema._directory.Count = 0 Then
-                                Throw New IO.InvalidDataException("Schema has no root directory.")
-                            End If
-
-                            Dim sourceRoot As ltfsindex.directory = sourceSchema._directory(0)
-                            Dim barcode As String = IO.Path.GetFileNameWithoutExtension(schemaFile.Name)
-                            For Each rootFile As ltfsindex.file In sourceRoot.EnumerateLazyFiles()
-                                WriteMergedFile(writer, rootFile, barcode, serializer, namespaces)
-                            Next
-                            For Each rootDirectory As ltfsindex.directory In sourceRoot.EnumerateLazyDirectories()
-                                WriteMergedDirectory(writer, rootDirectory, barcode, serializer, namespaces)
-                            Next
-                        Catch ex As Exception
-                            LogFileOperationWarning("Merge", schemaFile.FullName, ex)
-                        Finally
-                            Threading.Interlocked.Increment(progressValue)
-                        End Try
-                    Next
-
-                    writer.WriteEndElement()
-                    writer.WriteEndElement()
-                    writer.WriteEndElement()
-                End Using
+                        Using fragmentStream As New IO.FileStream(fragment.Path, IO.FileMode.Open, IO.FileAccess.Read,
+                                                                 IO.FileShare.Read, 1 << 16, IO.FileOptions.SequentialScan)
+                            fragmentStream.CopyTo(output, 1 << 16)
+                        End Using
+                    Catch ex As Exception
+                        LogFileOperationWarning("Merge", schemaFiles(index).FullName, ex)
+                    End Try
+                Next
+                output.Write(footerBytes, 0, footerBytes.Length)
             End Using
 
-            Return ltfsindex.FromSchemaFile(tempPath)
+            'The merge writer emits standard XML directly.  Load it through
+            'the lazy reader instead of routing small results through the
+            'legacy compact-format line converter.
+            Return LazySchemaReader.Load(tempPath)
         Finally
+            If fragments IsNot Nothing Then
+                For Each fragment As MergeFragment In fragments
+                    DeleteMergeFragment(fragment)
+                Next
+            End If
             Try
                 If IO.File.Exists(tempPath) Then IO.File.Delete(tempPath)
             Catch
@@ -1154,7 +1383,8 @@ Public Class Form1
             Dim th As New Threading.Thread(
                 Sub()
                     Try
-                        mergedSchema = BuildMergedSchema(f, patt, infoText, progval)
+                        mergedSchema = BuildMergedSchema(f, patt, infoText,
+                                                         Sub() Threading.Interlocked.Increment(progval))
                         If mergedSchema IsNot Nothing AndAlso mergedSchema._directory IsNot Nothing AndAlso mergedSchema._directory.Count > 0 Then
                             NormalizeMergedDirectories(mergedSchema._directory(0))
                             SortMergedRoot(mergedSchema)
