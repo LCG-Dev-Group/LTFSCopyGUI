@@ -11636,6 +11636,10 @@ Public Class LTFSWriter
         resumeEntryFound = resumeEntry Is Nothing
         For Each entry As SearchEntry In EnumerateSearchEntries(directory, directoryPath)
             If progressCallback IsNot Nothing Then progressCallback()
+            If StopFlag Then
+                StopFlag = False
+                Exit For
+            End If
             'The first yielded entry is the search root itself.  The root is
             'the current location, so search its children without returning
             'the same directory on every F3 press.
