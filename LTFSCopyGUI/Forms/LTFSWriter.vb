@@ -3976,27 +3976,27 @@ Public Class LTFSWriter
         If ownsLookup Then BeginAddFileLookup()
         Try
             For Each f As IO.FileInfo In dnew1.EnumerateFiles()
-            Dim FileExist As Boolean = False
-            '检查磁带已有文件
-            For Each fe As ltfsindex.file In GetExistingFilesForAdd(d1, f.Name)
-                FileExist = True
-                If OverWrite Then
-                    d1.RemoveFile(fe)
-                    RemoveExistingFileFromAddLookup(d1, fe)
+                Dim FileExist As Boolean = False
+                '检查磁带已有文件
+                For Each fe As ltfsindex.file In GetExistingFilesForAdd(d1, f.Name)
+                    FileExist = True
+                    If OverWrite Then
+                        d1.RemoveFile(fe)
+                        RemoveExistingFileFromAddLookup(d1, fe)
+                    End If
+                Next
+                If (Not OverWrite) And FileExist Then Continue For
+                '检查写入队列
+                If Not FileExist Then
+                    FileExist = RemovePendingByName(d1, f.Name)
                 End If
-            Next
-            If (Not OverWrite) And FileExist Then Continue For
-            '检查写入队列
-            If Not FileExist Then
-                FileExist = RemovePendingByName(d1, f.Name)
-            End If
-            '添加到队列
-            AddPendingRecord(New FileRecord(f.FullName, d1))
+                '添加到队列
+                AddPendingRecord(New FileRecord(f.FullName, d1))
             Next
             For Each dn As IO.DirectoryInfo In dnew1.EnumerateDirectories()
-            Dim dT As ltfsindex.directory = d1.FindDirectoryByName(dn.Name)
-            If dT Is Nothing Then
-                dT = New ltfsindex.directory With {
+                Dim dT As ltfsindex.directory = d1.FindDirectoryByName(dn.Name)
+                If dT Is Nothing Then
+                    dT = New ltfsindex.directory With {
                                             .name = dn.Name,
                                             .creationtime = dn.CreationTimeUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z"),
                                             .fileuid = schema.highestfileuid + 1,
@@ -4006,9 +4006,9 @@ Public Class LTFSWriter
                                             .backuptime = Now.ToUniversalTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z"),
                                             .readonly = False
                                             }
-                d1.AddDirectory(dT)
-                schema.highestfileuid += 1
-            End If
+                    d1.AddDirectory(dT)
+                    schema.highestfileuid += 1
+                End If
                 ConcatDirectory(dn, dT, OverWrite)
             Next
         Finally
@@ -4346,60 +4346,60 @@ Public Class LTFSWriter
                     BeginAddFileLookup()
                     Try
                         StopFlag = False
-                    If pathCount >= 0 Then
-                        PrintMsg($"{My.Resources.ResText_Adding}{pathCount}{My.Resources.ResText_Items_x}")
-                    Else
-                        PrintMsg(My.Resources.ResText_Adding)
-                    End If
-                    Dim numi As Integer = 0
-                    For Each path As String In Paths
-                        If String.IsNullOrWhiteSpace(path) Then Continue For
-                        If Not path.StartsWith("\\") Then path = $"\\?\{path}"
-                        Dim i As Integer = Threading.Interlocked.Increment(numi)
-                        If StopFlag Then Exit For
-                        Try
-                            If IO.File.Exists(path) Then
-                                Dim f As IO.FileInfo = New IO.FileInfo(path)
-                                Dim skip As Boolean = False
-                                If exceptExtension IsNot Nothing AndAlso exceptExtension.Count > 0 Then
-                                    For Each ext As String In exceptExtension
-                                        If path.EndsWith(ext, StringComparison.OrdinalIgnoreCase) Then
-                                            skip = True
-                                            Exit For
-                                        End If
-                                    Next
-                                End If
-                                If Not skip Then
+                        If pathCount >= 0 Then
+                            PrintMsg($"{My.Resources.ResText_Adding}{pathCount}{My.Resources.ResText_Items_x}")
+                        Else
+                            PrintMsg(My.Resources.ResText_Adding)
+                        End If
+                        Dim numi As Integer = 0
+                        For Each path As String In Paths
+                            If String.IsNullOrWhiteSpace(path) Then Continue For
+                            If Not path.StartsWith("\\") Then path = $"\\?\{path}"
+                            Dim i As Integer = Threading.Interlocked.Increment(numi)
+                            If StopFlag Then Exit For
+                            Try
+                                If IO.File.Exists(path) Then
+                                    Dim f As IO.FileInfo = New IO.FileInfo(path)
+                                    Dim skip As Boolean = False
+                                    If exceptExtension IsNot Nothing AndAlso exceptExtension.Count > 0 Then
+                                        For Each ext As String In exceptExtension
+                                            If path.EndsWith(ext, StringComparison.OrdinalIgnoreCase) Then
+                                                skip = True
+                                                Exit For
+                                            End If
+                                        Next
+                                    End If
+                                    If Not skip Then
+                                        PrintMsg($"{My.Resources.ResText_Adding} [{i}/{If(pathCount >= 0, pathCount.ToString(), "?")}] {f.Name}")
+                                        AddFile(f, d, overwrite)
+                                    Else
+                                        PrintMsg($"{My.Resources.ResText_Skip} [{i}/{If(pathCount >= 0, pathCount.ToString(), "?")}] {f.Name}")
+                                    End If
+                                ElseIf IO.Directory.Exists(path) Then
+                                    Dim f As IO.DirectoryInfo = New IO.DirectoryInfo(path)
                                     PrintMsg($"{My.Resources.ResText_Adding} [{i}/{If(pathCount >= 0, pathCount.ToString(), "?")}] {f.Name}")
-                                    AddFile(f, d, overwrite)
-                                Else
-                                    PrintMsg($"{My.Resources.ResText_Skip} [{i}/{If(pathCount >= 0, pathCount.ToString(), "?")}] {f.Name}")
+                                    AddDirectry(f, d, overwrite, exceptExtension)
                                 End If
-                            ElseIf IO.Directory.Exists(path) Then
-                                Dim f As IO.DirectoryInfo = New IO.DirectoryInfo(path)
-                                PrintMsg($"{My.Resources.ResText_Adding} [{i}/{If(pathCount >= 0, pathCount.ToString(), "?")}] {f.Name}")
-                                AddDirectry(f, d, overwrite, exceptExtension)
-                            End If
-                        Catch ex As Exception
-                            Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString()}{vbCrLf}{ex.StackTrace}"))
-                            SetStatusLight(LWStatus.Err)
-                        End Try
-                    Next
+                            Catch ex As Exception
+                                Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString()}{vbCrLf}{ex.StackTrace}"))
+                                SetStatusLight(LWStatus.Err)
+                            End Try
+                        Next
 
-                    If ParallelAdd Then
-                        SyncLock _pendingQueueLock
-                            UnwrittenFiles.Sort(New Comparison(Of FileRecord)(Function(a As FileRecord, b As FileRecord) As Integer
-                                                                                  Return ExplorerComparer.Compare(a.SourcePath, b.SourcePath)
-                                                                              End Function))
-                        End SyncLock
-                    End If
-                    StopFlag = False
-                    UnwrittenSizeOverrideValue = 0
-                    UnwrittenCountOverrideValue = 0
-                    RefreshDisplay()
-                    PrintMsg(My.Resources.ResText_AddFin)
-                    SetStatusLight(LWStatus.Succ)
-                    LockGUI(False)
+                        If ParallelAdd Then
+                            SyncLock _pendingQueueLock
+                                UnwrittenFiles.Sort(New Comparison(Of FileRecord)(Function(a As FileRecord, b As FileRecord) As Integer
+                                                                                      Return ExplorerComparer.Compare(a.SourcePath, b.SourcePath)
+                                                                                  End Function))
+                            End SyncLock
+                        End If
+                        StopFlag = False
+                        UnwrittenSizeOverrideValue = 0
+                        UnwrittenCountOverrideValue = 0
+                        RefreshDisplay()
+                        PrintMsg(My.Resources.ResText_AddFin)
+                        SetStatusLight(LWStatus.Succ)
+                        LockGUI(False)
                     Finally
                         EndAddFileLookup()
                     End Try
@@ -7817,9 +7817,9 @@ Public Class LTFSWriter
                 Threading.Thread.Sleep(0)
                 SyncLock UFReadCount
                     If UFReadCount > 0 Then Continue While
-                            ClearGlobalPendingQueue()
-                            CurrentFilesProcessed = 0
-                            CurrentBytesProcessed = 0
+                    ClearGlobalPendingQueue()
+                    CurrentFilesProcessed = 0
+                    CurrentBytesProcessed = 0
                     Exit While
                 End SyncLock
             End While
@@ -7955,9 +7955,9 @@ Public Class LTFSWriter
                 Threading.Thread.Sleep(0)
                 SyncLock UFReadCount
                     If UFReadCount > 0 Then Continue While
-                            ClearGlobalPendingQueue()
-                            CurrentFilesProcessed = 0
-                            CurrentBytesProcessed = 0
+                    ClearGlobalPendingQueue()
+                    CurrentFilesProcessed = 0
+                    CurrentBytesProcessed = 0
                     Exit While
                 End SyncLock
             End While
@@ -8047,161 +8047,161 @@ Public Class LTFSWriter
         While q.Count > 0
             Dim d As IOManager.IndexedLHashDirectory = q.Pop()
             For Each f As ltfsindex.file In d.LTFSIndexDir.EnumerateLazyFiles()
-                    Try
-                        Dim crc32value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.CRC32)
-                        Dim sha1value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA1)
-                        Dim sha256value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA256)
-                        Dim sha512value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA512)
-                        Dim md5value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.MD5)
-                        Dim blake3value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3)
-                        Dim xxhash3value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3)
-                        Dim xxhash128value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128)
-                        For Each flookup As ltfsindex.file In d.LHash_Dir.EnumerateLazyFiles()
-                            If flookup.name = f.name And flookup.length = f.length Then
-                                If Not Overwrite Then
-                                    If Not (crc32value0 IsNot Nothing AndAlso crc32value0 <> "" AndAlso crc32value0.Length = ltfsindex.file.xattr.HashLengthBytes.CRC32 * 2) Then
-                                        PrintMsg($"{f.name}", False, $"[CRC32]{f.name}    {crc32value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.CRC32, flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32))
-                                    End If
-                                    If Not (sha1value0 IsNot Nothing AndAlso sha1value0 <> "" AndAlso sha1value0.Length = ltfsindex.file.xattr.HashLengthBytes.SHA1 * 2) Then
-                                        PrintMsg($"{f.name}", False, $"[SHA1]{f.name}    {sha1value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.SHA1, flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1))
-                                    End If
-                                    If Not (sha256value0 IsNot Nothing AndAlso sha256value0 <> "" AndAlso sha256value0.Length = ltfsindex.file.xattr.HashLengthBytes.SHA256 * 2) Then
-                                        PrintMsg($"{f.name}", False, $"[SHA256]{f.name}    {sha256value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.SHA256, flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256))
-                                    End If
-                                    If Not (sha512value0 IsNot Nothing AndAlso sha512value0 <> "" AndAlso sha512value0.Length = ltfsindex.file.xattr.HashLengthBytes.SHA512 * 2) Then
-                                        PrintMsg($"{f.name}", False, $"[SHA512]{f.name}    {sha512value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.SHA512, flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512))
-                                    End If
-                                    If Not (md5value0 IsNot Nothing AndAlso md5value0 <> "" AndAlso md5value0.Length = ltfsindex.file.xattr.HashLengthBytes.MD5 * 2) Then
-                                        PrintMsg($"{f.name}", False, $"[MD5]{f.name}    {md5value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.MD5, flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5))
-                                    End If
-                                    If Not (blake3value0 IsNot Nothing AndAlso blake3value0 <> "" AndAlso blake3value0.Length = ltfsindex.file.xattr.HashLengthBytes.BLAKE3 * 2) Then
-                                        PrintMsg($"{f.name}", False, $"[Blake3]{f.name}    {blake3value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3))
-                                    End If
-                                    If Not (xxhash3value0 IsNot Nothing AndAlso xxhash3value0 <> "" AndAlso xxhash3value0.Length = ltfsindex.file.xattr.HashLengthBytes.XxHash3 * 2) Then
-                                        PrintMsg($"{f.name}", False, $"[XxHash3]{f.name}    {xxhash3value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3))
-                                    End If
-                                    If Not (xxhash128value0 IsNot Nothing AndAlso xxhash128value0 <> "" AndAlso xxhash128value0.Length = ltfsindex.file.xattr.HashLengthBytes.XxHash128 * 2) Then
-                                        PrintMsg($"{f.name}", False, $"[XxHash128]{f.name}    {xxhash128value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128))
-                                    End If
-                                    For Each xt As ltfsindex.file.xattr In flookup.extendedattributes
-                                        If xt.key.StartsWith("ltfs.hash.") Then Continue For
-                                        Dim value As String = f.GetXAttr(xt.key)
-                                        If value IsNot Nothing OrElse value = "" Then
-                                            f.SetXattr(xt.key, xt.value)
-                                        End If
-                                    Next
-                                Else
-                                    If flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.SHA1 Then
-                                        PrintMsg($"{f.name}", False, $"[SHA1]{f.name}    {sha1value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.SHA1, flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1))
-                                    End If
-                                    If flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.SHA256 Then
-                                        PrintMsg($"{f.name}", False, $"[SHA256]{f.name}    {sha256value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.SHA256, flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256))
-                                    End If
-                                    If flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.SHA512 Then
-                                        PrintMsg($"{f.name}", False, $"[SHA512]{f.name}    {sha512value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.SHA512, flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512))
-                                    End If
-                                    If flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.CRC32 Then
-                                        PrintMsg($"{f.name}", False, $"[CRC32]{f.name}    {crc32value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.CRC32, flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32))
-                                    End If
-                                    If flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.MD5 Then
-                                        PrintMsg($"{f.name}", False, $"[MD5]{f.name}    {md5value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.MD5, flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5))
-                                    End If
-                                    If flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.BLAKE3 Then
-                                        PrintMsg($"{f.name}", False, $"[Blake3]{f.name}    {blake3value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3))
-                                    End If
-                                    If flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.XxHash3 Then
-                                        PrintMsg($"{f.name}", False, $"[XxHash3]{f.name}    {xxhash3value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3))
-                                    End If
-                                    If flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.XxHash128 Then
-                                        PrintMsg($"{f.name}", False, $"[XxHash128]{f.name}    {xxhash128value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128)}")
-                                        f.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128))
-                                    End If
-                                    For Each xt As ltfsindex.file.xattr In flookup.extendedattributes
-                                        If xt.key.StartsWith("ltfs.hash.") Then Continue For
-                                        f.SetXattr(xt.key, xt.value)
-                                    Next
+                Try
+                    Dim crc32value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.CRC32)
+                    Dim sha1value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA1)
+                    Dim sha256value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA256)
+                    Dim sha512value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA512)
+                    Dim md5value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.MD5)
+                    Dim blake3value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3)
+                    Dim xxhash3value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3)
+                    Dim xxhash128value0 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128)
+                    For Each flookup As ltfsindex.file In d.LHash_Dir.EnumerateLazyFiles()
+                        If flookup.name = f.name And flookup.length = f.length Then
+                            If Not Overwrite Then
+                                If Not (crc32value0 IsNot Nothing AndAlso crc32value0 <> "" AndAlso crc32value0.Length = ltfsindex.file.xattr.HashLengthBytes.CRC32 * 2) Then
+                                    PrintMsg($"{f.name}", False, $"[CRC32]{f.name}    {crc32value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.CRC32, flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32))
                                 End If
-
-                                Exit For
+                                If Not (sha1value0 IsNot Nothing AndAlso sha1value0 <> "" AndAlso sha1value0.Length = ltfsindex.file.xattr.HashLengthBytes.SHA1 * 2) Then
+                                    PrintMsg($"{f.name}", False, $"[SHA1]{f.name}    {sha1value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.SHA1, flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1))
+                                End If
+                                If Not (sha256value0 IsNot Nothing AndAlso sha256value0 <> "" AndAlso sha256value0.Length = ltfsindex.file.xattr.HashLengthBytes.SHA256 * 2) Then
+                                    PrintMsg($"{f.name}", False, $"[SHA256]{f.name}    {sha256value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.SHA256, flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256))
+                                End If
+                                If Not (sha512value0 IsNot Nothing AndAlso sha512value0 <> "" AndAlso sha512value0.Length = ltfsindex.file.xattr.HashLengthBytes.SHA512 * 2) Then
+                                    PrintMsg($"{f.name}", False, $"[SHA512]{f.name}    {sha512value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.SHA512, flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512))
+                                End If
+                                If Not (md5value0 IsNot Nothing AndAlso md5value0 <> "" AndAlso md5value0.Length = ltfsindex.file.xattr.HashLengthBytes.MD5 * 2) Then
+                                    PrintMsg($"{f.name}", False, $"[MD5]{f.name}    {md5value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.MD5, flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5))
+                                End If
+                                If Not (blake3value0 IsNot Nothing AndAlso blake3value0 <> "" AndAlso blake3value0.Length = ltfsindex.file.xattr.HashLengthBytes.BLAKE3 * 2) Then
+                                    PrintMsg($"{f.name}", False, $"[Blake3]{f.name}    {blake3value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3))
+                                End If
+                                If Not (xxhash3value0 IsNot Nothing AndAlso xxhash3value0 <> "" AndAlso xxhash3value0.Length = ltfsindex.file.xattr.HashLengthBytes.XxHash3 * 2) Then
+                                    PrintMsg($"{f.name}", False, $"[XxHash3]{f.name}    {xxhash3value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3))
+                                End If
+                                If Not (xxhash128value0 IsNot Nothing AndAlso xxhash128value0 <> "" AndAlso xxhash128value0.Length = ltfsindex.file.xattr.HashLengthBytes.XxHash128 * 2) Then
+                                    PrintMsg($"{f.name}", False, $"[XxHash128]{f.name}    {xxhash128value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128))
+                                End If
+                                For Each xt As ltfsindex.file.xattr In flookup.extendedattributes
+                                    If xt.key.StartsWith("ltfs.hash.") Then Continue For
+                                    Dim value As String = f.GetXAttr(xt.key)
+                                    If value IsNot Nothing OrElse value = "" Then
+                                        f.SetXattr(xt.key, xt.value)
+                                    End If
+                                Next
+                            Else
+                                If flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.SHA1 Then
+                                    PrintMsg($"{f.name}", False, $"[SHA1]{f.name}    {sha1value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.SHA1, flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA1))
+                                End If
+                                If flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.SHA256 Then
+                                    PrintMsg($"{f.name}", False, $"[SHA256]{f.name}    {sha256value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.SHA256, flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA256))
+                                End If
+                                If flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.SHA512 Then
+                                    PrintMsg($"{f.name}", False, $"[SHA512]{f.name}    {sha512value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.SHA512, flookup.GetXAttr(ltfsindex.file.xattr.HashType.SHA512))
+                                End If
+                                If flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.CRC32 Then
+                                    PrintMsg($"{f.name}", False, $"[CRC32]{f.name}    {crc32value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.CRC32, flookup.GetXAttr(ltfsindex.file.xattr.HashType.CRC32))
+                                End If
+                                If flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.MD5 Then
+                                    PrintMsg($"{f.name}", False, $"[MD5]{f.name}    {md5value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.MD5, flookup.GetXAttr(ltfsindex.file.xattr.HashType.MD5))
+                                End If
+                                If flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.BLAKE3 Then
+                                    PrintMsg($"{f.name}", False, $"[Blake3]{f.name}    {blake3value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, flookup.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3))
+                                End If
+                                If flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.XxHash3 Then
+                                    PrintMsg($"{f.name}", False, $"[XxHash3]{f.name}    {xxhash3value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3))
+                                End If
+                                If flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128) IsNot Nothing AndAlso flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128) <> "" And flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128).Length = 2 * ltfsindex.file.xattr.HashLengthBytes.XxHash128 Then
+                                    PrintMsg($"{f.name}", False, $"[XxHash128]{f.name}    {xxhash128value0} -> { flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128)}")
+                                    f.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, flookup.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128))
+                                End If
+                                For Each xt As ltfsindex.file.xattr In flookup.extendedattributes
+                                    If xt.key.StartsWith("ltfs.hash.") Then Continue For
+                                    f.SetXattr(xt.key, xt.value)
+                                Next
                             End If
-                        Next
-                        f.openforwrite = False
-                        Threading.Interlocked.Increment(fprocessed)
-                        Dim checksumlegal As Boolean = True
-                        Dim illegalinfo As New StringBuilder
-                        Dim crc32value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.CRC32)
-                        Dim sha1value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA1)
-                        Dim sha256value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA256)
-                        Dim sha512value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA512)
-                        Dim md5value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.MD5)
-                        Dim blake3value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3)
-                        Dim xxhash3value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3)
-                        Dim xxhash128value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128)
-                        If crc32value1 IsNot Nothing AndAlso crc32value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.CRC32 AndAlso crc32value1.Length > 0 Then
-                            checksumlegal = False
-                        Else
-                            illegalinfo.AppendLine($"{f.fileuid} CRC32:{d.LTFSIndexDir.name}\{f.name} {crc32value1}")
+
+                            Exit For
                         End If
-                        If sha1value1 IsNot Nothing AndAlso sha1value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.SHA1 AndAlso sha1value1.Length > 0 Then
-                            checksumlegal = False
-                        Else
-                            illegalinfo.AppendLine($"{f.fileuid} SHA1:{d.LTFSIndexDir.name}\{f.name} {sha1value1}")
-                        End If
-                        If sha256value1 IsNot Nothing AndAlso sha256value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.SHA256 AndAlso sha256value1.Length > 0 Then
-                            checksumlegal = False
-                        Else
-                            illegalinfo.AppendLine($"{f.fileuid} SHA256:{d.LTFSIndexDir.name}\{f.name} {sha256value1}")
-                        End If
-                        If sha512value1 IsNot Nothing AndAlso sha512value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.SHA512 AndAlso sha512value1.Length > 0 Then
-                            checksumlegal = False
-                        Else
-                            illegalinfo.AppendLine($"{f.fileuid} SHA512:{d.LTFSIndexDir.name}\{f.name} {sha512value1}")
-                        End If
-                        If md5value1 IsNot Nothing AndAlso md5value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.MD5 AndAlso md5value1.Length > 0 Then
-                            checksumlegal = False
-                        Else
-                            illegalinfo.AppendLine($"{f.fileuid} MD5:{d.LTFSIndexDir.name}\{f.name} {md5value1}")
-                        End If
-                        If blake3value1 IsNot Nothing AndAlso blake3value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.BLAKE3 AndAlso blake3value1.Length > 0 Then
-                            checksumlegal = False
-                        Else
-                            illegalinfo.AppendLine($"{f.fileuid} Blake3:{d.LTFSIndexDir.name}\{f.name} {blake3value1}")
-                        End If
-                        If xxhash3value1 IsNot Nothing AndAlso xxhash3value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.XxHash3 AndAlso xxhash3value1.Length > 0 Then
-                            checksumlegal = False
-                        Else
-                            illegalinfo.AppendLine($"{f.fileuid} XxHash3:{d.LTFSIndexDir.name}\{f.name} {xxhash3value1}")
-                        End If
-                        If xxhash128value1 IsNot Nothing AndAlso xxhash128value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.XxHash128 AndAlso xxhash128value1.Length > 0 Then
-                            checksumlegal = False
-                        Else
-                            illegalinfo.AppendLine($"{f.fileuid} XxHash128:{d.LTFSIndexDir.name}\{f.name} {xxhash128value1}")
-                        End If
-                        If checksumlegal Then
-                            Threading.Interlocked.Increment(fhash)
-                        ElseIf fprocessed - fhash <= 5 Then
-                            Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, illegalinfo.ToString()))
-                        End If
-                    Catch ex As Exception
-                        SetStatusLight(LWStatus.Err)
-                        PrintMsg(ex.ToString)
-                    End Try
-                Next
+                    Next
+                    f.openforwrite = False
+                    Threading.Interlocked.Increment(fprocessed)
+                    Dim checksumlegal As Boolean = True
+                    Dim illegalinfo As New StringBuilder
+                    Dim crc32value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.CRC32)
+                    Dim sha1value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA1)
+                    Dim sha256value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA256)
+                    Dim sha512value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.SHA512)
+                    Dim md5value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.MD5)
+                    Dim blake3value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.BLAKE3)
+                    Dim xxhash3value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.XxHash3)
+                    Dim xxhash128value1 As String = f.GetXAttr(ltfsindex.file.xattr.HashType.XxHash128)
+                    If crc32value1 IsNot Nothing AndAlso crc32value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.CRC32 AndAlso crc32value1.Length > 0 Then
+                        checksumlegal = False
+                    Else
+                        illegalinfo.AppendLine($"{f.fileuid} CRC32:{d.LTFSIndexDir.name}\{f.name} {crc32value1}")
+                    End If
+                    If sha1value1 IsNot Nothing AndAlso sha1value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.SHA1 AndAlso sha1value1.Length > 0 Then
+                        checksumlegal = False
+                    Else
+                        illegalinfo.AppendLine($"{f.fileuid} SHA1:{d.LTFSIndexDir.name}\{f.name} {sha1value1}")
+                    End If
+                    If sha256value1 IsNot Nothing AndAlso sha256value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.SHA256 AndAlso sha256value1.Length > 0 Then
+                        checksumlegal = False
+                    Else
+                        illegalinfo.AppendLine($"{f.fileuid} SHA256:{d.LTFSIndexDir.name}\{f.name} {sha256value1}")
+                    End If
+                    If sha512value1 IsNot Nothing AndAlso sha512value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.SHA512 AndAlso sha512value1.Length > 0 Then
+                        checksumlegal = False
+                    Else
+                        illegalinfo.AppendLine($"{f.fileuid} SHA512:{d.LTFSIndexDir.name}\{f.name} {sha512value1}")
+                    End If
+                    If md5value1 IsNot Nothing AndAlso md5value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.MD5 AndAlso md5value1.Length > 0 Then
+                        checksumlegal = False
+                    Else
+                        illegalinfo.AppendLine($"{f.fileuid} MD5:{d.LTFSIndexDir.name}\{f.name} {md5value1}")
+                    End If
+                    If blake3value1 IsNot Nothing AndAlso blake3value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.BLAKE3 AndAlso blake3value1.Length > 0 Then
+                        checksumlegal = False
+                    Else
+                        illegalinfo.AppendLine($"{f.fileuid} Blake3:{d.LTFSIndexDir.name}\{f.name} {blake3value1}")
+                    End If
+                    If xxhash3value1 IsNot Nothing AndAlso xxhash3value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.XxHash3 AndAlso xxhash3value1.Length > 0 Then
+                        checksumlegal = False
+                    Else
+                        illegalinfo.AppendLine($"{f.fileuid} XxHash3:{d.LTFSIndexDir.name}\{f.name} {xxhash3value1}")
+                    End If
+                    If xxhash128value1 IsNot Nothing AndAlso xxhash128value1.Length <> 2 * ltfsindex.file.xattr.HashLengthBytes.XxHash128 AndAlso xxhash128value1.Length > 0 Then
+                        checksumlegal = False
+                    Else
+                        illegalinfo.AppendLine($"{f.fileuid} XxHash128:{d.LTFSIndexDir.name}\{f.name} {xxhash128value1}")
+                    End If
+                    If checksumlegal Then
+                        Threading.Interlocked.Increment(fhash)
+                    ElseIf fprocessed - fhash <= 5 Then
+                        Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, illegalinfo.ToString()))
+                    End If
+                Catch ex As Exception
+                    SetStatusLight(LWStatus.Err)
+                    PrintMsg(ex.ToString)
+                End Try
+            Next
             For Each sd As ltfsindex.directory In d.LTFSIndexDir.EnumerateLazyDirectories()
                 Dim dlookup As ltfsindex.directory = d.LHash_Dir.FindDirectoryByName(sd.name)
                 If dlookup IsNot Nothing Then
@@ -10317,29 +10317,29 @@ Public Class LTFSWriter
                 FileInfo = New Fsp.Interop.FileInfo()
                 If TypeOf entry.Value Is ltfsindex.directory Then
                     With CType(entry.Value, ltfsindex.directory)
-                            FileInfo.FileAttributes = FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_OFFLINE Or FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_DIRECTORY
-                            FileInfo.ReparseTag = 0
-                            FileInfo.FileSize = 0
-                            FileInfo.AllocationSize = 0
-                            FileInfo.CreationTime = CULng(TapeUtils.ParseTimeStamp(.creationtime).ToFileTimeUtc)
-                            FileInfo.LastAccessTime = CULng(TapeUtils.ParseTimeStamp(.accesstime).ToFileTimeUtc)
-                            FileInfo.LastWriteTime = CULng(TapeUtils.ParseTimeStamp(.changetime).ToFileTimeUtc)
-                            FileInfo.ChangeTime = CULng(TapeUtils.ParseTimeStamp(.changetime).ToFileTimeUtc)
-                            FileInfo.IndexNumber = 0
-                            FileInfo.HardLinks = 0
+                        FileInfo.FileAttributes = FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_OFFLINE Or FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_DIRECTORY
+                        FileInfo.ReparseTag = 0
+                        FileInfo.FileSize = 0
+                        FileInfo.AllocationSize = 0
+                        FileInfo.CreationTime = CULng(TapeUtils.ParseTimeStamp(.creationtime).ToFileTimeUtc)
+                        FileInfo.LastAccessTime = CULng(TapeUtils.ParseTimeStamp(.accesstime).ToFileTimeUtc)
+                        FileInfo.LastWriteTime = CULng(TapeUtils.ParseTimeStamp(.changetime).ToFileTimeUtc)
+                        FileInfo.ChangeTime = CULng(TapeUtils.ParseTimeStamp(.changetime).ToFileTimeUtc)
+                        FileInfo.IndexNumber = 0
+                        FileInfo.HardLinks = 0
                     End With
                 ElseIf TypeOf entry.Value Is ltfsindex.file Then
                     With CType(entry.Value, ltfsindex.file)
-                            FileInfo.FileAttributes = FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_OFFLINE Or FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_ARCHIVE
-                            If .readonly Then FileInfo.FileAttributes = FileInfo.FileAttributes Or FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_READONLY
-                            FileInfo.ReparseTag = 0
-                            FileInfo.FileSize = CULng(.length)
-                            FileInfo.CreationTime = CULng(TapeUtils.ParseTimeStamp(.creationtime).ToFileTimeUtc)
-                            FileInfo.LastAccessTime = CULng(TapeUtils.ParseTimeStamp(.accesstime).ToFileTimeUtc)
-                            FileInfo.LastWriteTime = CULng(TapeUtils.ParseTimeStamp(.changetime).ToFileTimeUtc)
-                            FileInfo.ChangeTime = CULng(TapeUtils.ParseTimeStamp(.changetime).ToFileTimeUtc)
-                            FileInfo.IndexNumber = 0
-                            FileInfo.HardLinks = 0
+                        FileInfo.FileAttributes = FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_OFFLINE Or FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_ARCHIVE
+                        If .readonly Then FileInfo.FileAttributes = FileInfo.FileAttributes Or FileDesc.dwFilAttributesValue.FILE_ATTRIBUTE_READONLY
+                        FileInfo.ReparseTag = 0
+                        FileInfo.FileSize = CULng(.length)
+                        FileInfo.CreationTime = CULng(TapeUtils.ParseTimeStamp(.creationtime).ToFileTimeUtc)
+                        FileInfo.LastAccessTime = CULng(TapeUtils.ParseTimeStamp(.accesstime).ToFileTimeUtc)
+                        FileInfo.LastWriteTime = CULng(TapeUtils.ParseTimeStamp(.changetime).ToFileTimeUtc)
+                        FileInfo.ChangeTime = CULng(TapeUtils.ParseTimeStamp(.changetime).ToFileTimeUtc)
+                        FileInfo.IndexNumber = 0
+                        FileInfo.HardLinks = 0
                     End With
                 End If
                 Return True
@@ -11707,14 +11707,22 @@ Public Class LTFSWriter
         End If
     End Sub
 
-    Private Sub ReportSearchProgress(processed As Long, total As Long)
-        If Threading.Volatile.Read(_searchProgressActive) = 0 Then Return
+    Private Sub ReportSearchProgress(processed As Long, total As Long, Optional ForcedRetryOnly As Boolean = False)
+        Static _lastReportSearchProgress As (processed As Long, total As Long)
+        _lastReportSearchProgress = (processed, total)
+        If ForcedRetryOnly Then
+            processed = _lastReportSearchProgress.processed
+            total = _lastReportSearchProgress.total
+        End If
+        If (Not ForcedRetryOnly) AndAlso Threading.Volatile.Read(_searchProgressActive) = 0 Then Return
         If processed > 1 AndAlso processed < total AndAlso processed Mod 256 <> 0 Then Return
-
+        Static LastReport As Date
+        If (Not ForcedRetryOnly) AndAlso (Now - LastReport).TotalMilliseconds < 100 Then Return
+        LastReport = Now
         Dim value As Integer = GetSearchProgressValue(processed, total)
         Dim update As Action =
             Sub()
-                If Threading.Volatile.Read(_searchProgressActive) = 0 OrElse IsDisposed Then Return
+                If (Not ForcedRetryOnly) AndAlso (Threading.Volatile.Read(_searchProgressActive) = 0 OrElse IsDisposed) Then Return
                 ToolStripProgressBar1.Value = value
                 ToolStripProgressBar1.ToolTipText = $"Search {processed}/{total}"
                 ToolStripStatusLabel6.Text = $"Search {processed}/{total}"
@@ -11908,25 +11916,25 @@ Public Class LTFSWriter
             rootPath = _searchScopePath
         Else
             Dim selectedTreeNode As TreeNode = TreeView1.SelectedNode
-            If selectedTreeNode IsNot Nothing Then
-                searchRoot = TryCast(selectedTreeNode.Tag, ltfsindex.directory)
-                If searchRoot IsNot Nothing Then
-                    searchRootNode = selectedTreeNode
-                Else
-                    'Archive/file nodes can be selected in the tree.  Search from
-                    'their nearest LTFS directory instead of silently jumping to
-                    'the first root directory.
-                    Dim ancestor As TreeNode = selectedTreeNode.Parent
-                    While ancestor IsNot Nothing
-                        searchRoot = TryCast(ancestor.Tag, ltfsindex.directory)
-                        If searchRoot IsNot Nothing Then
-                            searchRootNode = ancestor
-                            Exit While
-                        End If
-                        ancestor = ancestor.Parent
-                    End While
-                End If
-            End If
+            'If selectedTreeNode IsNot Nothing Then
+            '    searchRoot = TryCast(selectedTreeNode.Tag, ltfsindex.directory)
+            '    If searchRoot IsNot Nothing Then
+            '        searchRootNode = selectedTreeNode
+            '    Else
+            '        'Archive/file nodes can be selected in the tree.  Search from
+            '        'their nearest LTFS directory instead of silently jumping to
+            '        'the first root directory.
+            '        Dim ancestor As TreeNode = selectedTreeNode.Parent
+            '        While ancestor IsNot Nothing
+            '            searchRoot = TryCast(ancestor.Tag, ltfsindex.directory)
+            '            If searchRoot IsNot Nothing Then
+            '                searchRootNode = ancestor
+            '                Exit While
+            '            End If
+            '            ancestor = ancestor.Parent
+            '        End While
+            '    End If
+            'End If
             If searchRoot Is Nothing AndAlso schema IsNot Nothing AndAlso
                schema._directory IsNot Nothing AndAlso schema._directory.Count > 0 Then
                 searchRoot = schema._directory(0)
@@ -12055,6 +12063,7 @@ Public Class LTFSWriter
                          End If
 
                          If hit IsNot Nothing Then
+                             ReportSearchProgress(0, 0, True)
                              Invoke(Sub()
                                         Try
                                             _searchLastHit = hit
