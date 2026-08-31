@@ -266,8 +266,10 @@ Public Class LTFSWriter
     Private _searchProgressActive As Integer
     Private Const DirectorySortProgressMaximum As Integer = 10000
     Private _directorySortProgressActive As Integer
-    Private _validationDisplayRefreshPending As Integer
-    Private _validationDisplayRefreshVersion As Long
+    Private _listDisplayRefreshPending As Integer
+    Private _listDisplayRefreshVersion As Long
+    Private ReadOnly _writeCompletionLock As New Object()
+    Private ReadOnly _completedWriteFiles As New HashSet(Of ltfsindex.file)
     Private ReadOnly _validationColorCacheLock As New Object()
     Private ReadOnly _validationColorCache As New Dictionary(Of Long, Dictionary(Of String, Color))
     Private _validationColorCacheSchema As ltfsindex
@@ -1080,7 +1082,7 @@ Public Class LTFSWriter
             End SyncLock
         End Sub
         Public Sub New()
-
+            File = New ltfsindex.file
         End Sub
         Public Sub New(Path As String, ParentDir As ltfsindex.directory)
             If Not Path.StartsWith("\\") Then Path = $"\\?\{Path}"
@@ -1524,6 +1526,26 @@ Public Class LTFSWriter
         End SyncLock
     End Sub
 
+    Private Sub ClearWriteCompletionState()
+        SyncLock _writeCompletionLock
+            _completedWriteFiles.Clear()
+        End SyncLock
+    End Sub
+
+    Private Sub MarkWriteFileCompleted(file As ltfsindex.file)
+        If file Is Nothing Then Return
+        SyncLock _writeCompletionLock
+            _completedWriteFiles.Add(file)
+        End SyncLock
+    End Sub
+
+    Private Function IsWriteFileCompleted(file As ltfsindex.file) As Boolean
+        If file Is Nothing Then Return False
+        SyncLock _writeCompletionLock
+            Return _completedWriteFiles.Contains(file)
+        End SyncLock
+    End Function
+
     Private Sub CommitWrittenFiles(records As IList(Of FileRecord))
         If records Is Nothing OrElse records.Count = 0 Then Return
 
@@ -1533,6 +1555,7 @@ Public Class LTFSWriter
         For Each record As FileRecord In records
             If record Is Nothing OrElse record.ParentDirectory Is Nothing OrElse record.File Is Nothing Then Continue For
             If Not seenFiles.Add(record.File) Then Continue For
+            MarkWriteFileCompleted(record.File)
             Dim files As List(Of ltfsindex.file) = Nothing
             If Not filesByDirectory.TryGetValue(record.ParentDirectory, files) Then
                 files = New List(Of ltfsindex.file)
@@ -1546,6 +1569,7 @@ Public Class LTFSWriter
             pair.Key.AddFiles(pair.Value)
         Next
         RemovePendingRecords(committedRecords)
+        RequestListDisplayRefresh()
     End Sub
 
     <TypeConverter(GetType(ExpandableObjectConverter))>
@@ -2316,6 +2340,7 @@ Public Class LTFSWriter
         Public Property ChildrenComplete As Boolean
         Public Property NextDirectoryIndex As Integer
         Public Property NextFileIndex As Integer
+        Public Property FileChildrenScanned As Boolean
         Public Property IsPlaceholder As Boolean
     End Class
 
@@ -2329,15 +2354,19 @@ Public Class LTFSWriter
                 nodeText = $"{$"{directory.TotalFiles.ToString}+{directory.TotalFilesUnwritten.ToString}".PadRight(6)}| {directory.name}"
             End If
         End If
-        'The tree shows directories; regular files are displayed in the
-        'list view and must not create an expandable placeholder here.
+        Dim directoryCount As Integer = directory.GetLazyDirectDirectoryCount()
+        Dim fileCount As Integer = directory.GetLazyDirectFileCount()
+        'Regular files are displayed in the list view.  Their metadata still
+        'has to be scanned on demand because archive/tarmeta files add virtual
+        'tree children.
         Return New WriterTreeNode With {
             .Text = nodeText,
             .Tag = directory,
             .ImageIndex = If(rootNode, 0, 1),
             .SelectedImageIndex = If(rootNode, 0, 1),
             .StateImageIndex = If(rootNode, 0, 1),
-            .ChildrenComplete = directory.GetLazyDirectDirectoryCount() = 0}
+            .ChildrenComplete = directoryCount = 0,
+            .FileChildrenScanned = fileCount = 0}
     End Function
 
     Private Function CreateArchiveTreeNode(file As ltfsindex.file) As TreeNode
@@ -2433,7 +2462,9 @@ Public Class LTFSWriter
 
     Private Sub LoadTreeNodeChildren(node As TreeNode)
         Dim writerNode As WriterTreeNode = TryCast(node, WriterTreeNode)
-        If writerNode Is Nothing OrElse writerNode.IsPlaceholder OrElse writerNode.ChildrenComplete Then Return
+        If writerNode Is Nothing OrElse writerNode.IsPlaceholder Then Return
+        If writerNode.ChildrenComplete AndAlso
+           (Not TypeOf node.Tag Is ltfsindex.directory OrElse writerNode.FileChildrenScanned) Then Return
 
         writerNode.ChildrenLoaded = True
         Dim manageUpdate As Boolean = Not _treeRefreshInProgress
@@ -2444,7 +2475,12 @@ Public Class LTFSWriter
                 Dim directory As ltfsindex.directory = DirectCast(node.Tag, ltfsindex.directory)
                 Dim directoryCount As Integer = directory.GetLazyDirectDirectoryCount()
                 Dim fileCount As Integer = directory.GetLazyDirectFileCount()
-                Dim remaining As Integer = WriterTreePageSize
+                'A file-only directory has no placeholder to expand.  Scan its
+                'files in this load so archive/tarmeta virtual children can be
+                'created without showing an ellipsis for ordinary files.
+                Dim remaining As Integer = If(directoryCount = 0 AndAlso Not writerNode.FileChildrenScanned,
+                                              Integer.MaxValue,
+                                              WriterTreePageSize)
 
                 While remaining > 0 AndAlso writerNode.NextDirectoryIndex < directoryCount
                     Dim childDirectory As ltfsindex.directory = directory.GetLazyDirectoryAt(writerNode.NextDirectoryIndex)
@@ -2491,8 +2527,9 @@ Public Class LTFSWriter
                     remaining -= 1
                 End While
 
+                writerNode.FileChildrenScanned = writerNode.NextFileIndex >= fileCount
                 writerNode.ChildrenComplete = writerNode.NextDirectoryIndex >= directoryCount AndAlso
-                                               writerNode.NextFileIndex >= fileCount
+                                               writerNode.FileChildrenScanned
                 If Not writerNode.ChildrenComplete Then AddUnloadedChildMarker(node)
             ElseIf TypeOf node.Tag Is TarVirtualDirectory Then
                 AddTarVirtualChildren(DirectCast(node.Tag, TarVirtualDirectory), node)
@@ -2635,15 +2672,15 @@ Public Class LTFSWriter
             End Sub)
     End Sub
 
-    Private Sub RequestValidationDisplayRefresh()
+    Private Sub RequestListDisplayRefresh()
         If IsDisposed OrElse Not IsHandleCreated Then Return
-        Threading.Interlocked.Increment(_validationDisplayRefreshVersion)
-        QueueValidationDisplayRefresh()
+        Threading.Interlocked.Increment(_listDisplayRefreshVersion)
+        QueueListDisplayRefresh()
     End Sub
 
-    Private Sub QueueValidationDisplayRefresh()
+    Private Sub QueueListDisplayRefresh()
         If IsDisposed OrElse Not IsHandleCreated Then Return
-        If Threading.Interlocked.Exchange(_validationDisplayRefreshPending, 1) <> 0 Then Return
+        If Threading.Interlocked.Exchange(_listDisplayRefreshPending, 1) <> 0 Then Return
 
         Try
             BeginInvoke(
@@ -2651,10 +2688,10 @@ Public Class LTFSWriter
                     Dim renderedVersion As Long = 0
                     Try
                         Do
-                            renderedVersion = Threading.Volatile.Read(_validationDisplayRefreshVersion)
-                            'Virtual list items cache both checksum values and their
-                            'colors.  Drop the cache before invalidating so a
-                            'completed validation work is visible immediately.
+                            renderedVersion = Threading.Volatile.Read(_listDisplayRefreshVersion)
+                            'Virtual list items cache both values and colors.  Drop
+                            'the cache before invalidating so completed work is
+                            'visible immediately.
                             _listItemCache.Clear()
                             _listItemCacheOrder.Clear()
                             Try
@@ -2672,18 +2709,18 @@ Public Class LTFSWriter
                             Catch ex As InvalidOperationException
                             Catch ex As ArgumentException
                             End Try
-                        Loop While renderedVersion <> Threading.Volatile.Read(_validationDisplayRefreshVersion)
+                        Loop While renderedVersion <> Threading.Volatile.Read(_listDisplayRefreshVersion)
                     Finally
-                        Threading.Interlocked.Exchange(_validationDisplayRefreshPending, 0)
-                        If renderedVersion <> Threading.Volatile.Read(_validationDisplayRefreshVersion) Then
-                            QueueValidationDisplayRefresh()
+                        Threading.Interlocked.Exchange(_listDisplayRefreshPending, 0)
+                        If renderedVersion <> Threading.Volatile.Read(_listDisplayRefreshVersion) Then
+                            QueueListDisplayRefresh()
                         End If
                     End Try
                 End Sub)
         Catch ex As ObjectDisposedException
-            Threading.Interlocked.Exchange(_validationDisplayRefreshPending, 0)
+            Threading.Interlocked.Exchange(_listDisplayRefreshPending, 0)
         Catch ex As InvalidOperationException
-            Threading.Interlocked.Exchange(_validationDisplayRefreshPending, 0)
+            Threading.Interlocked.Exchange(_listDisplayRefreshPending, 0)
         End Try
     End Sub
 
@@ -2877,7 +2914,8 @@ Public Class LTFSWriter
         For Each value As String In values
             item.SubItems.Add(If(value, String.Empty))
         Next
-        item.ForeColor = If(unwritten, Color.Gray, file.ItemForeColor)
+        Dim completedWrite As Boolean = unwritten AndAlso IsWriteFileCompleted(file)
+        item.ForeColor = If(unwritten AndAlso Not completedWrite, Color.Gray, file.ItemForeColor)
 
         If Not unwritten Then
             Dim columnIndex As Integer = 3 + If(ShowXAttr_Barcode, 1, 0)
@@ -2993,26 +3031,22 @@ Public Class LTFSWriter
             item = EnsureVirtualListViewItemColumns(_listRows(index).GetItem(Me))
         ElseIf _lazyListDirectory IsNot Nothing Then
             Dim lazyIndex As Integer = index - _listRows.Count
-            If _lazyListPendingDirectory IsNot Nothing Then
-                If lazyIndex < _lazyListPendingFileCount Then
-                    Dim pendingFile As ltfsindex.file = Nothing
-                    SyncLock _lazyListPendingDirectory.UnwrittenFiles
-                        If lazyIndex < _lazyListPendingDirectory.UnwrittenFiles.Count Then
-                            pendingFile = _lazyListPendingDirectory.UnwrittenFiles(lazyIndex)
-                        End If
-                    End SyncLock
-                    If pendingFile Is Nothing Then Return Nothing
-                    item = EnsureVirtualListViewItemColumns(New WriterListRow(WriterListRowKind.UnwrittenFile, pendingFile).GetItem(Me))
-                Else
-                    lazyIndex -= _lazyListPendingFileCount
-                    If lazyIndex < 0 OrElse lazyIndex >= _lazyListFileCount Then Return Nothing
-                    Dim file As ltfsindex.file = _lazyListDirectory.GetLazyFileAt(lazyIndex)
-                    item = EnsureVirtualListViewItemColumns(New WriterListRow(WriterListRowKind.File, file).GetItem(Me))
-                End If
-            Else
-                If lazyIndex < 0 OrElse lazyIndex >= _lazyListFileCount Then Return Nothing
+            If lazyIndex < _lazyListFileCount Then
                 Dim file As ltfsindex.file = _lazyListDirectory.GetLazyFileAt(lazyIndex)
                 item = EnsureVirtualListViewItemColumns(New WriterListRow(WriterListRowKind.File, file).GetItem(Me))
+            ElseIf _lazyListPendingDirectory IsNot Nothing Then
+                Dim pendingIndex As Integer = lazyIndex - _lazyListFileCount
+                If pendingIndex < 0 OrElse pendingIndex >= _lazyListPendingFileCount Then Return Nothing
+                Dim pendingFile As ltfsindex.file = Nothing
+                SyncLock _lazyListPendingDirectory.UnwrittenFiles
+                    If pendingIndex < _lazyListPendingDirectory.UnwrittenFiles.Count Then
+                        pendingFile = _lazyListPendingDirectory.UnwrittenFiles(pendingIndex)
+                    End If
+                End SyncLock
+                If pendingFile Is Nothing Then Return Nothing
+                item = EnsureVirtualListViewItemColumns(New WriterListRow(WriterListRowKind.UnwrittenFile, pendingFile).GetItem(Me))
+            Else
+                Return Nothing
             End If
         Else
             Return Nothing
@@ -3053,20 +3087,19 @@ Public Class LTFSWriter
 
         If _lazyListDirectory Is Nothing Then Return Nothing
         Dim lazyIndex As Integer = index - _listRows.Count
-        If _lazyListPendingDirectory IsNot Nothing Then
-            If lazyIndex < _lazyListPendingFileCount Then
-                SyncLock _lazyListPendingDirectory.UnwrittenFiles
-                    If lazyIndex < _lazyListPendingDirectory.UnwrittenFiles.Count Then
-                        Return _lazyListPendingDirectory.UnwrittenFiles(lazyIndex)
-                    End If
-                End SyncLock
-                Return Nothing
-            End If
-            lazyIndex -= _lazyListPendingFileCount
+        If lazyIndex < _lazyListFileCount Then
+            Return _lazyListDirectory.GetLazyFileAt(lazyIndex)
         End If
 
-        If lazyIndex < 0 OrElse lazyIndex >= _lazyListFileCount Then Return Nothing
-        Return _lazyListDirectory.GetLazyFileAt(lazyIndex)
+        If _lazyListPendingDirectory Is Nothing Then Return Nothing
+        Dim pendingIndex As Integer = lazyIndex - _lazyListFileCount
+        If pendingIndex < 0 OrElse pendingIndex >= _lazyListPendingFileCount Then Return Nothing
+        SyncLock _lazyListPendingDirectory.UnwrittenFiles
+            If pendingIndex < _lazyListPendingDirectory.UnwrittenFiles.Count Then
+                Return _lazyListPendingDirectory.UnwrittenFiles(pendingIndex)
+            End If
+        End SyncLock
+        Return Nothing
     End Function
 
     Private Sub SelectListViewIndex(index As Integer)
@@ -3257,6 +3290,12 @@ Public Class LTFSWriter
             Dim selectedTag As Object = TreeView1.SelectedNode.Tag
             If Not ForceRefresh AndAlso Object.ReferenceEquals(_lastListRefreshTag, selectedTag) Then Return
             _lastListRefreshTag = selectedTag
+
+            If TypeOf selectedTag Is ltfsindex.directory Then
+                'A directory containing only files has no tree placeholder, so
+                'load its file-backed virtual children when it is selected.
+                LoadTreeNodeChildren(TreeView1.SelectedNode)
+            End If
 
             ListView1.BeginUpdate()
             Dim old_select_index As Integer, old_node As Object = ListView1.Tag
@@ -3579,9 +3618,16 @@ Public Class LTFSWriter
 
         Return resultNodes
     End Function
+    Private Function IsUnindexedDataLimitReached(forceFlush As Boolean) As Boolean
+        Return (((IndexWriteInterval > 0) AndAlso (TotalBytesUnindexed >= IndexWriteInterval)) OrElse
+                (My.Settings.LTFSWriter_IndexWriteIntervalSeconds > 0 AndAlso
+                 (Now - IndexLastUpdateTime).TotalSeconds >= My.Settings.LTFSWriter_IndexWriteIntervalSeconds) OrElse
+                forceFlush)
+    End Function
+
     Public Function CheckUnindexedDataLimit(Optional ByVal ForceFlush As Boolean = False, Optional ByVal CheckOnly As Boolean = False) As Boolean
-        If CheckOnly Then Return ((IndexWriteInterval > 0) AndAlso (TotalBytesUnindexed >= IndexWriteInterval)) Or ForceFlush
-        If (((IndexWriteInterval > 0) AndAlso (TotalBytesUnindexed >= IndexWriteInterval)) OrElse (My.Settings.LTFSWriter_IndexWriteIntervalSeconds > 0 AndAlso (Now - IndexLastUpdateTime).TotalSeconds >= My.Settings.LTFSWriter_IndexWriteIntervalSeconds) OrElse ForceFlush) Then
+        If CheckOnly Then Return IsUnindexedDataLimitReached(ForceFlush)
+        If IsUnindexedDataLimitReached(ForceFlush) Then
             WriteCurrentIndex(False, False)
             IndexLastUpdateTime = Now
             TotalBytesUnindexed = 0
@@ -3668,7 +3714,13 @@ Public Class LTFSWriter
         schema.location.startblock = CurrentPos.BlockNumber
         PrintMsg(My.Resources.ResText_GI)
         Dim tmpf As String = LazySchemaStore.CreateTempFilePath("index-write")
-        schema.SaveFile(tmpf)
+        If Not schema.SaveFile(tmpf) Then
+            Try
+                If IO.File.Exists(tmpf) Then IO.File.Delete(tmpf)
+            Catch
+            End Try
+            Throw New IO.IOException("无法保存当前索引到临时文件。")
+        End If
         'Dim sdata As Byte() = Encoding.UTF8.GetBytes(schema.GetSerializedText())
         PrintMsg(My.Resources.ResText_WI)
         'TapeUtils.Write(TapeDrive, sdata, plabel.blocksize)
@@ -4129,6 +4181,36 @@ Public Class LTFSWriter
             Next
         End SyncLock
     End Sub
+
+    Private Function HasUnwrittenFilesInDirectoryTree(root As ltfsindex.directory) As Boolean
+        If root Is Nothing Then Return False
+
+        Dim directories As New HashSet(Of ltfsindex.directory)(DirectoryReferenceComparer.Instance)
+        Dim pending As New Stack(Of ltfsindex.directory)
+        pending.Push(root)
+        While pending.Count > 0
+            Dim current As ltfsindex.directory = pending.Pop()
+            If current Is Nothing OrElse Not directories.Add(current) Then Continue While
+            For Each child As ltfsindex.directory In current.EnumerateLazyDirectories()
+                If child IsNot Nothing Then pending.Push(child)
+            Next
+        End While
+
+        SyncLock _pendingQueueLock
+            If UnwrittenFiles IsNot Nothing Then
+                For Each record As FileRecord In UnwrittenFiles
+                    If record IsNot Nothing AndAlso directories.Contains(record.ParentDirectory) Then Return True
+                Next
+            End If
+            For Each directory As ltfsindex.directory In directories
+                If directory.UnwrittenFiles Is Nothing Then Continue For
+                SyncLock directory.UnwrittenFiles
+                    If directory.UnwrittenFiles.Count > 0 Then Return True
+                End SyncLock
+            Next
+        End SyncLock
+        Return False
+    End Function
 
     Public Sub DeleteDir()
         Dim Nodes As List(Of TreeNode) = SelectedNodes
@@ -5906,6 +5988,34 @@ Public Class LTFSWriter
         Return plans
     End Function
 
+    Private Sub ReleaseManagedWriteRecord(writeList As List(Of FileRecord),
+                                          index As Integer,
+                                          dedupeReferenceUseCount As Dictionary(Of Integer, Integer))
+        If writeList Is Nothing OrElse index < 0 OrElse index >= writeList.Count Then Return
+
+        Dim remainingReferences As Integer = 0
+        If dedupeReferenceUseCount IsNot Nothing AndAlso
+           dedupeReferenceUseCount.TryGetValue(index, remainingReferences) AndAlso
+           remainingReferences > 0 Then Return
+
+        writeList(index) = Nothing
+    End Sub
+
+    Private Sub ReleaseManagedDedupeReference(writeList As List(Of FileRecord),
+                                              index As Integer,
+                                              dedupeReferenceUseCount As Dictionary(Of Integer, Integer))
+        If dedupeReferenceUseCount Is Nothing OrElse index < 0 Then Return
+
+        Dim remainingReferences As Integer = 0
+        If Not dedupeReferenceUseCount.TryGetValue(index, remainingReferences) Then Return
+        If remainingReferences <= 1 Then
+            dedupeReferenceUseCount.Remove(index)
+            ReleaseManagedWriteRecord(writeList, index, dedupeReferenceUseCount)
+        Else
+            dedupeReferenceUseCount(index) = remainingReferences - 1
+        End If
+    End Sub
+
     Private Sub WaitForFastReaderRefill(fastProvider As RustFastReaderProvider)
         If Not My.Settings.LTFSWriter_WaitOnBufferEmpty OrElse StopFlag Then
             PipePause = False
@@ -6356,6 +6466,7 @@ Public Class LTFSWriter
             Sub()
                 Dim OnWriteFinishMessage As String = ""
                 Try
+                    ClearWriteCompletionState()
                     SetStatusLight(LWStatus.Busy)
                     StartTime = Now
                     PipePause = False
@@ -6506,6 +6617,17 @@ Public Class LTFSWriter
                         Dim existingFiles As IEnumerable(Of ltfsindex.file) = Enumerable.Empty(Of ltfsindex.file)()
                         If My.Settings.LTFSWriter_DeDupe Then existingFiles = EnumerateSchemaFiles()
                         Dim writePlan = BuildWritePlan(WriteList, existingFiles, useFastReader, fastProvider)
+                        Dim dedupeReferenceUseCount As New Dictionary(Of Integer, Integer)
+                        If Not useFastReader Then
+                            For planIndex As Integer = 0 To writePlan.Count - 1
+                                Dim referenceIndex As Integer = writePlan(planIndex).NewReferenceIndex
+                                If referenceIndex >= 0 Then
+                                    Dim referenceCount As Integer = 0
+                                    dedupeReferenceUseCount.TryGetValue(referenceIndex, referenceCount)
+                                    dedupeReferenceUseCount(referenceIndex) = referenceCount + 1
+                                End If
+                            Next
+                        End If
                         If useFastReader Then
                             Dim orderedDataFiles = Enumerable.Range(0, writePlan.Count).
                                 Where(Function(index) writePlan(index).Kind = PlannedWriteKind.DataPartitionMaterial).
@@ -6534,7 +6656,7 @@ Public Class LTFSWriter
                             'End If
                             Dim fr As FileRecord = WriteList(i)
                             Try
-                                If fr.File Is Nothing Then Continue For
+                                If fr Is Nothing OrElse fr.File Is Nothing Then Continue For
                                 fr.File.fileuid = schema.highestfileuid + 1
                                 schema.highestfileuid += 1
                                 Dim currentPlan = writePlan(i)
@@ -6573,7 +6695,11 @@ Public Class LTFSWriter
                                         'schema in memory.
                                         Dim dupeFile As ltfsindex.file = OpenPlannedExistingReference(currentPlan)
                                         If dupeFile Is Nothing AndAlso currentPlan.NewReferenceIndex >= 0 Then
-                                            dupeFile = WriteList(currentPlan.NewReferenceIndex).File
+                                            Dim referenceRecord As FileRecord = Nothing
+                                            If currentPlan.NewReferenceIndex < WriteList.Count Then
+                                                referenceRecord = WriteList(currentPlan.NewReferenceIndex)
+                                            End If
+                                            If referenceRecord IsNot Nothing Then dupeFile = referenceRecord.File
                                             If dupeFile Is Nothing OrElse dupeFile.extentinfo Is Nothing OrElse dupeFile.extentinfo.Count = 0 Then
                                                 Throw New IO.IOException($"Dedupe reference was not written successfully: {fr.SourcePath}")
                                             End If
@@ -6587,9 +6713,12 @@ Public Class LTFSWriter
                                         fr.File.extentinfo.Clear()
                                         For Each ext As ltfsindex.file.extent In dupeFile.extentinfo
                                             fr.File.extentinfo.Add(ext)
-                                        Next
-                                        fr.File.MarkLazyRecordDirty()
-                                        If fr.fs IsNot Nothing Then fr.Close()
+                                         Next
+                                         fr.File.MarkLazyRecordDirty()
+                                         If currentPlan.NewReferenceIndex >= 0 Then
+                                             ReleaseManagedDedupeReference(WriteList, currentPlan.NewReferenceIndex, dedupeReferenceUseCount)
+                                         End If
+                                         If fr.fs IsNot Nothing Then fr.Close()
                                         PrintMsg($"{My.Resources.ResText_Skip} {fr.File.name}  {My.Resources.ResText_Size} {IOManager.FormatSize(fr.File.length)}", False,
                                                  $"{My.Resources.ResText_Skip}: {fr.SourcePath}{vbCrLf}{My.Resources.ResText_Size}: {IOManager.FormatSize(fr.File.length)}{vbCrLf _
                                                  }{My.Resources.ResText_WrittenTotal}: {IOManager.FormatSize(TotalBytesProcessed) _
@@ -6631,7 +6760,12 @@ Public Class LTFSWriter
                                             End Select
                                             fileextent.partition = CType(IndexPartition, ltfsindex.PartitionLabel)
                                             Dim IsFirstFile As Boolean = (i <= 0 OrElse p.PartitionNumber = DataPartition)
-                                            Dim IsLastFile As Boolean = (i >= WriteList.Count - 1 OrElse (WriteList(i + 1).File.extentinfo Is Nothing) OrElse (WriteList(i + 1).File.extentinfo.Count = 0) OrElse WriteList(i + 1).File.extentinfo(0).partition = DataPartition)
+                                            Dim nextRecord As FileRecord = Nothing
+                                            If i < WriteList.Count - 1 Then nextRecord = WriteList(i + 1)
+                                            Dim IsLastFile As Boolean = (nextRecord Is Nothing OrElse nextRecord.File Is Nothing OrElse
+                                                                         nextRecord.File.extentinfo Is Nothing OrElse
+                                                                         nextRecord.File.extentinfo.Count = 0 OrElse
+                                                                         nextRecord.File.extentinfo(0).partition = DataPartition)
                                             fileextent.startblock = DumpDataToIndexPartition(fr.fs, False, IsFirstFile, IsLastFile, tarDataRead)
                                             fr.Close()
                                             If IsLastFile Then TapeUtils.Locate(driveHandle, lastpos.BlockNumber, lastpos.PartitionNumber)
@@ -7142,7 +7276,12 @@ Public Class LTFSWriter
                                 'Commit several completed files together.  The
                                 'lazy schema store can then update one mutation
                                 'and propagate one aggregate count per parent.
+                                MarkWriteFileCompleted(fr.File)
                                 completedWriteRecords.Add(fr)
+                                If Not useFastReader Then
+                                    ReleaseManagedWriteRecord(WriteList, i, dedupeReferenceUseCount)
+                                End If
+                                RequestListDisplayRefresh()
                                 Dim extentCount As Integer = If(fr.File.extentinfo Is Nothing, 0, fr.File.extentinfo.Count)
                                 Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSWriter))
                                     Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Writer")
@@ -7163,11 +7302,23 @@ Public Class LTFSWriter
                                     End Using
                                 End Using
                                 If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
-                                If (Not IsIndexPartition) AndAlso CheckUnindexedDataLimit() Then
-                                    p = New TapeUtils.PositionData(driveHandle)
-                                    lastpos = New TapeUtils.PositionData(driveHandle)
-                                    CurrentHeight = CLng(p.BlockNumber)
-                                    SetStatusLight(LWStatus.Busy)
+                                If (Not IsIndexPartition) AndAlso IsUnindexedDataLimitReached(False) Then
+                                    'The checkpoint serializer only sees files that
+                                    'are already attached to the schema.  Finish
+                                    'hash workers and commit this batch before the
+                                    'index is emitted, otherwise a crash/reload can
+                                    'lose files that are already on tape.
+                                    While HashTaskAwaitNumber > 0
+                                        Threading.Thread.Sleep(1)
+                                    End While
+                                    CommitWrittenFiles(completedWriteRecords)
+                                    completedWriteRecords.Clear()
+                                    If CheckUnindexedDataLimit() Then
+                                        p = New TapeUtils.PositionData(driveHandle)
+                                        lastpos = New TapeUtils.PositionData(driveHandle)
+                                        CurrentHeight = CLng(p.BlockNumber)
+                                        SetStatusLight(LWStatus.Busy)
+                                    End If
                                 End If
                                 If CapacityRefreshInterval > 0 AndAlso (Now - LastRefresh).TotalSeconds > CapacityRefreshInterval Then
                                     p = New TapeUtils.PositionData(driveHandle)
@@ -7364,6 +7515,7 @@ Public Class LTFSWriter
                 End If
                 LockGUI(False)
                 RefreshDisplay()
+                ClearWriteCompletionState()
                 RefreshCapacity()
                 Invoke(Sub()
                            If Not StopFlag AndAlso WA0ToolStripMenuItem.Checked AndAlso MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_WFUp, My.Resources.ResText_OpSucc, MessageBoxButtons.OKCancel) = DialogResult.OK Then
@@ -9679,7 +9831,7 @@ Public Class LTFSWriter
                         MarkValidationProgress(member.File, True, bytesAlreadyReported:=True)
                         completedRecords.Add(member)
                     Next
-                    RequestValidationDisplayRefresh()
+                    RequestListDisplayRefresh()
                 End Sub
             CalculateChecksumsWithPlan(works, reportWorkCompleted)
 
@@ -9698,7 +9850,7 @@ Public Class LTFSWriter
                     If progressContext IsNot Nothing Then progressContext.ErrorCount = errorCount
                     MarkValidationProgress(fr.File, True, bytesAlreadyReported:=True)
                     completedRecords.Add(fr)
-                    RequestValidationDisplayRefresh()
+                    RequestListDisplayRefresh()
                 Else
                     MarkValidationProgress(fr.File, False)
                 End If
@@ -9722,7 +9874,7 @@ Public Class LTFSWriter
             Else
                 progressContext.ProcessedFiles = fileCount
                 progressContext.ErrorCount = errorCount
-                RequestValidationDisplayRefresh()
+                RequestListDisplayRefresh()
             End If
             If clearStopFlag Then StopFlag = False
             If progressContext Is Nothing Then SetStatusLight(LWStatus.Idle)
@@ -10136,6 +10288,88 @@ Public Class LTFSWriter
         文件缓存32MiBToolStripMenuItem.Text = $"文件缓存：{IOManager.FormatSize(My.Settings.LTFSWriter_PreLoadBytes)}"
     End Sub
 
+    Private Shared Sub ApplyFileDetailsEdit(target As ltfsindex.file, edited As ltfsindex.file)
+        If target Is Nothing OrElse edited Is Nothing Then Return
+
+        'PropertyGrid edits nested xattr/extent objects in place.  Use a second
+        'copy here so Cancel never mutates the live lazy record, then replace the
+        'collections as a whole when the user accepts the dialog.
+        Dim snapshot As ltfsindex.file = edited.GetCopy(edited.fileuid)
+        target.name = snapshot.name
+        target.length = snapshot.length
+        target.readonly = snapshot.readonly
+        target.openforwrite = snapshot.openforwrite
+        target.creationtime = snapshot.creationtime
+        target.changetime = snapshot.changetime
+        target.modifytime = snapshot.modifytime
+        target.accesstime = snapshot.accesstime
+        target.backuptime = snapshot.backuptime
+        target.fileuid = snapshot.fileuid
+        target.symlink = snapshot.symlink
+        target.extendedattributes = snapshot.extendedattributes
+        target.extentinfo = snapshot.extentinfo
+        target.MarkLazyRecordDirty()
+    End Sub
+
+    Private Shared Function CreateDirectoryDetailsEdit(source As ltfsindex.directory) As ltfsindex.directory
+        If source Is Nothing Then Return Nothing
+        Return New ltfsindex.directory With {
+            .name = source.name,
+            .readonly = source.readonly,
+            .creationtime = source.creationtime,
+            .changetime = source.changetime,
+            .modifytime = source.modifytime,
+            .accesstime = source.accesstime,
+            .backuptime = source.backuptime,
+            .fileuid = source.fileuid}
+    End Function
+
+    Private Shared Sub ApplyDirectoryDetailsEdit(target As ltfsindex.directory, edited As ltfsindex.directory)
+        If target Is Nothing OrElse edited Is Nothing Then Return
+        target.name = edited.name
+        target.readonly = edited.readonly
+        target.creationtime = edited.creationtime
+        target.changetime = edited.changetime
+        target.modifytime = edited.modifytime
+        target.accesstime = edited.accesstime
+        target.backuptime = edited.backuptime
+        target.fileuid = edited.fileuid
+    End Sub
+
+    Private Function IsPendingFile(directory As ltfsindex.directory, file As ltfsindex.file) As Boolean
+        If directory Is Nothing OrElse file Is Nothing Then Return False
+        SyncLock _pendingQueueLock
+            If UnwrittenFiles IsNot Nothing Then
+                For Each record As FileRecord In UnwrittenFiles
+                    If record IsNot Nothing AndAlso record.ParentDirectory Is directory AndAlso record.File Is file Then Return True
+                Next
+            End If
+            If directory.UnwrittenFiles IsNot Nothing Then
+                SyncLock directory.UnwrittenFiles
+                    Return directory.UnwrittenFiles.Contains(file)
+                End SyncLock
+            End If
+        End SyncLock
+        Return False
+    End Function
+
+    Private Sub SynchronizePendingFileEdit(directory As ltfsindex.directory,
+                                            file As ltfsindex.file,
+                                            previousLength As Long)
+        If directory Is Nothing OrElse file Is Nothing Then Return
+        SyncLock _pendingQueueLock
+            If UnwrittenFiles Is Nothing Then Return
+            For Each record As FileRecord In UnwrittenFiles
+                If record IsNot Nothing AndAlso record.ParentDirectory Is directory AndAlso record.File Is file Then
+                    _pendingSize += file.length - previousLength
+                    RemovePendingIndexUnsafe(record)
+                    RegisterPendingRecordUnsafe(record)
+                    Exit For
+                End If
+            Next
+        End SyncLock
+    End Sub
+
     Private Sub 文件详情ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 文件详情ToolStripMenuItem.Click
         Dim result As New StringBuilder
         Dim selectedItems As List(Of ListViewItem) = GetSelectedListViewItems()
@@ -10150,19 +10384,33 @@ Public Class LTFSWriter
                     Next
                     MessageBox.Show(New Form With {.TopMost = True}, result.ToString)
                 Else
+                    Dim selectedFile As ltfsindex.file = TryCast(selectedItems(0).Tag, ltfsindex.file)
+                    If selectedFile Is Nothing Then Exit Sub
+                    Dim selectedDirectory As ltfsindex.directory = TryCast(ListView1.Tag, ltfsindex.directory)
+                    Dim previousLength As Long = selectedFile.length
+                    Dim wasPending As Boolean = IsPendingFile(selectedDirectory, selectedFile)
+                    Dim editableFile As ltfsindex.file = selectedFile.GetCopy(selectedFile.fileuid)
                     Dim PG1 As New SettingPanel
-                    PG1.PropertyGrid1.SelectedObject = CType(selectedItems(0).Tag, ltfsindex.file)
-                    PG1.Text = $"{TextBoxSelectedPath.Text}\{ CType(selectedItems(0).Tag, ltfsindex.file).name}"
+                    PG1.PropertyGrid1.SelectedObject = editableFile
+                    PG1.Text = $"{TextBoxSelectedPath.Text}\{selectedFile.name}"
                     If PG1.ShowDialog() = DialogResult.OK Then
+                        ApplyFileDetailsEdit(selectedFile, editableFile)
+                        If wasPending Then SynchronizePendingFileEdit(selectedDirectory, selectedFile, previousLength)
                         If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
+                        RequestListDisplayRefresh()
                     End If
                 End If
             Else
+                Dim selectedDirectory As ltfsindex.directory = TryCast(ListView1.Tag, ltfsindex.directory)
+                If selectedDirectory Is Nothing Then Exit Sub
+                Dim editableDirectory As ltfsindex.directory = CreateDirectoryDetailsEdit(selectedDirectory)
                 Dim PG1 As New SettingPanel
-                PG1.PropertyGrid1.SelectedObject = CType(ListView1.Tag, ltfsindex.directory)
-                PG1.Text = $"{TextBoxSelectedPath.Text}\{ CType(ListView1.Tag, ltfsindex.directory).name}"
+                PG1.PropertyGrid1.SelectedObject = editableDirectory
+                PG1.Text = $"{TextBoxSelectedPath.Text}\{selectedDirectory.name}"
                 If PG1.ShowDialog() = DialogResult.OK Then
+                    ApplyDirectoryDetailsEdit(selectedDirectory, editableDirectory)
                     If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
+                    RefreshDisplay()
                 End If
             End If
         End If
@@ -10804,17 +11052,35 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 压缩索引ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 压缩索引ToolStripMenuItem.Click
-        If TreeView1.SelectedNode IsNot Nothing AndAlso TypeOf TreeView1.SelectedNode.Tag Is ltfsindex.directory Then
-            LockGUI(True)
+        If TreeView1.SelectedNode IsNot Nothing AndAlso
+           TypeOf TreeView1.SelectedNode.Tag Is ltfsindex.directory AndAlso
+           TreeView1.SelectedNode.Parent IsNot Nothing AndAlso
+           TypeOf TreeView1.SelectedNode.Parent.Tag Is ltfsindex.directory Then
             Dim d As ltfsindex.directory = DirectCast(TreeView1.SelectedNode.Tag, ltfsindex.directory)
             Dim p As ltfsindex.directory = DirectCast(TreeView1.SelectedNode.Parent.Tag, ltfsindex.directory)
+            If HasUnwrittenFilesInDirectoryTree(d) Then
+                MessageBox.Show(New Form With {.TopMost = True},
+                                "当前目录或子目录存在尚未写入的文件，请先完成写入后再压缩索引。",
+                                My.Resources.ResText_Warning)
+                Exit Sub
+            End If
+
+            LockGUI(True)
             Task.Run(Sub()
-                         Dim tmpf As String = LazySchemaStore.CreateTempFilePath("index-compress")
-                         d.SaveFile(tmpf)
-                         Dim ms As New IO.FileStream(tmpf, IO.FileMode.Open)
-                         TapeUtils.ReserveUnit(driveHandle)
-                         TapeUtils.PreventMediaRemoval(driveHandle)
-                         If Not LocateToWritePosition() Then Exit Sub
+                         Dim tmpf As String = Nothing
+                         Dim ms As IO.FileStream = Nothing
+                         Dim wBufferPtr As IntPtr = IntPtr.Zero
+                         Dim unitReserved As Boolean = False
+                         Dim mediumRemovalPrevented As Boolean = False
+                         Try
+                             tmpf = LazySchemaStore.CreateTempFilePath("index-compress")
+                             If Not d.SaveFile(tmpf) Then Throw New InvalidOperationException("无法生成压缩索引临时文件。")
+                             ms = New IO.FileStream(tmpf, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read)
+                             TapeUtils.ReserveUnit(driveHandle)
+                             unitReserved = True
+                             TapeUtils.PreventMediaRemoval(driveHandle)
+                             mediumRemovalPrevented = True
+                             If Not LocateToWritePosition() Then Exit Sub
                          Dim pos As New TapeUtils.PositionData(driveHandle)
                          Dim fadd As New ltfsindex.file With {.name = d.name,
                                  .accesstime = d.accesstime,
@@ -10829,14 +11095,13 @@ Public Class LTFSWriter
                                  .bytecount = ms.Length,
                                  .startblock = CLng(pos.BlockNumber),
                                  .byteoffset = 0,
-                                 .fileoffset = 0,
-                                 .partition = CType(pos.PartitionNumber, ltfsindex.PartitionLabel)}
-                                 }.ToList()}
-                         p.AddFile(fadd)
+                                  .fileoffset = 0,
+                                  .partition = CType(pos.PartitionNumber, ltfsindex.PartitionLabel)}
+                                  }.ToList()}
 
                          Dim LastWriteTask As Task = Nothing
                          Dim ExitWhileFlag As Boolean = False
-                         Dim wBufferPtr As IntPtr = Marshal.AllocHGlobal(plabel.blocksize)
+                         wBufferPtr = Marshal.AllocHGlobal(plabel.blocksize)
                          Dim sh As New IOManager.CheckSumBlockwiseCalculator
                          While Not StopFlag
                              Dim buffer(plabel.blocksize - 1) As Byte
@@ -10921,39 +11186,79 @@ Public Class LTFSWriter
                                  TotalBytesProcessed += BytesReaded
                                  CurrentBytesProcessed += BytesReaded
                                  TotalBytesUnindexed += BytesReaded
-                             Else
-                                 ExitWhileFlag = True
-                             End If
-                         End While
-                         sh.ProcessFinalBlock()
+                          Else
+                              ExitWhileFlag = True
+                          End If
+                      End While
+                          If StopFlag Then Exit Sub
+                          sh.ProcessFinalBlock()
                          If sh.SHA1Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.SHA1, sh.SHA1Value)
                          If sh.MD5Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.MD5, sh.MD5Value)
                          If sh.BlakeValue IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, sh.BlakeValue)
-                         If sh.XXHash3Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, sh.XXHash3Value)
-                         If sh.XXHash128Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, sh.XXHash128Value)
-                         If LastWriteTask IsNot Nothing Then LastWriteTask.Wait()
-                         schema.highestfileuid += 1
-                         p.RemoveDirectory(d)
-                         ms.Close()
-                         IO.File.Delete(tmpf)
-                         TotalFilesProcessed += 1
-                         CurrentFilesProcessed += 1
-                         Marshal.FreeHGlobal(wBufferPtr)
-                         If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
+                          If sh.XXHash3Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, sh.XXHash3Value)
+                          If sh.XXHash128Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, sh.XXHash128Value)
+                          If LastWriteTask IsNot Nothing Then LastWriteTask.Wait()
+                          'Do not expose the archive in the schema until every
+                          'byte has been written successfully.  If the write
+                          'fails, the original directory remains reachable.
+                          p.AddFile(fadd)
+                          schema.highestfileuid += 1
+                          p.RemoveDirectory(d)
+                          TotalFilesProcessed += 1
+                          CurrentFilesProcessed += 1
+                          If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
                          pos = GetPos
                          If pos.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
                          PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
-                         CurrentHeight = CLng(pos.BlockNumber)
-                         Invoke(Sub() 更新数据区索引ToolStripMenuItem.Enabled = True)
-                         SetStatusLight(LWStatus.Succ)
-                         TapeUtils.Flush(driveHandle)
-                         TapeUtils.ReleaseUnit(driveHandle)
-                         TapeUtils.AllowMediumRemoval(driveHandle)
-                         Invoke(Sub() TreeView1.SelectedNode = TreeView1.SelectedNode.Parent)
-                         RefreshDisplay()
-                         RefreshCapacity()
-                         LockGUI(False)
-                     End Sub)
+                          CurrentHeight = CLng(pos.BlockNumber)
+                          Invoke(Sub() 更新数据区索引ToolStripMenuItem.Enabled = True)
+                          SetStatusLight(LWStatus.Succ)
+                          TapeUtils.Flush(driveHandle)
+                           Invoke(Sub() TreeView1.SelectedNode = TreeView1.SelectedNode.Parent)
+                          RefreshDisplay()
+                          RefreshCapacity()
+                          Modified = True
+                         Catch ex As Exception
+                             SetStatusLight(LWStatus.Err)
+                             PrintMsg($"压缩索引出错：{ex.Message}{vbCrLf}{ex.StackTrace}", ForceLog:=True)
+                             Try
+                                 Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"压缩索引出错：{ex}", My.Resources.ResText_Warning))
+                             Catch
+                             End Try
+                         Finally
+                             If wBufferPtr <> IntPtr.Zero Then
+                                 Try
+                                     Marshal.FreeHGlobal(wBufferPtr)
+                                 Catch
+                                 End Try
+                             End If
+                             If ms IsNot Nothing Then
+                                 Try
+                                     ms.Dispose()
+                                 Catch
+                                 End Try
+                             End If
+                             If Not String.IsNullOrEmpty(tmpf) Then
+                                 Try
+                                     If IO.File.Exists(tmpf) Then IO.File.Delete(tmpf)
+                                 Catch
+                                 End Try
+                             End If
+                             If mediumRemovalPrevented Then
+                                 Try
+                                     TapeUtils.AllowMediumRemoval(driveHandle)
+                                 Catch
+                                 End Try
+                             End If
+                             If unitReserved Then
+                                 Try
+                                     TapeUtils.ReleaseUnit(driveHandle)
+                                 Catch
+                                 End Try
+                             End If
+                             LockGUI(False)
+                         End Try
+                      End Sub)
         End If
     End Sub
 
@@ -11330,9 +11635,6 @@ Public Class LTFSWriter
 
     Private Sub 新建压缩文件ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 新建压缩文件ToolStripMenuItem.Click
         If ListView1.Tag IsNot Nothing Then
-            Dim dirname As String = SelectWriterFolder()
-            If String.IsNullOrEmpty(dirname) Then Exit Sub
-
             Dim th As New Threading.Thread(
             Sub()
                 Dim OnWriteFinishMessage As String = ""
@@ -11361,7 +11663,19 @@ Public Class LTFSWriter
                         Dim p As New TapeUtils.PositionData(driveHandle)
                         TapeUtils.SetBlockSize(driveHandle, plabel.blocksize)
                         Try
-                            Dim fr As New FileRecord
+                            Dim fr As FileRecord = Nothing
+                            SyncLock _pendingQueueLock
+                                If UnwrittenFiles IsNot Nothing Then
+                                    For Each candidate As FileRecord In UnwrittenFiles
+                                        If candidate IsNot Nothing AndAlso candidate.File IsNot Nothing AndAlso
+                                           Not String.IsNullOrWhiteSpace(candidate.SourcePath) Then
+                                            fr = candidate
+                                            Exit For
+                                        End If
+                                    Next
+                                End If
+                            End SyncLock
+                            If fr Is Nothing Then Throw New InvalidOperationException("找不到有效的待写文件记录。")
                             fr.File.fileuid = schema.highestfileuid + 1
                             schema.highestfileuid += 1
                             Dim fileextent As New ltfsindex.file.extent With
@@ -11585,7 +11899,6 @@ Public Class LTFSWriter
                         Threading.Thread.Sleep(0)
                         SyncLock UFReadCount
                             If UFReadCount > 0 Then Continue While
-                            ClearGlobalPendingQueue()
                             UnwrittenSizeOverrideValue = 0
                             UnwrittenCountOverrideValue = 0
                             CurrentFilesProcessed = 0
@@ -11718,11 +12031,14 @@ Public Class LTFSWriter
         If TreeView1.SelectedNode IsNot Nothing Then
             If TypeOf TreeView1.SelectedNode.Tag IsNot ltfsindex.directory Then Exit Sub
             Dim d As ltfsindex.directory = DirectCast(TreeView1.SelectedNode.Tag, ltfsindex.directory)
+            Dim editableDirectory As ltfsindex.directory = CreateDirectoryDetailsEdit(d)
             Dim PG1 As New SettingPanel
-            PG1.PropertyGrid1.SelectedObject = d
+            PG1.PropertyGrid1.SelectedObject = editableDirectory
             PG1.Text = TextBoxSelectedPath.Text
             If PG1.ShowDialog() = DialogResult.OK Then
+                ApplyDirectoryDetailsEdit(d, editableDirectory)
                 If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
+                RefreshDisplay()
             End If
         End If
     End Sub
@@ -11942,15 +12258,15 @@ Public Class LTFSWriter
         Next
 
         If _lazyListDirectory Is Nothing OrElse Not SameDirectoryRecord(_lazyListDirectory, directory) Then Return -1
-        'Lazy rows put unwritten files before persisted files.  The search
+        'Lazy rows put persisted files before unwritten files.  The search
         'entry already knows the persisted file's direct index, so avoid
-        'walking the whole directory on the UI thread and account for that
-        'prefix when selecting the virtual row.
+        'walking the whole directory on the UI thread and account for the
+        'persisted rows when selecting the virtual row.
         If directFileIndex >= 0 AndAlso directFileIndex < _lazyListFileCount Then
-            Return _listRows.Count + _lazyListPendingFileCount + directFileIndex
+            Return _listRows.Count + directFileIndex
         End If
 
-        Dim baseIndex As Integer = _listRows.Count + _lazyListPendingFileCount
+        Dim baseIndex As Integer = _listRows.Count
         Dim directIndex As Integer = 0
         For Each candidate As ltfsindex.file In directory.EnumerateLazyFiles()
             If SameFileRecord(candidate, target) Then Return baseIndex + directIndex
@@ -13420,6 +13736,7 @@ Public Class LTFSWriter
         LockGUI(True)
         Dim d As ltfsindex.directory = DirectCast(TreeView1.SelectedNode.Tag, ltfsindex.directory)
         Task.Run(Sub()
+                     ClearWriteCompletionState()
                      SetStatusLight(LWStatus.Busy)
                      StartTime = Now
                      PipePause = False
@@ -13801,6 +14118,8 @@ Public Class LTFSWriter
 
 
                          'mark as written
+                         MarkWriteFileCompleted(newfile)
+                         RequestListDisplayRefresh()
                          d.AddFile(newfile)
                          d.UnwrittenFiles.Remove(newfile)
                          If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
@@ -13889,6 +14208,7 @@ Public Class LTFSWriter
                      End If
                      LockGUI(False)
                      RefreshDisplay()
+                     ClearWriteCompletionState()
                      RefreshCapacity()
                      Invoke(Sub()
                                 If Not StopFlag AndAlso WA0ToolStripMenuItem.Checked AndAlso MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_WFUp, My.Resources.ResText_OpSucc, MessageBoxButtons.OKCancel) = DialogResult.OK Then

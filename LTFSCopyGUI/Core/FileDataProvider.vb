@@ -78,10 +78,12 @@ Public Class FileDataProvider
                    Optional smallCacheCapacity As Integer = 1000,
                    Optional requireSignal As Boolean = False)
 
-        'The writer already owns a stable indexed plan.  Keep that list by
-        'reference; copying several million FileRecord references here creates
-        'another large peak without improving provider safety.
-        _writeList = writeList
+        If writeList Is Nothing Then Throw New ArgumentNullException(NameOf(writeList))
+
+        'Keep a private shallow copy.  The provider may release slots as it
+        'advances, while the writer must keep its indexed plan stable until
+        'each corresponding record has been consumed.
+        _writeList = New List(Of LTFSWriter.FileRecord)(writeList)
         _smallThreshold = Math.Max(1, smallThresholdBytes)
         _smallCacheCapacity = Math.Max(1, smallCacheCapacity)
         _requireSignal = requireSignal
@@ -238,7 +240,20 @@ Public Class FileDataProvider
                 End If
                 _current = fr
 
-                Dim isSmallFile = fr IsNot Nothing AndAlso fr.File IsNot Nothing AndAlso fr.File.length < _smallThreshold AndAlso fr.FileOffset = 0 AndAlso fr.File.length = fr.SegmentLength
+                If fr Is Nothing OrElse fr.File Is Nothing Then
+                    Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileDataProvider))
+                        Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileProvider")
+                            Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
+                                Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "FileRead")
+                                    Log.Warning("File data provider skipped an invalid FileRecord. FileIndex={FileIndex}.", nextIdx)
+                                End Using
+                            End Using
+                        End Using
+                    End Using
+                    Continue While
+                End If
+
+                Dim isSmallFile = fr.File.length < _smallThreshold AndAlso fr.FileOffset = 0 AndAlso fr.File.length = fr.SegmentLength
                 Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileDataProvider))
                     Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileProvider")
                         Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
@@ -519,7 +534,7 @@ Public Class FileDataProvider
         Try
             For Each fr In _writeList
                 If _cts.IsCancellationRequested Then Exit For
-                If fr.File IsNot Nothing AndAlso fr.File.length < _smallThreshold Then
+                If fr IsNot Nothing AndAlso fr.File IsNot Nothing AndAlso fr.File.length < _smallThreshold Then
                     ' 控制小文件缓存上限
                     While _smallCacheQueue.Count >= _smallCacheCapacity AndAlso Not _cts.IsCancellationRequested
                         Await Task.Delay(10, _cts.Token)
