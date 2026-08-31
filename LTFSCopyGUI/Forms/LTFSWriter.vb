@@ -266,6 +266,11 @@ Public Class LTFSWriter
     Private _searchProgressActive As Integer
     Private Const DirectorySortProgressMaximum As Integer = 10000
     Private _directorySortProgressActive As Integer
+    Private _validationDisplayRefreshPending As Integer
+    Private _validationDisplayRefreshVersion As Long
+    Private ReadOnly _validationColorCacheLock As New Object()
+    Private ReadOnly _validationColorCache As New Dictionary(Of Long, Dictionary(Of String, Color))
+    Private _validationColorCacheSchema As ltfsindex
     <Category("LTFSWriter")>
     Public Property SilentMode As Boolean = False
     <Category("LTFSWriter")>
@@ -2629,6 +2634,59 @@ Public Class LTFSWriter
 
             End Sub)
     End Sub
+
+    Private Sub RequestValidationDisplayRefresh()
+        If IsDisposed OrElse Not IsHandleCreated Then Return
+        Threading.Interlocked.Increment(_validationDisplayRefreshVersion)
+        QueueValidationDisplayRefresh()
+    End Sub
+
+    Private Sub QueueValidationDisplayRefresh()
+        If IsDisposed OrElse Not IsHandleCreated Then Return
+        If Threading.Interlocked.Exchange(_validationDisplayRefreshPending, 1) <> 0 Then Return
+
+        Try
+            BeginInvoke(
+                Sub()
+                    Dim renderedVersion As Long = 0
+                    Try
+                        Do
+                            renderedVersion = Threading.Volatile.Read(_validationDisplayRefreshVersion)
+                            'Virtual list items cache both checksum values and their
+                            'colors.  Drop the cache before invalidating so a
+                            'completed validation work is visible immediately.
+                            _listItemCache.Clear()
+                            _listItemCacheOrder.Clear()
+                            Try
+                                If Not IsDisposed AndAlso ListView1.IsHandleCreated Then
+                                    If ListView1.VirtualListSize > 0 Then
+                                        'RedrawItems causes the native virtual list to
+                                        'request fresh items for the invalidated range.
+                                        ListView1.RedrawItems(0, ListView1.VirtualListSize - 1, False)
+                                    Else
+                                        ListView1.Invalidate()
+                                        ListView1.Update()
+                                End If
+                            End If
+                            Catch ex As ObjectDisposedException
+                            Catch ex As InvalidOperationException
+                            Catch ex As ArgumentException
+                            End Try
+                        Loop While renderedVersion <> Threading.Volatile.Read(_validationDisplayRefreshVersion)
+                    Finally
+                        Threading.Interlocked.Exchange(_validationDisplayRefreshPending, 0)
+                        If renderedVersion <> Threading.Volatile.Read(_validationDisplayRefreshVersion) Then
+                            QueueValidationDisplayRefresh()
+                        End If
+                    End Try
+                End Sub)
+        Catch ex As ObjectDisposedException
+            Threading.Interlocked.Exchange(_validationDisplayRefreshPending, 0)
+        Catch ex As InvalidOperationException
+            Threading.Interlocked.Exchange(_validationDisplayRefreshPending, 0)
+        End Try
+    End Sub
+
     Private Sub ToolStripStatusLabel2_Click(sender As Object, e As EventArgs) Handles ToolStripStatusLabel2.Click
         Try
             If True OrElse AllowOperation Then
@@ -2824,35 +2882,35 @@ Public Class LTFSWriter
         If Not unwritten Then
             Dim columnIndex As Integer = 3 + If(ShowXAttr_Barcode, 1, 0)
             If My.Settings.LTFSWriter_ChecksumEnabled_SHA1 Then
-                ApplyChecksumColor(item, columnIndex, file.SHA1ForeColor)
+                ApplyChecksumColor(item, columnIndex, GetChecksumColor(file, "SHA1"))
                 columnIndex += 1
             End If
             If My.Settings.LTFSWriter_ChecksumEnabled_SHA256 Then
-                ApplyChecksumColor(item, columnIndex, file.SHA256ForeColor)
+                ApplyChecksumColor(item, columnIndex, GetChecksumColor(file, "SHA256"))
                 columnIndex += 1
             End If
             If My.Settings.LTFSWriter_ChecksumEnabled_SHA512 Then
-                ApplyChecksumColor(item, columnIndex, file.SHA512ForeColor)
+                ApplyChecksumColor(item, columnIndex, GetChecksumColor(file, "SHA512"))
                 columnIndex += 1
             End If
             If My.Settings.LTFSWriter_ChecksumEnabled_CRC32 Then
-                ApplyChecksumColor(item, columnIndex, file.CRC32ForeColor)
+                ApplyChecksumColor(item, columnIndex, GetChecksumColor(file, "CRC32"))
                 columnIndex += 1
             End If
             If My.Settings.LTFSWriter_ChecksumEnabled_MD5 Then
-                ApplyChecksumColor(item, columnIndex, file.MD5ForeColor)
+                ApplyChecksumColor(item, columnIndex, GetChecksumColor(file, "MD5"))
                 columnIndex += 1
             End If
             If My.Settings.LTFSWriter_ChecksumEnabled_BLAKE3 Then
-                ApplyChecksumColor(item, columnIndex, file.BLAKE3ForeColor)
+                ApplyChecksumColor(item, columnIndex, GetChecksumColor(file, "BLAKE3"))
                 columnIndex += 1
             End If
             If My.Settings.LTFSWriter_ChecksumEnabled_XxHash3 Then
-                ApplyChecksumColor(item, columnIndex, file.XxHash3ForeColor)
+                ApplyChecksumColor(item, columnIndex, GetChecksumColor(file, "XxHash3"))
                 columnIndex += 1
             End If
             If My.Settings.LTFSWriter_ChecksumEnabled_XxHash128 Then
-                ApplyChecksumColor(item, columnIndex, file.XxHash128ForeColor)
+                ApplyChecksumColor(item, columnIndex, GetChecksumColor(file, "XxHash128"))
             End If
         End If
 
@@ -8444,6 +8502,15 @@ Public Class LTFSWriter
         Public Calculator As IOManager.CheckSumBlockwiseCalculator
         Public Result As Dictionary(Of String, String)
         Public HashedBytes As Long
+        Public ProgressBytes As Long
+    End Class
+
+    Private Class ValidationProgressContext
+        Public TotalFiles As Long
+        Public TotalBytes As Long
+        Public ProcessedFiles As Long
+        Public ErrorCount As Long
+        Public Started As Boolean
     End Class
 
     Private Class ValidationExtent
@@ -8620,6 +8687,74 @@ Public Class LTFSWriter
         Return file.GetXAttr(attributeName, True)
     End Function
 
+    Private Sub StoreValidationColor(file As ltfsindex.file, name As String, color As Color)
+        If file Is Nothing OrElse String.IsNullOrEmpty(name) OrElse schema Is Nothing Then Return
+
+        Dim fileId As Long = file.fileuid
+        Dim currentSchema As ltfsindex = schema
+        SyncLock _validationColorCacheLock
+            If Not Object.ReferenceEquals(_validationColorCacheSchema, currentSchema) Then
+                _validationColorCache.Clear()
+                _validationColorCacheSchema = currentSchema
+            End If
+
+            Dim colors As Dictionary(Of String, Color) = Nothing
+            If Not _validationColorCache.TryGetValue(fileId, colors) Then
+                colors = New Dictionary(Of String, Color)(StringComparer.Ordinal)
+                _validationColorCache.Add(fileId, colors)
+            End If
+            colors(name) = color
+        End SyncLock
+    End Sub
+
+    Private Function TryGetValidationColor(file As ltfsindex.file,
+                                           name As String,
+                                           ByRef color As Color) As Boolean
+        color = Color.Black
+        If file Is Nothing OrElse String.IsNullOrEmpty(name) OrElse schema Is Nothing Then Return False
+
+        Dim fileId As Long = file.fileuid
+        Dim currentSchema As ltfsindex = schema
+        SyncLock _validationColorCacheLock
+            If Not Object.ReferenceEquals(_validationColorCacheSchema, currentSchema) Then
+                _validationColorCache.Clear()
+                _validationColorCacheSchema = currentSchema
+            End If
+
+            Dim colors As Dictionary(Of String, Color) = Nothing
+            If _validationColorCache.TryGetValue(fileId, colors) Then
+                Return colors.TryGetValue(name, color)
+            End If
+        End SyncLock
+        Return False
+    End Function
+
+    Private Function GetChecksumColor(file As ltfsindex.file, name As String) As Color
+        Dim color As Color
+        If TryGetValidationColor(file, name, color) Then Return color
+
+        Select Case name
+            Case "SHA1"
+                Return file.SHA1ForeColor
+            Case "SHA256"
+                Return file.SHA256ForeColor
+            Case "SHA512"
+                Return file.SHA512ForeColor
+            Case "CRC32"
+                Return file.CRC32ForeColor
+            Case "MD5"
+                Return file.MD5ForeColor
+            Case "BLAKE3"
+                Return file.BLAKE3ForeColor
+            Case "XxHash3"
+                Return file.XxHash3ForeColor
+            Case "XxHash128"
+                Return file.XxHash128ForeColor
+            Case Else
+                Return Color.Black
+        End Select
+    End Function
+
     Private Sub SetChecksumValue(file As ltfsindex.file, name As String, value As String)
         Dim attributeName = GetChecksumAttributeName(name)
         If Not String.IsNullOrEmpty(attributeName) AndAlso value IsNot Nothing Then
@@ -8646,6 +8781,7 @@ Public Class LTFSWriter
             Case "XxHash128"
                 file.XxHash128ForeColor = color
         End Select
+        StoreValidationColor(file, name, color)
     End Sub
 
     Private Function HasMissingChecksum(file As ltfsindex.file) As Boolean
@@ -8659,25 +8795,7 @@ Public Class LTFSWriter
         For Each name As String In GetEnabledChecksumNames()
             Dim value = GetChecksumValue(file, name)
             If String.IsNullOrEmpty(value) Then Return False
-            Dim color As Color
-            Select Case name
-                Case "SHA1"
-                    color = file.SHA1ForeColor
-                Case "SHA256"
-                    color = file.SHA256ForeColor
-                Case "SHA512"
-                    color = file.SHA512ForeColor
-                Case "CRC32"
-                    color = file.CRC32ForeColor
-                Case "MD5"
-                    color = file.MD5ForeColor
-                Case "BLAKE3"
-                    color = file.BLAKE3ForeColor
-                Case "XxHash3"
-                    color = file.XxHash3ForeColor
-                Case Else
-                    color = file.XxHash128ForeColor
-            End Select
+            Dim color As Color = GetChecksumColor(file, name)
             If color.Equals(Color.Black) OrElse color.Equals(Color.Red) Then Return False
         Next
         Return True
@@ -8794,6 +8912,11 @@ Public Class LTFSWriter
                 If data.LongLength > GetValidationBlockSize() Then
                     Throw New IO.InvalidDataException($"Tape block P{partition} B{block} is {data.LongLength} bytes; LTFS label block size is {GetValidationBlockSize()}")
                 End If
+                'TotalBytesProcessed is also the source for the live speed
+                'history.  Count the successful tape read here, while the
+                'operation is still in progress, instead of waiting for the
+                'whole validation plan to finish.
+                Threading.Interlocked.Add(TotalBytesProcessed, data.LongLength)
                 RestorePosition.PartitionNumber = partition
                 RestorePosition.BlockNumber = CULng(block + 1)
                 Return data
@@ -8814,6 +8937,7 @@ Public Class LTFSWriter
                     Continue While
                 Case DialogResult.Ignore
                     If data IsNot Nothing AndAlso data.Length > 0 Then
+                        Threading.Interlocked.Add(TotalBytesProcessed, data.LongLength)
                         RestorePosition.PartitionNumber = partition
                         RestorePosition.BlockNumber = CULng(block + 1)
                         Return data
@@ -8853,6 +8977,7 @@ Public Class LTFSWriter
                 .SpoolOffset = blockSpoolOffset + dataOffset}
             ext.CopiedBytes += count
             ext.Work.SpoolSlices.Add(slice)
+            ReportValidationWorkBytes(ext.Work, count)
         Next
     End Sub
 
@@ -9006,12 +9131,14 @@ Public Class LTFSWriter
             ext.Work.Calculator.PropagateRange(block, dataOffset, count)
             ext.Work.HashedBytes += count
             ext.CopiedBytes += count
+            ReportValidationWorkBytes(ext.Work, count)
         Next
     End Sub
 
     Private Sub StreamValidationPartition(extents As List(Of ValidationExtent),
                                           blockSize As Long,
-                                          zeroBuffer As Byte())
+                                          zeroBuffer As Byte(),
+                                          Optional workCompleted As Action(Of ValidationWork) = Nothing)
         extents.Sort(New Comparison(Of ValidationExtent)(
             Function(a As ValidationExtent, b As ValidationExtent) As Integer
                 Dim comparison = a.StartBlock.CompareTo(b.StartBlock)
@@ -9037,6 +9164,15 @@ Public Class LTFSWriter
 
             Dim block = ReadValidationBlock(active(0).Partition, currentBlock)
             StreamValidationBlock(currentBlock, block, active, blockSize, zeroBuffer)
+            If workCompleted IsNot Nothing Then
+                Dim activeWorks As New HashSet(Of ValidationWork)
+                For Each ext As ValidationExtent In active
+                    activeWorks.Add(ext.Work)
+                Next
+                For Each work As ValidationWork In activeWorks
+                    workCompleted(work)
+                Next
+            End If
             If StopFlag Then Throw New OperationCanceledException()
             If currentBlock = Long.MaxValue Then Throw New IO.InvalidDataException("Validation block number overflow")
             currentBlock += 1
@@ -9050,6 +9186,24 @@ Public Class LTFSWriter
         Next
     End Sub
 
+    Private Sub ReportValidationWorkBytes(work As ValidationWork, bytes As Long)
+        If work Is Nothing OrElse bytes <= 0 OrElse work.Representative Is Nothing OrElse
+           work.Representative.File Is Nothing Then Return
+
+        Dim remaining = work.Representative.File.length - work.ProgressBytes
+        If remaining <= 0 Then Return
+        Dim reported = Math.Min(bytes, remaining)
+        work.ProgressBytes += reported
+
+        'A deduplicated reference is read once but represents every member in
+        'the validation request.  Scale the operation progress by that member
+        'count so the progress bar still reaches the requested total.
+        Dim memberCount As Long = Math.Max(1, work.Members.Count)
+        Dim increment As Decimal = CDec(reported) * CDec(memberCount)
+        If increment > Long.MaxValue Then increment = Long.MaxValue
+        Threading.Interlocked.Add(CurrentBytesProcessed, CLng(increment))
+    End Sub
+
     Private Sub FinishStreamedValidationWork(work As ValidationWork, zeroBuffer As Byte())
         If work.HashedBytes < work.Representative.File.length Then
             PropagateValidationZeros(work.Calculator, work.Representative.File.length - work.HashedBytes, zeroBuffer)
@@ -9057,18 +9211,23 @@ Public Class LTFSWriter
         ElseIf work.HashedBytes > work.Representative.File.length Then
             Throw New IO.InvalidDataException($"Validation extents exceed file length for {work.Representative.File.name}")
         End If
+        If work.ProgressBytes < work.Representative.File.length Then
+            ReportValidationWorkBytes(work, work.Representative.File.length - work.ProgressBytes)
+        End If
         work.Calculator.ProcessFinalBlock()
         work.Result = GetValidationChecksumResult(work.Calculator)
     End Sub
 
     Private Sub CalculateForwardValidationWorks(works As List(Of ValidationWork),
                                                 partitionOrder As List(Of Byte),
-                                                blockSize As Long)
+                                                blockSize As Long,
+                                                Optional workCompleted As Action(Of ValidationWork) = Nothing)
         If works.Count = 0 Then Return
         Dim zeroBuffer(Math.Min(CInt(blockSize), 1024 * 1024) - 1) As Byte
         Dim byPartition As New Dictionary(Of Byte, List(Of ValidationExtent))
         For Each work As ValidationWork In works
             work.HashedBytes = 0
+            work.ProgressBytes = 0
             For Each ext As ValidationExtent In work.Extents
                 ext.CopiedBytes = 0
                 Dim partitionExtents As List(Of ValidationExtent) = Nothing
@@ -9080,13 +9239,26 @@ Public Class LTFSWriter
             Next
         Next
 
+        Dim completedWorks As New HashSet(Of ValidationWork)
+        Dim finishCompletedWork As Action(Of ValidationWork) =
+            Sub(work As ValidationWork)
+                If work Is Nothing OrElse completedWorks.Contains(work) OrElse
+                   work.Extents.Any(Function(ext As ValidationExtent) ext.CopiedBytes <> ext.ByteCount) Then Return
+                FinishStreamedValidationWork(work, zeroBuffer)
+                completedWorks.Add(work)
+                If workCompleted IsNot Nothing Then workCompleted(work)
+            End Sub
         For Each partition As Byte In partitionOrder
             If byPartition.ContainsKey(partition) Then
-                StreamValidationPartition(byPartition(partition), blockSize, zeroBuffer)
+                StreamValidationPartition(byPartition(partition), blockSize, zeroBuffer, finishCompletedWork)
             End If
         Next
         For Each work As ValidationWork In works
-            FinishStreamedValidationWork(work, zeroBuffer)
+            If Not completedWorks.Contains(work) Then
+                FinishStreamedValidationWork(work, zeroBuffer)
+                completedWorks.Add(work)
+                If workCompleted IsNot Nothing Then workCompleted(work)
+            End If
         Next
     End Sub
 
@@ -9146,6 +9318,7 @@ Public Class LTFSWriter
     Private Sub CalculateValidationWorkDirect(work As ValidationWork, blockSize As Long)
         Dim zeroBuffer(Math.Min(CInt(blockSize), 1024 * 1024) - 1) As Byte
         work.HashedBytes = 0
+        work.ProgressBytes = 0
         For Each ext As ValidationExtent In work.Extents.OrderBy(Function(value As ValidationExtent) value.FileOffset)
             ext.CopiedBytes = 0
             If ext.FileOffset < work.HashedBytes Then
@@ -9169,6 +9342,7 @@ Public Class LTFSWriter
                     work.Calculator.PropagateRange(block, dataOffset, count)
                     work.HashedBytes += count
                     ext.CopiedBytes += count
+                    ReportValidationWorkBytes(work, count)
                 End If
                 currentBlock += 1
             End While
@@ -9260,11 +9434,15 @@ Public Class LTFSWriter
         ElseIf logicalOffset > work.Representative.File.length Then
             Throw New IO.InvalidDataException($"Validation extents exceed file length for {work.Representative.File.name}")
         End If
+        If work.ProgressBytes < work.Representative.File.length Then
+            ReportValidationWorkBytes(work, work.Representative.File.length - work.ProgressBytes)
+        End If
         work.Calculator.ProcessFinalBlock()
         work.Result = GetValidationChecksumResult(work.Calculator)
     End Sub
 
-    Private Sub CalculateChecksumsWithSpool(works As List(Of ValidationWork))
+    Private Sub CalculateChecksumsWithSpool(works As List(Of ValidationWork),
+                                            Optional workCompleted As Action(Of ValidationWork) = Nothing)
         Dim spoolPath As String = LazySchemaStore.CreateTempFilePath("validation-spool")
         Dim blockSize As Long = GetValidationBlockSize()
         Try
@@ -9277,6 +9455,7 @@ Public Class LTFSWriter
                 Dim byPartition As New Dictionary(Of Byte, List(Of ValidationExtent))
                 For Each work As ValidationWork In works
                     work.SpoolSlices.Clear()
+                    work.ProgressBytes = 0
                     For Each ext As ValidationExtent In work.Extents
                         ext.CopiedBytes = 0
                         Dim partitionExtents As List(Of ValidationExtent) = Nothing
@@ -9300,6 +9479,7 @@ Public Class LTFSWriter
                 For Each work As ValidationWork In works
                     If StopFlag Then Throw New OperationCanceledException()
                     FinalizeValidationWork(work, spool, blockSize)
+                    If workCompleted IsNot Nothing Then workCompleted(work)
                 Next
             End Using
         Finally
@@ -9310,7 +9490,8 @@ Public Class LTFSWriter
         End Try
     End Sub
 
-    Private Sub CalculateChecksumsWithPlan(works As List(Of ValidationWork))
+    Private Sub CalculateChecksumsWithPlan(works As List(Of ValidationWork),
+                                           Optional workCompleted As Action(Of ValidationWork) = Nothing)
         If works.Count = 0 Then Return
         Dim blockSize = GetValidationBlockSize()
         Dim partitionOrder = GetValidationPartitionOrder(works)
@@ -9325,14 +9506,14 @@ Public Class LTFSWriter
             End If
         Next
 
-        CalculateForwardValidationWorks(forwardWorks, partitionOrder, blockSize)
+        CalculateForwardValidationWorks(forwardWorks, partitionOrder, blockSize, workCompleted)
 
         Dim directWorks As New List(Of ValidationWork)
         Dim spoolBatches = BuildValidationSpoolBatches(deferredWorks, blockSize, directWorks)
         PrintMsg($"Validation schedule: forward={forwardWorks.Count}, bounded spool batches={spoolBatches.Count}, direct fallback={directWorks.Count}, spool limit={ValidationSpoolBudgetBytes}", LogOnly:=True)
         For Each batch As ValidationSpoolBatch In spoolBatches
             If StopFlag Then Throw New OperationCanceledException()
-            CalculateChecksumsWithSpool(batch.Works)
+            CalculateChecksumsWithSpool(batch.Works, workCompleted)
         Next
 
         directWorks.Sort(New Comparison(Of ValidationWork)(
@@ -9346,6 +9527,7 @@ Public Class LTFSWriter
         For Each work As ValidationWork In directWorks
             If StopFlag Then Throw New OperationCanceledException()
             CalculateValidationWorkDirect(work, blockSize)
+            If workCompleted IsNot Nothing Then workCompleted(work)
         Next
     End Sub
 
@@ -9382,11 +9564,14 @@ Public Class LTFSWriter
         Return True
     End Function
 
-    Private Sub MarkValidationProgress(file As ltfsindex.file, includeTotal As Boolean)
+    Private Sub MarkValidationProgress(file As ltfsindex.file,
+                                       includeTotal As Boolean,
+                                       Optional bytesAlreadyReported As Boolean = False)
         If file Is Nothing Then Return
-        Threading.Interlocked.Add(CurrentBytesProcessed, Math.Max(0, file.length))
+        If Not bytesAlreadyReported Then
+            Threading.Interlocked.Add(CurrentBytesProcessed, Math.Max(0, file.length))
+        End If
         If includeTotal Then
-            Threading.Interlocked.Add(TotalBytesProcessed, Math.Max(0, file.length))
             Threading.Interlocked.Increment(TotalFilesProcessed)
         End If
         Threading.Interlocked.Increment(CurrentFilesProcessed)
@@ -9399,47 +9584,121 @@ Public Class LTFSWriter
         Return ""
     End Function
 
+    Private Sub AddValidationTotal(ByRef total As Long, value As Long)
+        If value <= 0 Then Return
+        If total > Long.MaxValue - value Then
+            total = Long.MaxValue
+        Else
+            total += value
+        End If
+    End Sub
+
+    Private Sub GetValidationDirectoryTotals(root As ltfsindex.directory,
+                                             ByRef fileCount As Long,
+                                             ByRef byteCount As Long)
+        fileCount = 0
+        byteCount = 0
+        If root Is Nothing Then Return
+
+        Dim pending As New Stack(Of ltfsindex.directory)
+        pending.Push(root)
+        While pending.Count > 0
+            Dim current As ltfsindex.directory = pending.Pop()
+            If current Is Nothing Then Continue While
+
+            AddValidationTotal(fileCount, current.GetLazyDirectFileCount())
+            AddValidationTotal(byteCount, current.GetLazyDirectFileByteCount())
+            For Each child As ltfsindex.directory In current.EnumerateLazyDirectories()
+                If child IsNot Nothing Then pending.Push(child)
+            Next
+        End While
+    End Sub
+
     Private Sub ExecuteHashPlan(fileList As List(Of FileRecord),
                                 overwrite As Boolean,
                                 validateOnly As Boolean,
                                 darkGreen As Boolean,
                                 Optional resetStopFlag As Boolean = True,
                                 Optional clearStopFlag As Boolean = True,
-                                Optional releaseGui As Boolean = True)
-        Dim fileCount As Long = 0
-        Dim errorCount As Long = 0
+                                Optional releaseGui As Boolean = True,
+                                Optional progressContext As ValidationProgressContext = Nothing)
+        Dim displayTotalFiles As Long = If(progressContext Is Nothing,
+                                           If(fileList Is Nothing, 0L, fileList.Count),
+                                           Math.Max(0L, progressContext.TotalFiles))
+        Dim fileCount As Long = If(progressContext Is Nothing, 0L, progressContext.ProcessedFiles)
+        Dim errorCount As Long = If(progressContext Is Nothing, 0L, progressContext.ErrorCount)
         Try
-            StartTime = Now
+            If progressContext Is Nothing OrElse Not progressContext.Started Then
+                StartTime = Now
+                CurrentBytesProcessed = 0
+                CurrentFilesProcessed = 0
+                If progressContext IsNot Nothing Then progressContext.Started = True
+            End If
             SetStatusLight(LWStatus.Busy)
             PrintMsg(My.Resources.ResText_Hashing)
             If resetStopFlag Then StopFlag = False
-            CurrentBytesProcessed = 0
-            CurrentFilesProcessed = 0
-            UnwrittenSizeOverrideValue = 0
-            UnwrittenCountOverrideValue = CULng(fileList.Count)
-            For Each fr As FileRecord In fileList
-                If fr IsNot Nothing AndAlso fr.File IsNot Nothing Then
-                    UnwrittenSizeOverrideValue = CULng(UnwrittenSizeOverrideValue + Math.Max(0, fr.File.length))
-                End If
-            Next
+            If progressContext Is Nothing Then
+                UnwrittenSizeOverrideValue = 0
+                UnwrittenCountOverrideValue = CULng(If(fileList Is Nothing, 0, fileList.Count))
+                For Each fr As FileRecord In fileList
+                    If fr IsNot Nothing AndAlso fr.File IsNot Nothing Then
+                        UnwrittenSizeOverrideValue = CULng(UnwrittenSizeOverrideValue + Math.Max(0, fr.File.length))
+                    End If
+                Next
+            Else
+                UnwrittenCountOverrideValue = CULng(Math.Max(0L, progressContext.TotalFiles))
+                UnwrittenSizeOverrideValue = CULng(Math.Max(0L, progressContext.TotalBytes))
+            End If
 
             Dim workByRecord As New Dictionary(Of FileRecord, ValidationWork)
             Dim works = BuildValidationPlan(fileList, overwrite, validateOnly, workByRecord)
             Dim physicalExtentCount As Integer = works.Sum(Function(work As ValidationWork) work.Extents.Count)
-            PrintMsg($"Validation plan: files={fileList.Count}, unique references={works.Count}, physical extents={physicalExtentCount}", LogOnly:=True)
-            CalculateChecksumsWithPlan(works)
+            If progressContext Is Nothing Then
+                PrintMsg($"Validation plan: files={fileList.Count}, unique references={works.Count}, physical extents={physicalExtentCount}", LogOnly:=True)
+            Else
+                PrintMsg($"Validation plan: files={displayTotalFiles} (batch={fileList.Count}), unique references={works.Count}, physical extents={physicalExtentCount}", LogOnly:=True)
+            End If
+
+            Dim completedRecords As New HashSet(Of FileRecord)
+            Dim reportWorkCompleted As Action(Of ValidationWork) =
+                Sub(work As ValidationWork)
+                    If work Is Nothing OrElse work.Result Is Nothing Then Return
+                    For Each member As FileRecord In work.Members
+                        If StopFlag Then Exit For
+                        If member Is Nothing OrElse member.File Is Nothing OrElse completedRecords.Contains(member) Then Continue For
+
+                        fileCount += 1
+                        If progressContext IsNot Nothing Then progressContext.ProcessedFiles = fileCount
+                        PrintMsg($"{My.Resources.ResText_Hashing} [{fileCount}/{displayTotalFiles}] {member.File.name} {My.Resources.ResText_Size}:{IOManager.FormatSize(member.File.length)}",
+                                 False,
+                                 $"{My.Resources.ResText_Hashing} [{fileCount}/{displayTotalFiles}] {GetValidationDisplayPath(member)} {My.Resources.ResText_Size}:{member.File.length}")
+                        ApplyValidationResult(member.File, work.Result, overwrite, validateOnly, errorCount, darkGreen)
+                        If progressContext IsNot Nothing Then progressContext.ErrorCount = errorCount
+                        'The data bytes were counted while the tape block was
+                        'read.  Only the file counter is left for this step.
+                        MarkValidationProgress(member.File, True, bytesAlreadyReported:=True)
+                        completedRecords.Add(member)
+                    Next
+                    RequestValidationDisplayRefresh()
+                End Sub
+            CalculateChecksumsWithPlan(works, reportWorkCompleted)
 
             For Each fr As FileRecord In fileList
                 If StopFlag Then Exit For
                 If fr Is Nothing OrElse fr.File Is Nothing Then Continue For
+                If completedRecords.Contains(fr) Then Continue For
                 fileCount += 1
+                If progressContext IsNot Nothing Then progressContext.ProcessedFiles = fileCount
                 Dim work As ValidationWork = Nothing
-                If workByRecord.TryGetValue(fr, work) Then
-                    PrintMsg($"{My.Resources.ResText_Hashing} [{fileCount}/{fileList.Count}] {fr.File.name} {My.Resources.ResText_Size}:{IOManager.FormatSize(fr.File.length)}",
+                If workByRecord.TryGetValue(fr, work) AndAlso work.Result IsNot Nothing Then
+                    PrintMsg($"{My.Resources.ResText_Hashing} [{fileCount}/{displayTotalFiles}] {fr.File.name} {My.Resources.ResText_Size}:{IOManager.FormatSize(fr.File.length)}",
                              False,
-                             $"{My.Resources.ResText_Hashing} [{fileCount}/{fileList.Count}] {GetValidationDisplayPath(fr)} {My.Resources.ResText_Size}:{fr.File.length}")
+                             $"{My.Resources.ResText_Hashing} [{fileCount}/{displayTotalFiles}] {GetValidationDisplayPath(fr)} {My.Resources.ResText_Size}:{fr.File.length}")
                     ApplyValidationResult(fr.File, work.Result, overwrite, validateOnly, errorCount, darkGreen)
-                    MarkValidationProgress(fr.File, True)
+                    If progressContext IsNot Nothing Then progressContext.ErrorCount = errorCount
+                    MarkValidationProgress(fr.File, True, bytesAlreadyReported:=True)
+                    completedRecords.Add(fr)
+                    RequestValidationDisplayRefresh()
                 Else
                     MarkValidationProgress(fr.File, False)
                 End If
@@ -9457,13 +9716,19 @@ Public Class LTFSWriter
             End Try
             PrintMsg(My.Resources.ResText_HErr)
         Finally
-            UnwrittenSizeOverrideValue = 0
-            UnwrittenCountOverrideValue = 0
+            If progressContext Is Nothing Then
+                UnwrittenSizeOverrideValue = 0
+                UnwrittenCountOverrideValue = 0
+            Else
+                progressContext.ProcessedFiles = fileCount
+                progressContext.ErrorCount = errorCount
+                RequestValidationDisplayRefresh()
+            End If
             If clearStopFlag Then StopFlag = False
-            SetStatusLight(LWStatus.Idle)
+            If progressContext Is Nothing Then SetStatusLight(LWStatus.Idle)
             If releaseGui Then LockGUI(False)
-            RefreshDisplay()
-            PrintMsg($"{My.Resources.ResText_HFin} {fileCount - errorCount}/{fileCount} | {errorCount} {My.Resources.ResText_Error}")
+            If progressContext Is Nothing Then RefreshDisplay()
+            PrintMsg($"{My.Resources.ResText_HFin} {fileCount - errorCount}/{displayTotalFiles} | {errorCount} {My.Resources.ResText_Error}")
         End Try
     End Sub
 
@@ -9698,8 +9963,12 @@ Public Class LTFSWriter
                                        validateOnly As Boolean)
         Const BatchSize As Integer = 1024
         Dim batch As New List(Of FileRecord)(BatchSize)
+        Dim progressContext As New ValidationProgressContext
         StopFlag = False
         Try
+            GetValidationDirectoryTotals(selectedDir,
+                                         progressContext.TotalFiles,
+                                         progressContext.TotalBytes)
             For Each record As FileRecord In EnumerateDirectoryFileRecords(selectedDir, String.Empty)
                 If StopFlag Then Exit For
                 batch.Add(record)
@@ -9707,7 +9976,8 @@ Public Class LTFSWriter
                     ExecuteHashPlan(batch, overwrite, validateOnly, False,
                                     resetStopFlag:=False,
                                     clearStopFlag:=False,
-                                    releaseGui:=False)
+                                    releaseGui:=False,
+                                    progressContext:=progressContext)
                     batch.Clear()
                 End If
             Next
@@ -9715,10 +9985,13 @@ Public Class LTFSWriter
                 ExecuteHashPlan(batch, overwrite, validateOnly, False,
                                 resetStopFlag:=False,
                                 clearStopFlag:=False,
-                                releaseGui:=False)
+                                releaseGui:=False,
+                                progressContext:=progressContext)
             End If
         Finally
             batch.Clear()
+            UnwrittenSizeOverrideValue = 0
+            UnwrittenCountOverrideValue = 0
             StopFlag = False
             SetStatusLight(LWStatus.Idle)
             LockGUI(False)
