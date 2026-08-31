@@ -55,6 +55,12 @@ Public Class FileDataProvider
 
     Private ReadOnly _nextFileSignal As New AutoResetEvent(False)
     Private ReadOnly _cts As New CancellationTokenSource()
+    Private ReadOnly _completionLock As New Object()
+    Private _producerTask As Task = Nothing
+    Private _preloadTask As Task = Nothing
+    Private _completionTask As Task = Nothing
+    Private _outputCompleted As Integer = 0
+    Private _readerCompleted As Integer = 0
 
     Private _currentIndex As Integer = -1
     Private _started As Integer = 0
@@ -64,6 +70,13 @@ Public Class FileDataProvider
     Public ReadOnly Property Current As LTFSWriter.FileRecord
         Get
             Return _current
+        End Get
+    End Property
+
+    Public ReadOnly Property ProducerCompleted As Boolean
+        Get
+            Dim task As Task = _producerTask
+            Return task IsNot Nothing AndAlso task.IsCompleted
         End Get
     End Property
 
@@ -132,8 +145,8 @@ Public Class FileDataProvider
                 End Using
             End Using
         End Using
-        Task.Run(AddressOf PreloadSmallFilesAsync)
-        Task.Run(AddressOf ProducerLoopAsync)
+        _preloadTask = Task.Run(AddressOf PreloadSmallFilesAsync)
+        _producerTask = Task.Run(AddressOf ProducerLoopAsync)
         ' 积极模式下，立即允许开始
         If Not _requireSignal Then _nextFileSignal.Set()
     End Sub
@@ -149,7 +162,10 @@ Public Class FileDataProvider
                 End Using
             End Using
         End Using
-        _nextFileSignal.Set()
+        Try
+            _nextFileSignal.Set()
+        Catch ex As ObjectDisposedException
+        End Try
     End Sub
 
     Public Sub Cancel()
@@ -162,11 +178,24 @@ Public Class FileDataProvider
                 End Using
             End Using
         End Using
-        _cts.Cancel()
-        _nextFileSignal.Set()
+        Try
+            _cts.Cancel()
+        Catch ex As ObjectDisposedException
+        End Try
+        Try
+            _nextFileSignal.Set()
+        Catch ex As ObjectDisposedException
+        End Try
     End Sub
 
     Public Function CompleteAsync() As Task
+        SyncLock _completionLock
+            If _completionTask Is Nothing Then _completionTask = CompleteCoreAsync()
+            Return _completionTask
+        End SyncLock
+    End Function
+
+    Private Async Function CompleteCoreAsync() As Task
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileDataProvider))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileProvider")
                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
@@ -180,27 +209,32 @@ Public Class FileDataProvider
         End Using
         Try
             _cts.Cancel()
-            _nextFileSignal.Set()
-        Finally
-            Try
-                If _ringBufferEnabled Then
-                    RingBuffer.Complete()
-                Else
-                    _writer.Complete()
-                    Reader.Complete()
-                End If
-            Catch ex As Exception
-                Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileDataProvider))
-                    Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileProvider")
-                        Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                            Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
-                                Log.Error(ex, "File data provider buffer completion failed.")
-                            End Using
-                        End Using
-                    End Using
-                End Using
-            End Try
+        Catch ex As ObjectDisposedException
         End Try
+        Try
+            _nextFileSignal.Set()
+        Catch ex As ObjectDisposedException
+        End Try
+
+        CompleteOutput()
+        Await AwaitBackgroundTaskAsync(_producerTask, "producer").ConfigureAwait(False)
+        Await AwaitBackgroundTaskAsync(_preloadTask, "preloader").ConfigureAwait(False)
+        CompleteReader()
+
+        Try
+            _nextFileSignal.Dispose()
+        Catch
+        End Try
+        Try
+            _cts.Dispose()
+        Catch
+        End Try
+        If _ringBufferEnabled Then
+            Try
+                RingBuffer.Dispose()
+            Catch
+            End Try
+        End If
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileDataProvider))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileProvider")
                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
@@ -210,8 +244,40 @@ Public Class FileDataProvider
                 End Using
             End Using
         End Using
-        Return Task.CompletedTask
     End Function
+
+    Private Async Function AwaitBackgroundTaskAsync(task As Task, taskName As String) As Task
+        If task Is Nothing Then Return
+        Try
+            Await task.ConfigureAwait(False)
+        Catch ex As OperationCanceledException When _cts.IsCancellationRequested
+            Log.Information(ex, "File data provider {TaskName} task stopped during cancellation.", taskName)
+        Catch ex As Exception
+            Log.Error(ex, "File data provider {TaskName} task failed while completing.", taskName)
+        End Try
+    End Function
+
+    Private Sub CompleteOutput()
+        If Interlocked.Exchange(_outputCompleted, 1) <> 0 Then Return
+        Try
+            If _ringBufferEnabled Then
+                RingBuffer.Complete()
+            Else
+                _writer.Complete()
+            End If
+        Catch ex As Exception
+            Log.Error(ex, "File data provider output completion failed.")
+        End Try
+    End Sub
+
+    Private Sub CompleteReader()
+        If _ringBufferEnabled OrElse Interlocked.Exchange(_readerCompleted, 1) <> 0 Then Return
+        Try
+            Reader.Complete()
+        Catch ex As Exception
+            Log.Error(ex, "File data provider reader completion failed.")
+        End Try
+    End Sub
 
     Private Async Function ProducerLoopAsync() As Task
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileDataProvider))
@@ -250,7 +316,7 @@ Public Class FileDataProvider
                             End Using
                         End Using
                     End Using
-                    Continue While
+                    Throw New InvalidDataException($"File data provider encountered an invalid FileRecord at index {nextIdx}.")
                 End If
 
                 Dim isSmallFile = fr.File.length < _smallThreshold AndAlso fr.FileOffset = 0 AndAlso fr.File.length = fr.SegmentLength
@@ -280,7 +346,11 @@ Public Class FileDataProvider
                         End While
                     End If
 
-                    If data IsNot Nothing AndAlso data.Length > 0 Then
+                    Dim expectedLength As Long = fr.File.length
+                    If data Is Nothing OrElse data.LongLength <> expectedLength Then
+                        Throw New EndOfStreamException($"Source file length changed while reading: {fr.SourcePath}; expected {expectedLength}, got {If(data Is Nothing, 0L, data.LongLength)}.")
+                    End If
+                    If data.Length > 0 Then
                         If _ringBufferEnabled Then
                             WriteAllToRing(data, _cts.Token)
                         Else
@@ -321,6 +391,10 @@ Public Class FileDataProvider
                     End Using
                 End Using
             End Using
+        Catch ex As OperationCanceledException When _cts.IsCancellationRequested
+            Log.Information(ex, "File data provider producer loop stopped during cancellation. CurrentIndex={CurrentIndex}.", Interlocked.CompareExchange(_currentIndex, 0, 0))
+        Catch ex As Exception When _cts.IsCancellationRequested
+            Log.Information(ex, "File data provider producer loop stopped after cancellation. CurrentIndex={CurrentIndex}.", Interlocked.CompareExchange(_currentIndex, 0, 0))
         Catch ex As Exception
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileDataProvider))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileProvider")
@@ -331,25 +405,8 @@ Public Class FileDataProvider
                     End Using
                 End Using
             End Using
-            MessageBox.Show(ex.ToString())
-            Try
-                If _ringBufferEnabled Then
-                    RingBuffer.Complete()
-                Else
-                    _writer.Complete()
-                    Reader.Complete()
-                End If
-            Catch completionEx As Exception
-                Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileDataProvider))
-                    Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileProvider")
-                        Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                            Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
-                                Log.Error(completionEx, "File data provider failed to complete its output after a producer error.")
-                            End Using
-                        End Using
-                    End Using
-                End Using
-            End Try
+        Finally
+            CompleteOutput()
         End Try
     End Function
 
@@ -357,6 +414,7 @@ Public Class FileDataProvider
         Dim offset As Integer = 0
         While offset < data.Length
             Dim seg = RingBuffer.GetWriteSegment(1, ct)
+            If seg.Count = 0 Then Throw New EndOfStreamException("Ring buffer completed before all data was written.")
             Dim n As Integer = Math.Min(seg.Count, data.Length - offset)
             Buffer.BlockCopy(data, offset, seg.Array, seg.Offset, n)
             RingBuffer.AdvanceWrite(n)
@@ -382,7 +440,6 @@ Public Class FileDataProvider
             While True
                 Try
                     Dim result As Byte() = File.ReadAllBytes(fr.SourcePath)
-                    fr.File.length = result.Length
                     fr.IsOpened = True
                     Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileDataProvider))
                         Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileProvider")
@@ -404,18 +461,8 @@ Public Class FileDataProvider
                             End Using
                         End Using
                     End Using
-                    Select Case MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr }{vbCrLf}{fallbackEx.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore)
-                        Case DialogResult.Abort
-                            fr.IsOpened = False
-                            fr.File = Nothing
-                            Throw fallbackEx
-                        Case DialogResult.Retry
-                            Continue While
-                        Case DialogResult.Ignore
-                            fr.IsOpened = False
-                            fr.File = Nothing
-                            Return Array.Empty(Of Byte)()
-                    End Select
+                    fr.IsOpened = False
+                    Throw fallbackEx
                 End Try
             End While
         End Try
@@ -457,7 +504,7 @@ Public Class FileDataProvider
             Try
                 Select Case fr.Open(BufferSize:=64 * 1024)
                     Case DialogResult.Ignore
-                        Exit Function
+                        Throw New EndOfStreamException($"Unable to open source file: {fr.SourcePath}")
                     Case DialogResult.Abort
                         Throw New IOException("Open aborted")
                 End Select
@@ -473,8 +520,7 @@ Public Class FileDataProvider
                     End Using
                 End Using
                 fr.IsOpened = False
-                fr.File = Nothing
-                Exit Function
+                Throw fallbackEx
             End Try
         End Try
 
@@ -485,36 +531,42 @@ Public Class FileDataProvider
                 Dim minChunk As Integer = 1024 * 1024
                 While Not ct.IsCancellationRequested
                     If totalReadLen >= fr.SegmentLength Then Exit While
-                    Dim seg = RingBuffer.GetWriteSegment(minChunk, ct)
+                    Dim remaining As Long = fr.SegmentLength - totalReadLen
+                    Dim seg = RingBuffer.GetWriteSegment(CInt(Math.Min(CLng(minChunk), remaining)), ct)
                     If seg.Count = 0 Then
                         ' 理论上不会（除非 completed/disposed/canceled）
-                        Exit While
+                        Throw New EndOfStreamException($"Source stream ended before the expected length was read: {fr.SourcePath}")
                     End If
 
-                    Dim n As Integer = Await fs.ReadAsync(seg.Array, seg.Offset, seg.Count, ct).ConfigureAwait(False)
-                    If n = 0 Then Exit While
-                    RingBuffer.AdvanceWrite(CInt(Math.Min(n, fr.SegmentLength - totalReadLen)))
-                    Interlocked.Add(totalReadLen, n)
+                    Dim readCapacity As Integer = CInt(Math.Min(CLng(seg.Count), remaining))
+                    Dim n As Integer = Await fs.ReadAsync(seg.Array, seg.Offset, readCapacity, ct).ConfigureAwait(False)
+                    If n = 0 Then Throw New EndOfStreamException($"Source stream ended before the expected length was read: {fr.SourcePath}")
+                    RingBuffer.AdvanceWrite(n)
+                    totalReadLen += n
                 End While
             Else
                 Dim minSize As Integer = 64 * 1024
                 While Not ct.IsCancellationRequested
                     If totalReadLen >= fr.SegmentLength Then Exit While
-                    Dim dest As Memory(Of Byte) = _writer.GetMemory(minSize)
+                    Dim remaining As Long = fr.SegmentLength - totalReadLen
+                    Dim dest As Memory(Of Byte) = _writer.GetMemory(CInt(Math.Min(CLng(minSize), remaining)))
                     Dim seg As New ArraySegment(Of Byte)
                     If Not MemoryMarshal.TryGetArray(Of Byte)(dest, seg) Then
                         Throw New Exception("TryGetArray failed")
                     End If
-                    Dim cap As Integer = Math.Min(minSize, seg.Count)
+                    Dim cap As Integer = CInt(Math.Min(Math.Min(CLng(minSize), CLng(seg.Count)), remaining))
                     Dim n = Await fs.ReadAsync(seg.Array, seg.Offset, cap, ct).ConfigureAwait(False)
-                    If n = 0 Then Exit While
-                    _writer.Advance(CInt(Math.Min(n, fr.SegmentLength - totalReadLen)))
-                    Interlocked.Add(totalReadLen, n)
+                    If n = 0 Then Throw New EndOfStreamException($"Source stream ended before the expected length was read: {fr.SourcePath}")
+                    _writer.Advance(n)
+                    totalReadLen += n
                     Dim result = Await _writer.FlushAsync(ct).ConfigureAwait(False)
                     If result.IsCanceled OrElse result.IsCompleted Then Exit While
                 End While
             End If
         End Using
+        If Not ct.IsCancellationRequested AndAlso totalReadLen <> fr.SegmentLength Then
+            Throw New EndOfStreamException($"Source stream ended before the expected length was read: {fr.SourcePath}; expected {fr.SegmentLength}, got {totalReadLen}.")
+        End If
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileDataProvider))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileProvider")
                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
@@ -583,6 +635,11 @@ Public Class HardDriveDataProvider
     Private _ringBufferEnabled As Boolean
 
     Private ReadOnly _cts As New CancellationTokenSource()
+    Private ReadOnly _completionLock As New Object()
+    Private _producerTask As Task = Nothing
+    Private _completionTask As Task = Nothing
+    Private _outputCompleted As Integer = 0
+    Private _readerCompleted As Integer = 0
 
     Private _started As Integer = 0
     Private ReadOnly _logSessionId As String = $"harddrive-provider-{Guid.NewGuid().ToString("N").Substring(0, 8)}"
@@ -591,6 +648,12 @@ Public Class HardDriveDataProvider
     Public Property SectorCount As Long
     Public Property SectorLength As Integer = 512
     Public Property SectorLenUpdated As Boolean = False
+    Public ReadOnly Property ProducerCompleted As Boolean
+        Get
+            Dim task As Task = _producerTask
+            Return task IsNot Nothing AndAlso task.IsCompleted
+        End Get
+    End Property
 
     Public Class Config
         Public Property DrivePath As String
@@ -648,7 +711,7 @@ Public Class HardDriveDataProvider
                 End Using
             End Using
         End Using
-        Task.Run(AddressOf ProducerLoopAsync)
+        _producerTask = Task.Run(AddressOf ProducerLoopAsync)
     End Sub
 
 
@@ -662,52 +725,74 @@ Public Class HardDriveDataProvider
                 End Using
             End Using
         End Using
-        _cts.Cancel()
+        Try
+            _cts.Cancel()
+        Catch ex As ObjectDisposedException
+        End Try
     End Sub
 
     Public Function CompleteAsync() As Task
-        Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(HardDriveDataProvider))
-            Using categoryScope As IDisposable = LogContext.PushProperty("Category", "HardDriveProvider")
-                Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                    Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Lifecycle")
-                        Log.Information("Hard drive data provider completion started. DevicePath={DevicePath}.", DevicePath)
-                    End Using
-                End Using
-            End Using
-        End Using
+        SyncLock _completionLock
+            If _completionTask Is Nothing Then _completionTask = CompleteCoreAsync()
+            Return _completionTask
+        End SyncLock
+    End Function
+
+    Private Async Function CompleteCoreAsync() As Task
+        Log.Information("Hard drive data provider completion started. DevicePath={DevicePath}.", DevicePath)
         Try
             _cts.Cancel()
-        Finally
-            Try
-                If _ringBufferEnabled Then
-                    RingBuffer.Complete()
-                Else
-                    _writer.Complete()
-                    Reader.Complete()
-                End If
-            Catch ex As Exception
-                Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(HardDriveDataProvider))
-                    Using categoryScope As IDisposable = LogContext.PushProperty("Category", "HardDriveProvider")
-                        Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                            Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
-                                Log.Error(ex, "Hard drive data provider buffer completion failed. DevicePath={DevicePath}.", DevicePath)
-                            End Using
-                        End Using
-                    End Using
-                End Using
-            End Try
+        Catch ex As ObjectDisposedException
         End Try
-        Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(HardDriveDataProvider))
-            Using categoryScope As IDisposable = LogContext.PushProperty("Category", "HardDriveProvider")
-                Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                    Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Lifecycle")
-                        Log.Information("Hard drive data provider completion requested. DevicePath={DevicePath}.", DevicePath)
-                    End Using
-                End Using
-            End Using
-        End Using
-        Return Task.CompletedTask
+        CompleteOutput()
+        Await AwaitBackgroundTaskAsync(_producerTask).ConfigureAwait(False)
+        CompleteReader()
+
+        Try
+            _cts.Dispose()
+        Catch
+        End Try
+        If _ringBufferEnabled Then
+            Try
+                RingBuffer.Dispose()
+            Catch
+            End Try
+        End If
+        Log.Information("Hard drive data provider completion requested. DevicePath={DevicePath}.", DevicePath)
     End Function
+
+    Private Async Function AwaitBackgroundTaskAsync(task As Task) As Task
+        If task Is Nothing Then Return
+        Try
+            Await task.ConfigureAwait(False)
+        Catch ex As OperationCanceledException When _cts.IsCancellationRequested
+            Log.Information(ex, "Hard drive data provider producer stopped during cancellation. DevicePath={DevicePath}.", DevicePath)
+        Catch ex As Exception
+            Log.Error(ex, "Hard drive data provider producer failed while completing. DevicePath={DevicePath}.", DevicePath)
+        End Try
+    End Function
+
+    Private Sub CompleteOutput()
+        If Interlocked.Exchange(_outputCompleted, 1) <> 0 Then Return
+        Try
+            If _ringBufferEnabled Then
+                RingBuffer.Complete()
+            Else
+                _writer.Complete()
+            End If
+        Catch ex As Exception
+            Log.Error(ex, "Hard drive data provider output completion failed. DevicePath={DevicePath}.", DevicePath)
+        End Try
+    End Sub
+
+    Private Sub CompleteReader()
+        If _ringBufferEnabled OrElse Interlocked.Exchange(_readerCompleted, 1) <> 0 Then Return
+        Try
+            Reader.Complete()
+        Catch ex As Exception
+            Log.Error(ex, "Hard drive data provider reader completion failed. DevicePath={DevicePath}.", DevicePath)
+        End Try
+    End Sub
 
     Private Async Function ProducerLoopAsync() As Task
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(HardDriveDataProvider))
@@ -720,12 +805,10 @@ Public Class HardDriveDataProvider
             End Using
         End Using
         Try
-            While Not _cts.IsCancellationRequested
-
-                ' 大文件：流式拷贝到 Pipe（积极缓存，受 Pipe 背压调节）
+            ' 大文件：流式拷贝到 Pipe（积极缓存，受 Pipe 背压调节）
+            If Not _cts.IsCancellationRequested Then
                 Await StreamDiskToPipeAsync(DevicePath, StartLBA, SectorCount, _cts.Token)
-
-            End While
+            End If
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(HardDriveDataProvider))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "HardDriveProvider")
                     Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
@@ -735,6 +818,10 @@ Public Class HardDriveDataProvider
                     End Using
                 End Using
             End Using
+        Catch ex As OperationCanceledException When _cts.IsCancellationRequested
+            Log.Information(ex, "Hard drive data provider producer stopped during cancellation. DevicePath={DevicePath}.", DevicePath)
+        Catch ex As Exception When _cts.IsCancellationRequested
+            Log.Information(ex, "Hard drive data provider producer stopped after cancellation. DevicePath={DevicePath}.", DevicePath)
         Catch ex As Exception
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(HardDriveDataProvider))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "HardDriveProvider")
@@ -745,25 +832,8 @@ Public Class HardDriveDataProvider
                     End Using
                 End Using
             End Using
-            MessageBox.Show(ex.ToString())
-            Try
-                If _ringBufferEnabled Then
-                    RingBuffer.Complete()
-                Else
-                    _writer.Complete()
-                    Reader.Complete()
-                End If
-            Catch completionEx As Exception
-                Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(HardDriveDataProvider))
-                    Using categoryScope As IDisposable = LogContext.PushProperty("Category", "HardDriveProvider")
-                        Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                            Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
-                                Log.Error(completionEx, "Hard drive data provider failed to complete its output after a producer error. DevicePath={DevicePath}.", DevicePath)
-                            End Using
-                        End Using
-                    End Using
-                End Using
-            End Try
+        Finally
+            CompleteOutput()
         End Try
     End Function
 
@@ -771,6 +841,7 @@ Public Class HardDriveDataProvider
         Dim offset As Integer = 0
         While offset < data.Length
             Dim seg = RingBuffer.GetWriteSegment(1, ct)
+            If seg.Count = 0 Then Throw New EndOfStreamException("Ring buffer completed before all data was written.")
             Dim n As Integer = Math.Min(seg.Count, data.Length - offset)
             Buffer.BlockCopy(data, offset, seg.Array, seg.Offset, n)
             RingBuffer.AdvanceWrite(n)
@@ -808,10 +879,15 @@ Public Class HardDriveDataProvider
             Dim batchSize As Integer = 128
             With DiskQuery.QuerySectorInfo(driveHandle)
                 SectorLength = .SectorSize
-                batchSize = 65536 \ SectorLength
+                If SectorLength <= 0 Then Throw New InvalidDataException("The device reported an invalid sector size.")
+                batchSize = Math.Max(1, 65536 \ SectorLength)
+                If StartLBA >= .LBACount Then Throw New InvalidDataException("The requested disk start LBA is outside the device.")
                 If SectorCount < 0 Then
                     SectorCount = CLng(.LBACount - StartLBA)
+                ElseIf CULng(SectorCount) > .LBACount - StartLBA Then
+                    Throw New InvalidDataException("The requested disk sector range exceeds the device.")
                 End If
+                If SectorCount <= 0 Then Throw New InvalidDataException("The requested disk sector range is empty.")
                 Me.SectorCount = SectorCount
                 SectorLenUpdated = True
             End With
@@ -828,7 +904,7 @@ Public Class HardDriveDataProvider
                 End Using
             End Using
             Dim LBA As ULong = StartLBA
-            Dim EndLBA As ULong = CULng(StartLBA + SectorCount - 1)
+            Dim EndLBA As ULong = StartLBA + CULng(SectorCount) - 1UL
             If _ringBufferEnabled Then
                 Dim minChunk As Integer = SectorLength * batchSize
                 While Not ct.IsCancellationRequested
@@ -840,19 +916,22 @@ Public Class HardDriveDataProvider
                     CByte(CLng((LBA >> 8)) And &HFF), CByte(CLng((LBA >> 0)) And &HFF),
                     0, CByte((batch >> 8) And &HFF), CByte((batch >> 0) And &HFF), 0}, totalBytes)
                     LBA = CULng(LBA + batch)
-
-                    Dim remaining As Integer = totalBytes
-                    Dim srcOffset As Integer = 0
-                    While remaining > 0
-                        Dim seg = RingBuffer.GetWriteSegment(remaining, ct)
-                        If seg.Count = 0 Then Exit While
-                        Dim toCopy As Integer = Math.Min(remaining, seg.Count)
-                        Marshal.Copy(IntPtr.Add(dataPtr, srcOffset), seg.Array, seg.Offset, toCopy)
-                        RingBuffer.AdvanceWrite(toCopy)
-                        srcOffset += toCopy
-                        remaining -= toCopy
-                    End While
-                    Marshal.FreeHGlobal(dataPtr)
+                    If dataPtr = IntPtr.Zero Then Throw New IOException("The device reader returned a null data buffer.")
+                    Try
+                        Dim remaining As Integer = totalBytes
+                        Dim srcOffset As Integer = 0
+                        While remaining > 0
+                            Dim seg = RingBuffer.GetWriteSegment(remaining, ct)
+                            If seg.Count = 0 Then Throw New EndOfStreamException("The device data buffer ended before the requested sector range was written.")
+                            Dim toCopy As Integer = Math.Min(remaining, seg.Count)
+                            Marshal.Copy(IntPtr.Add(dataPtr, srcOffset), seg.Array, seg.Offset, toCopy)
+                            RingBuffer.AdvanceWrite(toCopy)
+                            srcOffset += toCopy
+                            remaining -= toCopy
+                        End While
+                    Finally
+                        Marshal.FreeHGlobal(dataPtr)
+                    End Try
                 End While
             Else
                 Dim minSize As Integer = SectorLength * batchSize
@@ -865,23 +944,27 @@ Public Class HardDriveDataProvider
                     CByte(CLng((LBA >> 8)) And &HFF), CByte(CLng((LBA >> 0)) And &HFF),
                     0, CByte((batch >> 8) And &HFF), CByte((batch >> 0) And &HFF), 0}, totalBytes)
                     LBA = CULng(LBA + batch)
-
-                    Dim remaining As Integer = totalBytes
-                    Dim srcOffset As Integer = 0
-                    While remaining > 0
-                        Dim dest As Memory(Of Byte) = _writer.GetMemory(minSize)
-                        Dim seg As New ArraySegment(Of Byte)
-                        If Not MemoryMarshal.TryGetArray(Of Byte)(dest, seg) Then
-                            Throw New Exception("TryGetArray failed")
-                        End If
-                        Dim cap As Integer = Math.Min(minSize, seg.Count)
-                        Dim toCopy As Integer = Math.Min(remaining, cap)
-                        Marshal.Copy(IntPtr.Add(dataPtr, srcOffset), seg.Array, seg.Offset, toCopy)
-                        _writer.Advance(toCopy)
-                        srcOffset += toCopy
-                        remaining -= toCopy
-                    End While
-                    Marshal.FreeHGlobal(dataPtr)
+                    If dataPtr = IntPtr.Zero Then Throw New IOException("The device reader returned a null data buffer.")
+                    Try
+                        Dim remaining As Integer = totalBytes
+                        Dim srcOffset As Integer = 0
+                        While remaining > 0
+                            Dim dest As Memory(Of Byte) = _writer.GetMemory(CInt(Math.Min(CLng(minSize), CLng(remaining))))
+                            Dim seg As New ArraySegment(Of Byte)
+                            If Not MemoryMarshal.TryGetArray(Of Byte)(dest, seg) Then
+                                Throw New Exception("TryGetArray failed")
+                            End If
+                            Dim cap As Integer = CInt(Math.Min(Math.Min(CLng(minSize), CLng(seg.Count)), CLng(remaining)))
+                            If cap <= 0 Then Throw New EndOfStreamException("The device data buffer ended before the requested sector range was written.")
+                            Dim toCopy As Integer = Math.Min(remaining, cap)
+                            Marshal.Copy(IntPtr.Add(dataPtr, srcOffset), seg.Array, seg.Offset, toCopy)
+                            _writer.Advance(toCopy)
+                            srcOffset += toCopy
+                            remaining -= toCopy
+                        End While
+                    Finally
+                        Marshal.FreeHGlobal(dataPtr)
+                    End Try
                     Dim result = Await _writer.FlushAsync(ct).ConfigureAwait(False)
                     If result.IsCanceled OrElse result.IsCompleted Then Exit While
                 End While
