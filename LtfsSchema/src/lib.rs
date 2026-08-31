@@ -588,6 +588,181 @@ fn write_nullable_string(output: &mut impl Write, value: Option<&str>) -> Result
     output.write_all(bytes).map_err(|error| error.to_string())
 }
 
+fn write_file_uid_element<W: Write>(writer: &mut Writer<W>, file_uid: i64) -> Result<(), String> {
+    writer
+        .write_event(Event::Start(BytesStart::new("fileuid")))
+        .map_err(|error| error.to_string())?;
+    write_xml_text(writer, &file_uid.to_string())?;
+    writer
+        .write_event(Event::End(BytesEnd::new("fileuid")))
+        .map_err(|error| error.to_string())
+}
+
+fn rewrite_file_record_uid(bytes: &[u8], file_uid: i64) -> Result<Vec<u8>, String> {
+    let mut reader = Reader::from_reader(Cursor::new(bytes));
+    let mut writer = Writer::new(Vec::with_capacity(bytes.len() + 24));
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    let mut root_seen = false;
+    let mut root_closed = false;
+    let mut file_uid_found = false;
+    let mut replacing_file_uid_at_depth = None;
+
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| error.to_string())?
+            .into_owned();
+        buffer.clear();
+
+        match event {
+            Event::Start(value) => {
+                if replacing_file_uid_at_depth.is_some() {
+                    depth = depth
+                        .checked_add(1)
+                        .ok_or_else(|| invalid("file record XML depth overflow"))?;
+                    continue;
+                }
+
+                if depth == 0 {
+                    if root_seen || !is_name(&value, "file") {
+                        return Err(invalid("file record root element must be file"));
+                    }
+                    root_seen = true;
+                }
+                depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("file record XML depth overflow"))?;
+                if depth == 2 && is_name(&value, "fileuid") && !file_uid_found {
+                    writer
+                        .write_event(Event::Start(value))
+                        .map_err(|error| error.to_string())?;
+                    replacing_file_uid_at_depth = Some(depth);
+                } else {
+                    writer
+                        .write_event(Event::Start(value))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Event::Empty(value) => {
+                if replacing_file_uid_at_depth.is_some() {
+                    continue;
+                }
+                if depth == 0 {
+                    if root_seen || !is_name(&value, "file") {
+                        return Err(invalid("file record root element must be file"));
+                    }
+                    root_seen = true;
+                    writer
+                        .write_event(Event::Start(value))
+                        .map_err(|error| error.to_string())?;
+                    write_file_uid_element(&mut writer, file_uid)?;
+                    writer
+                        .write_event(Event::End(BytesEnd::new("file")))
+                        .map_err(|error| error.to_string())?;
+                    file_uid_found = true;
+                    root_closed = true;
+                } else if depth == 1 && is_name(&value, "fileuid") && !file_uid_found {
+                    writer
+                        .write_event(Event::Start(value))
+                        .map_err(|error| error.to_string())?;
+                    write_xml_text(&mut writer, &file_uid.to_string())?;
+                    writer
+                        .write_event(Event::End(BytesEnd::new("fileuid")))
+                        .map_err(|error| error.to_string())?;
+                    file_uid_found = true;
+                } else {
+                    writer
+                        .write_event(Event::Empty(value))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Event::End(value) => {
+                if let Some(file_uid_depth) = replacing_file_uid_at_depth {
+                    if depth == file_uid_depth && event_name_end(&value) == "fileuid" {
+                        write_xml_text(&mut writer, &file_uid.to_string())?;
+                        writer
+                            .write_event(Event::End(value))
+                            .map_err(|error| error.to_string())?;
+                        file_uid_found = true;
+                        replacing_file_uid_at_depth = None;
+                    }
+                    depth = depth
+                        .checked_sub(1)
+                        .ok_or_else(|| invalid("file record XML depth underflow"))?;
+                    continue;
+                }
+
+                if depth == 0 {
+                    return Err(invalid("file record XML has an unexpected end element"));
+                }
+                if depth == 1 && event_name_end(&value) == "file" {
+                    if !file_uid_found {
+                        write_file_uid_element(&mut writer, file_uid)?;
+                        file_uid_found = true;
+                    }
+                    writer
+                        .write_event(Event::End(value))
+                        .map_err(|error| error.to_string())?;
+                    depth = 0;
+                    root_closed = true;
+                } else {
+                    writer
+                        .write_event(Event::End(value))
+                        .map_err(|error| error.to_string())?;
+                    depth -= 1;
+                }
+            }
+            Event::Text(value) => {
+                if replacing_file_uid_at_depth.is_none() {
+                    writer
+                        .write_event(Event::Text(value))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Event::CData(value) => {
+                if replacing_file_uid_at_depth.is_none() {
+                    writer
+                        .write_event(Event::CData(value))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Event::Comment(value) => {
+                if replacing_file_uid_at_depth.is_none() {
+                    writer
+                        .write_event(Event::Comment(value))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Event::PI(value) => {
+                if replacing_file_uid_at_depth.is_none() {
+                    writer
+                        .write_event(Event::PI(value))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Event::GeneralRef(value) => {
+                decode_general_ref(value.as_ref())?;
+                if replacing_file_uid_at_depth.is_none() {
+                    writer
+                        .write_event(Event::GeneralRef(value))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Event::Decl(_) => {
+                return Err(invalid("XML declaration is not valid inside a file record"));
+            }
+            Event::DocType(_) => return Err(invalid("unsafe XML construct in file record")),
+            Event::Eof => break,
+        }
+    }
+
+    if !root_seen || !root_closed || depth != 0 || replacing_file_uid_at_depth.is_some() {
+        return Err(invalid("file record XML is incomplete"));
+    }
+    Ok(writer.into_inner())
+}
+
 struct IndexChain {
     first: i64,
     last: i64,
@@ -625,6 +800,7 @@ struct StoreOutput {
     file_records_position: i64,
     directory_records_position: i64,
     selection_count: u64,
+    next_file_uid: i64,
 }
 
 struct CountingWriter<'a, W: Write> {
@@ -674,7 +850,17 @@ impl StoreOutput {
             file_records_position: 0,
             directory_records_position: 0,
             selection_count: 0,
+            next_file_uid: 1,
         })
+    }
+
+    fn allocate_file_uid(&mut self) -> Result<i64, String> {
+        let file_uid = self.next_file_uid;
+        self.next_file_uid = self
+            .next_file_uid
+            .checked_add(1)
+            .ok_or_else(|| invalid("too many file UIDs in merged schema"))?;
+        Ok(file_uid)
     }
 
     fn allocate_selection(&mut self) -> Result<i64, String> {
@@ -897,7 +1083,6 @@ impl StoreOutput {
         &mut self,
         source: &MergeSourceResult,
     ) -> Result<(IndexChain, IndexChain), String> {
-        let file_records_base = self.file_records_position;
         let directory_records_base = self.directory_records_position;
         let file_index_base = i64::try_from(self.file_index_data.len())
             .map_err(|_| invalid("file index is too large"))?;
@@ -914,22 +1099,92 @@ impl StoreOutput {
             return Err(invalid("invalid merge source backing file length"));
         }
 
+        let mut file_index = std::fs::read(&source.paths[2]).map_err(|error| {
+            format!(
+                "cannot read merge source file index {}: {error}",
+                source.paths[2].display()
+            )
+        })?;
+        if i64::try_from(file_index.len())
+            .map_err(|_| invalid("merge source file index is too large"))?
+            != source.file_index_length
+            || file_index.len() % FILE_INDEX_ENTRY_SIZE as usize != 0
+        {
+            return Err(invalid("merge source file index is truncated"));
+        }
+
         let mut source_file_records = File::open(&source.paths[0]).map_err(|error| {
             format!(
                 "cannot open merge source file records {}: {error}",
                 source.paths[0].display()
             )
         })?;
-        let copied_file_records =
-            std::io::copy(&mut source_file_records, &mut self.file_records)
-                .map_err(|error| format!("cannot append merge source file records: {error}"))?;
-        if copied_file_records != source.file_records_length as u64 {
+        let source_file_records_length = source_file_records
+            .metadata()
+            .map_err(|error| format!("cannot stat merge source file records: {error}"))?
+            .len();
+        if source_file_records_length
+            != u64::try_from(source.file_records_length)
+                .map_err(|_| invalid("merge source file records are too large"))?
+        {
             return Err(invalid("merge source file records changed while merging"));
         }
-        self.file_records_position = self
-            .file_records_position
-            .checked_add(source.file_records_length)
-            .ok_or_else(|| invalid("file records are too large"))?;
+        for entry in file_index.chunks_exact_mut(FILE_INDEX_ENTRY_SIZE as usize) {
+            let next_offset = read_i64_at(entry, 0, "merge source file index next offset")?;
+            let record_offset = read_i64_at(entry, 8, "merge source file record offset")?;
+            let record_length = read_i64_at(entry, 16, "merge source file record length")?;
+            let selection_index = read_i64_at(entry, 24, "merge source file selection index")?;
+            if record_offset < 0 || record_length <= 0 {
+                return Err(invalid("invalid merge source file record range"));
+            }
+            let record_end = record_offset
+                .checked_add(record_length)
+                .ok_or_else(|| invalid("merge source file record offset overflow"))?;
+            if record_end > source.file_records_length {
+                return Err(invalid(
+                    "merge source file record is outside the backing file",
+                ));
+            }
+            let record_length_usize = usize::try_from(record_length)
+                .map_err(|_| invalid("merge source file record is too large"))?;
+            source_file_records
+                .seek(SeekFrom::Start(u64::try_from(record_offset).map_err(
+                    |_| invalid("invalid merge source file record offset"),
+                )?))
+                .map_err(|error| format!("cannot seek merge source file record: {error}"))?;
+            let mut record = vec![0u8; record_length_usize];
+            source_file_records
+                .read_exact(&mut record)
+                .map_err(|error| format!("cannot read merge source file record: {error}"))?;
+            let file_uid = self.allocate_file_uid()?;
+            let rewritten = rewrite_file_record_uid(&record, file_uid)?;
+            let rewritten_offset = self.file_records_position;
+            let rewritten_length = i64::try_from(rewritten.len())
+                .map_err(|_| invalid("merged file record is too large"))?;
+            self.file_records
+                .write_all(&rewritten)
+                .map_err(|error| format!("cannot append merge source file record: {error}"))?;
+            self.file_records_position = self
+                .file_records_position
+                .checked_add(rewritten_length)
+                .ok_or_else(|| invalid("file records are too large"))?;
+
+            write_i64_at(
+                entry,
+                0,
+                rebase_offset(next_offset, file_index_base, "file index")?,
+                "merge file index next offset",
+            )?;
+            write_i64_at(entry, 8, rewritten_offset, "merge file record offset")?;
+            write_i64_at(entry, 16, rewritten_length, "merge file record length")?;
+            write_i64_at(
+                entry,
+                24,
+                rebase_offset(selection_index, selection_base, "selection")?,
+                "merge file selection index",
+            )?;
+        }
+        self.file_index_data.extend_from_slice(&file_index);
 
         let mut directory_records = std::fs::read(&source.paths[1]).map_err(|error| {
             format!(
@@ -1013,44 +1268,6 @@ impl StoreOutput {
             .directory_records_position
             .checked_add(source.directory_records_length)
             .ok_or_else(|| invalid("directory records are too large"))?;
-
-        let mut file_index = std::fs::read(&source.paths[2]).map_err(|error| {
-            format!(
-                "cannot read merge source file index {}: {error}",
-                source.paths[2].display()
-            )
-        })?;
-        if i64::try_from(file_index.len())
-            .map_err(|_| invalid("merge source file index is too large"))?
-            != source.file_index_length
-            || file_index.len() % FILE_INDEX_ENTRY_SIZE as usize != 0
-        {
-            return Err(invalid("merge source file index is truncated"));
-        }
-        for entry in file_index.chunks_exact_mut(FILE_INDEX_ENTRY_SIZE as usize) {
-            let next_offset = read_i64_at(entry, 0, "merge source file index next offset")?;
-            let record_offset = read_i64_at(entry, 8, "merge source file record offset")?;
-            let selection_index = read_i64_at(entry, 24, "merge source file selection index")?;
-            write_i64_at(
-                entry,
-                0,
-                rebase_offset(next_offset, file_index_base, "file index")?,
-                "merge file index next offset",
-            )?;
-            write_i64_at(
-                entry,
-                8,
-                rebase_offset(record_offset, file_records_base, "file record")?,
-                "merge file record offset",
-            )?;
-            write_i64_at(
-                entry,
-                24,
-                rebase_offset(selection_index, selection_base, "selection")?,
-                "merge file selection index",
-            )?;
-        }
-        self.file_index_data.extend_from_slice(&file_index);
 
         let mut directory_index = source_directory_index;
         if i64::try_from(directory_index.len())
@@ -1742,6 +1959,43 @@ impl MergeDirectoryNormalizer<'_> {
         Ok(())
     }
 
+    fn write_directory_file_uid(
+        &mut self,
+        header: &StoreDirectoryHeader,
+        file_uid: i64,
+    ) -> Result<(), String> {
+        let uid_offset = header
+            .scalar_offset
+            .checked_add(
+                header
+                    .scalar_length
+                    .checked_sub(8)
+                    .ok_or_else(|| invalid("merge directory scalar record is truncated"))?,
+            )
+            .ok_or_else(|| invalid("merge directory scalar offset overflow"))?;
+        let uid_end = uid_offset
+            .checked_add(8)
+            .ok_or_else(|| invalid("merge directory scalar offset overflow"))?;
+        let scalar_end = header
+            .scalar_offset
+            .checked_add(header.scalar_length)
+            .ok_or_else(|| invalid("merge directory scalar offset overflow"))?;
+        if uid_offset < header.scalar_offset
+            || uid_end > scalar_end
+            || uid_end > self.directory_records_length
+        {
+            return Err(invalid("merge directory scalar record is truncated"));
+        }
+        self.directory_records
+            .seek(SeekFrom::Start(u64::try_from(uid_offset).map_err(
+                |_| invalid("invalid merge directory scalar offset"),
+            )?))
+            .map_err(|error| format!("cannot seek merge directory file UID: {error}"))?;
+        self.directory_records
+            .write_all(&file_uid.to_le_bytes())
+            .map_err(|error| format!("cannot update merge directory file UID: {error}"))
+    }
+
     fn write_directory_header(
         &mut self,
         record_offset: i64,
@@ -1929,6 +2183,8 @@ impl MergeDirectoryNormalizer<'_> {
 
     fn normalize_directory(&mut self, record_offset: i64) -> Result<StoreDirectoryHeader, String> {
         let mut header = self.read_directory_header(record_offset)?;
+        let file_uid = self.store.allocate_file_uid()?;
+        self.write_directory_file_uid(&header, file_uid)?;
         let files = self.read_file_chain(header.file_index_offset, header.file_count)?;
         let mut directories =
             self.read_directory_chain(header.directory_index_offset, header.directory_count)?;
@@ -5402,7 +5658,12 @@ fn parse_merge_source(
             directories,
             total_files,
             total_directories,
-        } = parser.parse_merge_contents()?;
+        } = parser.parse_merge_contents().map_err(|error| {
+            format!(
+                "cannot parse merge source {}: {error}",
+                input_path.display()
+            )
+        })?;
         store.finish()?;
         let source = MergeSourceResult {
             paths: paths.clone(),
@@ -5551,6 +5812,10 @@ fn schema_context_from_files(
         }
 
         store.normalize_merge_directories(&mut root_state, &paths[1])?;
+        let highest_file_uid = store
+            .next_file_uid
+            .checked_sub(1)
+            .ok_or_else(|| invalid("merged schema file UID underflow"))?;
 
         let root_values = DirectoryValues {
             name: Some(root_name),
@@ -5579,6 +5844,8 @@ fn schema_context_from_files(
             public: LscSchemaMetadata {
                 struct_size: std::mem::size_of::<LscSchemaMetadata>() as u32,
                 abi_version: 1,
+                present_mask: PRESENT_HIGHEST_FILE_UID,
+                highest_file_uid,
                 ..Default::default()
             },
             ..Default::default()
@@ -6924,8 +7191,8 @@ mod tests {
             root.join("directory-index.bin"),
             root.join("selection.bin"),
         ];
-        let first_text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><contents><file><name>same.txt</name><length>1</length></file><directory><name>same</name><contents><file><name>first.txt</name><length>2</length></file><directory><name>nested</name><contents><file><name>nested-first.txt</name><length>3</length></file></contents></directory></contents></directory></contents></directory></ltfsindex>"#;
-        let second_text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><contents><file><name>same.txt</name><length>4</length></file><directory><name>same</name><contents><file><name>second.txt</name><length>5</length></file><directory><name>nested</name><contents><file><name>nested-second.txt</name><length>6</length></file></contents></directory></contents></directory></contents></directory></ltfsindex>"#;
+        let first_text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><fileuid>900</fileuid><contents><file><name>same.txt</name><length>1</length><fileuid>42</fileuid></file><directory><name>same</name><fileuid>901</fileuid><contents><file><name>first.txt</name><length>2</length><fileuid>43</fileuid></file><directory><name>nested</name><fileuid>902</fileuid><contents><file><name>nested-first.txt</name><length>3</length><fileuid>44</fileuid></file></contents></directory></contents></directory></contents></directory></ltfsindex>"#;
+        let second_text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><fileuid>900</fileuid><contents><file><name>same.txt</name><length>4</length><fileuid>42</fileuid></file><directory><name>same</name><fileuid>901</fileuid><contents><file><name>second.txt</name><length>5</length><fileuid>43</fileuid></file><directory><name>nested</name><fileuid>902</fileuid><contents><file><name>nested-second.txt</name><length>6</length><fileuid>44</fileuid></file></contents></directory></contents></directory></contents></directory></ltfsindex>"#;
         std::fs::write(&first, first_text).expect("write first duplicate directory schema");
         std::fs::write(&second, second_text).expect("write second duplicate directory schema");
 
@@ -6935,6 +7202,11 @@ mod tests {
             paths.clone(),
         )
         .expect("merge duplicate directory schemas");
+        assert_eq!(context.metadata.public.highest_file_uid, 8);
+        assert_eq!(
+            context.metadata.public.present_mask & PRESENT_HIGHEST_FILE_UID,
+            PRESENT_HIGHEST_FILE_UID
+        );
         let store = StoreContext {
             file_records: Mutex::new(File::open(&paths[0]).expect("open file backing")),
             directory_records: Mutex::new(File::open(&paths[1]).expect("open directory backing")),
@@ -6954,6 +7226,27 @@ mod tests {
         assert_eq!(root_header.total_file_count, 6);
         assert_eq!(root_header.total_directory_count, 2);
 
+        let mut root_file_ids = Vec::new();
+        let mut root_file_index_offset = root_header.file_index_offset;
+        for _ in 0..root_header.file_count {
+            let entry = store_file_index_entry(&store, root_file_index_offset)
+                .expect("read merged root file index");
+            let bytes = read_store_at(
+                &store.file_records,
+                entry.record_offset,
+                entry.record_length as usize,
+                "merged root file record",
+            )
+            .expect("read merged root file record");
+            root_file_ids.push(
+                parse_file_bytes(&bytes)
+                    .expect("parse merged root file")
+                    .file_uid,
+            );
+            root_file_index_offset = entry.next_offset;
+        }
+        assert_eq!(root_file_ids, vec![1, 4]);
+
         let same_index = store_directory_index_entry(&store, root_header.directory_index_offset)
             .expect("read merged same directory index");
         assert_eq!(same_index.next_offset, -1);
@@ -6965,6 +7258,12 @@ mod tests {
                 .name
                 .as_deref(),
             Some("same")
+        );
+        assert_eq!(
+            read_store_directory_scalars(&store, &same_header)
+                .expect("read merged same directory scalars")
+                .file_uid,
+            7
         );
         assert_eq!(same_header.file_count, 2);
         assert_eq!(same_header.directory_count, 1);
@@ -6982,6 +7281,12 @@ mod tests {
                 .name
                 .as_deref(),
             Some("nested")
+        );
+        assert_eq!(
+            read_store_directory_scalars(&store, &nested_header)
+                .expect("read merged nested directory scalars")
+                .file_uid,
+            8
         );
         assert_eq!(nested_header.file_count, 2);
         assert_eq!(nested_header.directory_count, 0);
