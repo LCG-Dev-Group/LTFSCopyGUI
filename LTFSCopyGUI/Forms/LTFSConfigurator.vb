@@ -2239,29 +2239,34 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
         CheckBoxAutoRefresh.Checked = False
         ListBox1.Items.Clear()
         Dim DevList As List(Of TapeUtils.BlockDevice)
-        LastDeviceList = TapeUtils.GetDiskDriveList()
-        DevList = LastDeviceList
-        For Each D As TapeUtils.BlockDevice In DevList
-            D.DeviceType = "PhysicalDrive"
-            ListBox1.Items.Add(D.ToString())
-        Next
-        ListBox1.SelectedIndex = Math.Min(SelectedIndex, ListBox1.Items.Count - 1)
-        Dim t As String = ComboBoxDriveLetter.Text
-        ComboBoxDriveLetter.Items.Clear()
-        ComboBoxDriveLetter.Text = ""
-        For Each s As String In AvailableDriveLetters
-            ComboBoxDriveLetter.Items.Add(s)
-        Next
-        If ComboBoxDriveLetter.Items.Count > 0 Then
-            If Not ComboBoxDriveLetter.Items.Contains(t) Then
-                ComboBoxDriveLetter.SelectedIndex = 0
-            Else
-                ComboBoxDriveLetter.Text = t
+        Try
+            LastDeviceList = TapeUtils.GetDiskDriveList()
+            DevList = LastDeviceList
+            For Each D As TapeUtils.BlockDevice In DevList
+                D.DeviceType = "PhysicalDrive"
+                ListBox1.Items.Add(D.ToString())
+            Next
+            ListBox1.SelectedIndex = Math.Min(SelectedIndex, ListBox1.Items.Count - 1)
+            Dim t As String = ComboBoxDriveLetter.Text
+            ComboBoxDriveLetter.Items.Clear()
+            ComboBoxDriveLetter.Text = ""
+            For Each s As String In AvailableDriveLetters
+                ComboBoxDriveLetter.Items.Add(s)
+            Next
+            If ComboBoxDriveLetter.Items.Count > 0 Then
+                If Not ComboBoxDriveLetter.Items.Contains(t) Then
+                    ComboBoxDriveLetter.SelectedIndex = 0
+                Else
+                    ComboBoxDriveLetter.Text = t
+                End If
             End If
-        End If
+            SelectedIndex = ListBox1.SelectedIndex
+        Catch ex As Exception
+            TextBoxDebugOutput.Text = ex.ToString()
+        End Try
+
 
         LoadComplete = True
-        SelectedIndex = ListBox1.SelectedIndex
     End Sub
 
     Private Sub LTFSConfigurator_KeyDown(sender As Object, e As KeyEventArgs) Handles Me.KeyDown
