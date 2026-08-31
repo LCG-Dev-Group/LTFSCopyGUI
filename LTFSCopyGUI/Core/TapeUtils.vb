@@ -7376,7 +7376,12 @@ Public Class TapeUtils
             Dim deviceNumberResult As NativeStorageDeviceNumberResult = NativeMethods.QueryStorageDeviceNumber(devicePath)
             SetLastNativeError(deviceNumberResult.Win32Error)
             Dim result As Boolean = deviceNumberResult.Succeeded
-            Dim drv As BlockDevice = Inquiry(devicePath)
+            Dim drv As BlockDevice = Nothing
+            Try
+                drv = Inquiry(devicePath)
+            Catch ex As Exception
+                Serilog.Log.Error(ex.ToString())
+            End Try
             If drv Is Nothing Then drv = New BlockDevice()
             drv.DevicePath = devicePath
             If result Then
@@ -7452,12 +7457,16 @@ Public Class TapeUtils
             Dim deviceNumberResult As NativeStorageDeviceNumberResult = NativeMethods.QueryStorageDeviceNumber(devicePath)
             SetLastNativeError(deviceNumberResult.Win32Error)
             Dim result As Boolean = deviceNumberResult.Succeeded
-            Dim drv As BlockDevice
-            If Not result Then
-                drv = Inquiry(devicePath)
-            Else
-                drv = Inquiry($"\\.\PhysicalDrive{deviceNumberResult.DeviceNumber}")
-            End If
+            Dim drv As BlockDevice = Nothing
+            Try
+                If Not result Then
+                    drv = Inquiry(devicePath)
+                Else
+                    drv = Inquiry($"\\.\PhysicalDrive{deviceNumberResult.DeviceNumber}")
+                End If
+            Catch ex As Exception
+                Serilog.Log.Error(ex.ToString())
+            End Try
             If drv Is Nothing Then Continue For
             drv.DeviceType = "PhysicalDrive"
             If result Then
@@ -7509,7 +7518,12 @@ Public Class TapeUtils
             Dim deviceNumberResult As NativeStorageDeviceNumberResult = NativeMethods.QueryStorageDeviceNumber(devicePath)
             SetLastNativeError(deviceNumberResult.Win32Error)
             Dim result As Boolean = deviceNumberResult.Succeeded
-            Dim drv As BlockDevice = Inquiry(devicePath)
+            Dim drv As BlockDevice = Nothing
+            Try
+                drv = Inquiry(devicePath)
+            Catch ex As Exception
+                Serilog.Log.Error(ex.ToString())
+            End Try
             If drv Is Nothing Then Continue For
             drv.DeviceType = "CHANGER"
             drv.DevicePath = devicePath
