@@ -1,5 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 
+use hashbrown::HashMap;
 use memmap2::{Mmap, MmapOptions};
 use quick_xml::escape::{escape, unescape};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
@@ -862,6 +863,36 @@ impl StoreOutput {
         Ok(())
     }
 
+    fn normalize_merge_directories(
+        &mut self,
+        root: &mut DirectoryState,
+        directory_records_path: &Path,
+    ) -> Result<(), String> {
+        // Directory records are streamed into a buffered writer while the
+        // merge sources are appended.  Flush them before opening a reader for
+        // the names and headers that drive directory de-duplication.
+        self.directory_records
+            .flush()
+            .map_err(|error| error.to_string())?;
+        let directory_records = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(directory_records_path)
+            .map_err(|error| {
+                format!(
+                    "cannot open merged directory records {}: {error}",
+                    directory_records_path.display()
+                )
+            })?;
+        let directory_records_length = self.directory_records_position;
+        let mut normalizer = MergeDirectoryNormalizer {
+            store: self,
+            directory_records,
+            directory_records_length,
+        };
+        normalizer.normalize_root(root)
+    }
+
     fn append_merge_source(
         &mut self,
         source: &MergeSourceResult,
@@ -1488,6 +1519,451 @@ struct StoreDirectoryHeader {
     directory_count: i64,
     total_file_count: i64,
     total_directory_count: i64,
+}
+
+struct MergeDirectoryNormalizer<'a> {
+    store: &'a mut StoreOutput,
+    directory_records: File,
+    directory_records_length: i64,
+}
+
+impl MergeDirectoryNormalizer<'_> {
+    fn read_bytes(&mut self, offset: i64, length: usize, label: &str) -> Result<Vec<u8>, String> {
+        if offset < 0 {
+            return Err(invalid(format!("invalid {label} offset")));
+        }
+        let length = i64::try_from(length).map_err(|_| invalid(format!("{label} is too large")))?;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| invalid(format!("{label} offset overflow")))?;
+        if end > self.directory_records_length {
+            return Err(invalid(format!("{label} is outside the backing file")));
+        }
+        self.directory_records
+            .seek(SeekFrom::Start(
+                u64::try_from(offset).map_err(|_| invalid(format!("invalid {label} offset")))?,
+            ))
+            .map_err(|error| format!("cannot seek {label}: {error}"))?;
+        let mut bytes = vec![0u8; length as usize];
+        self.directory_records
+            .read_exact(&mut bytes)
+            .map_err(|error| format!("cannot read {label}: {error}"))?;
+        Ok(bytes)
+    }
+
+    fn read_directory_header(
+        &mut self,
+        record_offset: i64,
+    ) -> Result<StoreDirectoryHeader, String> {
+        let bytes = self.read_bytes(
+            record_offset,
+            DIRECTORY_HEADER_SIZE as usize,
+            "merge directory header",
+        )?;
+        let mut cursor = StoreCursor::new(&bytes);
+        if cursor.i32()? != DIRECTORY_MAGIC || cursor.i32()? != DIRECTORY_VERSION {
+            return Err(invalid("invalid merge directory header"));
+        }
+        let scalar_offset = cursor.i64()?;
+        let scalar_length = i64::from(cursor.i32()?);
+        let _reserved = cursor.i32()?;
+        let file_index_offset = cursor.i64()?;
+        let file_count = i64::from(cursor.i32()?);
+        let directory_index_offset = cursor.i64()?;
+        let directory_count = i64::from(cursor.i32()?);
+        let total_file_count = cursor.i64()?;
+        let total_directory_count = cursor.i64()?;
+
+        let scalar_minimum = record_offset
+            .checked_add(DIRECTORY_HEADER_SIZE)
+            .ok_or_else(|| invalid("merge directory record offset overflow"))?;
+        let scalar_end = scalar_offset
+            .checked_add(scalar_length)
+            .ok_or_else(|| invalid("merge directory scalar offset overflow"))?;
+        if scalar_offset < scalar_minimum
+            || scalar_length < 0
+            || scalar_end > self.directory_records_length
+            || file_index_offset < -1
+            || directory_index_offset < -1
+            || file_count < 0
+            || directory_count < 0
+            || total_file_count < 0
+            || total_directory_count < 0
+        {
+            return Err(invalid("invalid merge directory counts or indexes"));
+        }
+        Ok(StoreDirectoryHeader {
+            scalar_offset,
+            scalar_length,
+            file_index_offset,
+            file_count,
+            directory_index_offset,
+            directory_count,
+            total_file_count,
+            total_directory_count,
+        })
+    }
+
+    fn read_directory_name(
+        &mut self,
+        header: &StoreDirectoryHeader,
+    ) -> Result<Option<String>, String> {
+        let bytes = self.read_bytes(
+            header.scalar_offset,
+            read_store_length(header.scalar_length, "merge directory scalar record")?,
+            "merge directory scalar",
+        )?;
+        let mut cursor = StoreCursor::new(&bytes);
+        cursor.nullable_string()
+    }
+
+    fn read_directory_index_entry(&self, offset: i64) -> Result<(i64, i64, i64), String> {
+        if offset < 0 {
+            return Err(invalid("invalid merge directory index offset"));
+        }
+        let offset = usize::try_from(offset)
+            .map_err(|_| invalid("merge directory index offset is too large"))?;
+        let end = offset
+            .checked_add(DIRECTORY_INDEX_ENTRY_SIZE as usize)
+            .ok_or_else(|| invalid("merge directory index offset overflow"))?;
+        if end > self.store.directory_index_data.len() {
+            return Err(invalid("merge directory index chain is truncated"));
+        }
+        Ok((
+            read_i64_at(
+                &self.store.directory_index_data,
+                offset,
+                "merge directory index next offset",
+            )?,
+            read_i64_at(
+                &self.store.directory_index_data,
+                offset + 8,
+                "merge directory record offset",
+            )?,
+            read_i64_at(
+                &self.store.directory_index_data,
+                offset + 16,
+                "merge directory selection index",
+            )?,
+        ))
+    }
+
+    fn read_file_index_next(&self, offset: i64) -> Result<i64, String> {
+        if offset < 0 {
+            return Err(invalid("invalid merge file index offset"));
+        }
+        let offset =
+            usize::try_from(offset).map_err(|_| invalid("merge file index offset is too large"))?;
+        let end = offset
+            .checked_add(FILE_INDEX_ENTRY_SIZE as usize)
+            .ok_or_else(|| invalid("merge file index offset overflow"))?;
+        if end > self.store.file_index_data.len() {
+            return Err(invalid("merge file index chain is truncated"));
+        }
+        read_i64_at(
+            &self.store.file_index_data,
+            offset,
+            "merge file index next offset",
+        )
+    }
+
+    fn read_directory_chain(&self, first: i64, count: i64) -> Result<IndexChain, String> {
+        if count < 0 {
+            return Err(invalid("invalid merge directory count"));
+        }
+        let count =
+            u64::try_from(count).map_err(|_| invalid("merge directory count is too large"))?;
+        if count == 0 {
+            if first != -1 {
+                return Err(invalid(
+                    "merge directory index is non-empty with zero count",
+                ));
+            }
+            return Ok(IndexChain::default());
+        }
+        if first < 0 {
+            return Err(invalid("merge directory index chain is truncated"));
+        }
+
+        let mut current = first;
+        let mut last = -1;
+        for _ in 0..count {
+            let (next, _, _) = self.read_directory_index_entry(current)?;
+            last = current;
+            current = next;
+        }
+        if current != -1 {
+            return Err(invalid("merge directory index chain has an invalid length"));
+        }
+        Ok(IndexChain { first, last, count })
+    }
+
+    fn read_file_chain(&self, first: i64, count: i64) -> Result<IndexChain, String> {
+        if count < 0 {
+            return Err(invalid("invalid merge file count"));
+        }
+        let count = u64::try_from(count).map_err(|_| invalid("merge file count is too large"))?;
+        if count == 0 {
+            if first != -1 {
+                return Err(invalid("merge file index is non-empty with zero count"));
+            }
+            return Ok(IndexChain::default());
+        }
+        if first < 0 {
+            return Err(invalid("merge file index chain is truncated"));
+        }
+
+        let mut current = first;
+        let mut last = -1;
+        for _ in 0..count {
+            let next = self.read_file_index_next(current)?;
+            last = current;
+            current = next;
+        }
+        if current != -1 {
+            return Err(invalid("merge file index chain has an invalid length"));
+        }
+        Ok(IndexChain { first, last, count })
+    }
+
+    fn write_directory_index_next(&mut self, offset: i64, next: i64) -> Result<(), String> {
+        if offset < 0 {
+            return Err(invalid("invalid merge directory index offset"));
+        }
+        let offset = usize::try_from(offset)
+            .map_err(|_| invalid("merge directory index offset is too large"))?;
+        let end = offset
+            .checked_add(8)
+            .ok_or_else(|| invalid("merge directory index offset overflow"))?;
+        if end > self.store.directory_index_data.len() {
+            return Err(invalid("merge directory index chain is truncated"));
+        }
+        self.store.directory_index_data[offset..end].copy_from_slice(&next.to_le_bytes());
+        Ok(())
+    }
+
+    fn write_directory_header(
+        &mut self,
+        record_offset: i64,
+        header: &StoreDirectoryHeader,
+    ) -> Result<(), String> {
+        let file_count = i32::try_from(header.file_count)
+            .map_err(|_| invalid("too many files in merged directory"))?;
+        let directory_count = i32::try_from(header.directory_count)
+            .map_err(|_| invalid("too many directories in merged directory"))?;
+        let mut bytes = self.read_bytes(
+            record_offset,
+            DIRECTORY_HEADER_SIZE as usize,
+            "merge directory header",
+        )?;
+        write_i64_at(
+            &mut bytes,
+            24,
+            header.file_index_offset,
+            "merge directory file index offset",
+        )?;
+        bytes[32..36].copy_from_slice(&file_count.to_le_bytes());
+        write_i64_at(
+            &mut bytes,
+            36,
+            header.directory_index_offset,
+            "merge directory index offset",
+        )?;
+        bytes[44..48].copy_from_slice(&directory_count.to_le_bytes());
+        write_i64_at(
+            &mut bytes,
+            48,
+            header.total_file_count,
+            "merge directory total file count",
+        )?;
+        write_i64_at(
+            &mut bytes,
+            56,
+            header.total_directory_count,
+            "merge directory total directory count",
+        )?;
+        self.directory_records
+            .seek(SeekFrom::Start(u64::try_from(record_offset).map_err(
+                |_| invalid("invalid merge directory record offset"),
+            )?))
+            .map_err(|error| format!("cannot seek merge directory header: {error}"))?;
+        self.directory_records
+            .write_all(&bytes)
+            .map_err(|error| format!("cannot update merge directory header: {error}"))?;
+        Ok(())
+    }
+
+    fn merge_directory_records(
+        &mut self,
+        primary_record_offset: i64,
+        duplicate_record_offset: i64,
+    ) -> Result<(), String> {
+        if primary_record_offset == duplicate_record_offset {
+            return Ok(());
+        }
+        let mut primary = self.read_directory_header(primary_record_offset)?;
+        let duplicate = self.read_directory_header(duplicate_record_offset)?;
+
+        let mut primary_files =
+            self.read_file_chain(primary.file_index_offset, primary.file_count)?;
+        let duplicate_files =
+            self.read_file_chain(duplicate.file_index_offset, duplicate.file_count)?;
+        self.store
+            .join_file_chains(&mut primary_files, &duplicate_files)?;
+
+        let mut primary_directories =
+            self.read_directory_chain(primary.directory_index_offset, primary.directory_count)?;
+        let duplicate_directories =
+            self.read_directory_chain(duplicate.directory_index_offset, duplicate.directory_count)?;
+        self.store
+            .join_directory_chains(&mut primary_directories, &duplicate_directories)?;
+
+        primary.file_index_offset = primary_files.first;
+        primary.file_count = i64::try_from(primary_files.count)
+            .map_err(|_| invalid("too many files in merged directory"))?;
+        primary.directory_index_offset = primary_directories.first;
+        primary.directory_count = i64::try_from(primary_directories.count)
+            .map_err(|_| invalid("too many directories in merged directory"))?;
+        primary.total_file_count = primary
+            .total_file_count
+            .checked_add(duplicate.total_file_count)
+            .ok_or_else(|| invalid("too many files in merged directory"))?;
+        primary.total_directory_count = primary
+            .total_directory_count
+            .checked_add(duplicate.total_directory_count)
+            .ok_or_else(|| invalid("too many directories in merged directory"))?;
+        self.write_directory_header(primary_record_offset, &primary)
+    }
+
+    fn normalize_directory_chain(&mut self, chain: &mut IndexChain) -> Result<(), String> {
+        if chain.count == 0 {
+            chain.first = -1;
+            chain.last = -1;
+            return Ok(());
+        }
+
+        let original_count = chain.count;
+        let mut current = chain.first;
+        let mut previous = -1;
+        let mut primary_records = Vec::new();
+        let mut primary_by_name = HashMap::<String, i64>::new();
+
+        for _ in 0..original_count {
+            let (next, child_record_offset, _) = self.read_directory_index_entry(current)?;
+            if child_record_offset < 0 {
+                return Err(invalid("invalid merge directory record offset"));
+            }
+            let child_header = self.read_directory_header(child_record_offset)?;
+            let child_name = self.read_directory_name(&child_header)?.unwrap_or_default();
+
+            if let Some(&primary_record_offset) = primary_by_name.get(&child_name) {
+                self.merge_directory_records(primary_record_offset, child_record_offset)?;
+                if previous >= 0 {
+                    self.write_directory_index_next(previous, next)?;
+                } else {
+                    chain.first = next;
+                }
+                if current == chain.last {
+                    chain.last = previous;
+                }
+                chain.count = chain
+                    .count
+                    .checked_sub(1)
+                    .ok_or_else(|| invalid("merge directory count underflow"))?;
+            } else {
+                primary_by_name.insert(child_name, child_record_offset);
+                primary_records.push(child_record_offset);
+                previous = current;
+            }
+            current = next;
+        }
+
+        if current != -1 {
+            return Err(invalid("merge directory index chain has an invalid length"));
+        }
+        if chain.count == 0 {
+            chain.first = -1;
+            chain.last = -1;
+        }
+
+        // A duplicate directory is removed from its parent's chain, but its
+        // children are joined into the first directory with that name.  Walk
+        // each surviving primary once so nested duplicate directories are
+        // normalized after all sibling merges have been attached.
+        for primary_record_offset in primary_records {
+            self.normalize_directory(primary_record_offset)?;
+        }
+        Ok(())
+    }
+
+    fn calculate_directory_totals(
+        &mut self,
+        direct_file_count: i64,
+        directories: &IndexChain,
+    ) -> Result<(i64, i64), String> {
+        if direct_file_count < 0 {
+            return Err(invalid("invalid merge directory file count"));
+        }
+        let mut total_files = direct_file_count;
+        let mut total_directories = 0i64;
+        let mut current = directories.first;
+        for _ in 0..directories.count {
+            let (next, child_record_offset, _) = self.read_directory_index_entry(current)?;
+            let child_header = self.read_directory_header(child_record_offset)?;
+            total_files = total_files
+                .checked_add(child_header.total_file_count)
+                .ok_or_else(|| invalid("too many files in merged directory"))?;
+            total_directories = total_directories
+                .checked_add(
+                    1i64.checked_add(child_header.total_directory_count)
+                        .ok_or_else(|| invalid("too many directories in merged directory"))?,
+                )
+                .ok_or_else(|| invalid("too many directories in merged directory"))?;
+            current = next;
+        }
+        if current != -1 {
+            return Err(invalid("merge directory index chain has an invalid length"));
+        }
+        Ok((total_files, total_directories))
+    }
+
+    fn normalize_directory(&mut self, record_offset: i64) -> Result<StoreDirectoryHeader, String> {
+        let mut header = self.read_directory_header(record_offset)?;
+        let files = self.read_file_chain(header.file_index_offset, header.file_count)?;
+        let mut directories =
+            self.read_directory_chain(header.directory_index_offset, header.directory_count)?;
+        self.normalize_directory_chain(&mut directories)?;
+        let direct_file_count = i64::try_from(files.count)
+            .map_err(|_| invalid("too many files in merged directory"))?;
+        let (total_files, total_directories) =
+            self.calculate_directory_totals(direct_file_count, &directories)?;
+
+        header.file_index_offset = files.first;
+        header.file_count = i64::try_from(files.count)
+            .map_err(|_| invalid("too many files in merged directory"))?;
+        header.directory_index_offset = directories.first;
+        header.directory_count = i64::try_from(directories.count)
+            .map_err(|_| invalid("too many directories in merged directory"))?;
+        header.total_file_count = total_files;
+        header.total_directory_count = total_directories;
+        self.write_directory_header(record_offset, &header)?;
+        Ok(header)
+    }
+
+    fn normalize_root(&mut self, root: &mut DirectoryState) -> Result<(), String> {
+        let root_file_count = i64::try_from(root.files.count)
+            .map_err(|_| invalid("too many files in merged schema"))?;
+        root.files = self.read_file_chain(root.files.first, root_file_count)?;
+        self.normalize_directory_chain(&mut root.directories)?;
+        let (total_files, total_directories) =
+            self.calculate_directory_totals(root_file_count, &root.directories)?;
+        root.total_file_count = total_files;
+        root.total_directory_count = total_directories;
+        self.directory_records
+            .flush()
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -5074,6 +5550,8 @@ fn schema_context_from_files(
                 .ok_or_else(|| invalid("too many directories in merged schema"))?;
         }
 
+        store.normalize_merge_directories(&mut root_state, &paths[1])?;
+
         let root_values = DirectoryValues {
             name: Some(root_name),
             ..Default::default()
@@ -6423,6 +6901,92 @@ mod tests {
                 .map(|(_, value)| value.as_str()),
             Some("first")
         );
+
+        drop(store);
+        drop(context);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn merges_same_name_directories_recursively_but_keeps_same_name_files() {
+        let root = std::env::temp_dir().join(format!(
+            "ltfscopy_schema_duplicate_directory_merge_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create duplicate directory merge test directory");
+        let first = root.join("first.schema");
+        let second = root.join("second.schema");
+        let paths = [
+            root.join("files.bin"),
+            root.join("directories.bin"),
+            root.join("file-index.bin"),
+            root.join("directory-index.bin"),
+            root.join("selection.bin"),
+        ];
+        let first_text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><contents><file><name>same.txt</name><length>1</length></file><directory><name>same</name><contents><file><name>first.txt</name><length>2</length></file><directory><name>nested</name><contents><file><name>nested-first.txt</name><length>3</length></file></contents></directory></contents></directory></contents></directory></ltfsindex>"#;
+        let second_text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><contents><file><name>same.txt</name><length>4</length></file><directory><name>same</name><contents><file><name>second.txt</name><length>5</length></file><directory><name>nested</name><contents><file><name>nested-second.txt</name><length>6</length></file></contents></directory></contents></directory></contents></directory></ltfsindex>"#;
+        std::fs::write(&first, first_text).expect("write first duplicate directory schema");
+        std::fs::write(&second, second_text).expect("write second duplicate directory schema");
+
+        let context = schema_context_from_files(
+            vec![first, second],
+            "Search_duplicate".to_owned(),
+            paths.clone(),
+        )
+        .expect("merge duplicate directory schemas");
+        let store = StoreContext {
+            file_records: Mutex::new(File::open(&paths[0]).expect("open file backing")),
+            directory_records: Mutex::new(File::open(&paths[1]).expect("open directory backing")),
+            file_index: Mutex::new(File::open(&paths[2]).expect("open file index backing")),
+            directory_index: Mutex::new(
+                File::open(&paths[3]).expect("open directory index backing"),
+            ),
+        };
+
+        let root_index =
+            store_directory_index_entry(&store, context.result.root_directory_index_offset)
+                .expect("read merged root index");
+        let root_header = read_store_directory_header(&store, root_index.record_offset)
+            .expect("read merged root header");
+        assert_eq!(root_header.file_count, 2);
+        assert_eq!(root_header.directory_count, 1);
+        assert_eq!(root_header.total_file_count, 6);
+        assert_eq!(root_header.total_directory_count, 2);
+
+        let same_index = store_directory_index_entry(&store, root_header.directory_index_offset)
+            .expect("read merged same directory index");
+        assert_eq!(same_index.next_offset, -1);
+        let same_header = read_store_directory_header(&store, same_index.record_offset)
+            .expect("read merged same directory header");
+        assert_eq!(
+            read_store_directory_scalars(&store, &same_header)
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("same")
+        );
+        assert_eq!(same_header.file_count, 2);
+        assert_eq!(same_header.directory_count, 1);
+        assert_eq!(same_header.total_file_count, 4);
+        assert_eq!(same_header.total_directory_count, 1);
+
+        let nested_index = store_directory_index_entry(&store, same_header.directory_index_offset)
+            .expect("read merged nested directory index");
+        assert_eq!(nested_index.next_offset, -1);
+        let nested_header = read_store_directory_header(&store, nested_index.record_offset)
+            .expect("read merged nested directory header");
+        assert_eq!(
+            read_store_directory_scalars(&store, &nested_header)
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("nested")
+        );
+        assert_eq!(nested_header.file_count, 2);
+        assert_eq!(nested_header.directory_count, 0);
+        assert_eq!(nested_header.total_file_count, 2);
+        assert_eq!(nested_header.total_directory_count, 0);
 
         drop(store);
         drop(context);
