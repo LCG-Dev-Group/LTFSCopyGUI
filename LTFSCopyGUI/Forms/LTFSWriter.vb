@@ -2703,8 +2703,8 @@ Public Class LTFSWriter
                                     Else
                                         ListView1.Invalidate()
                                         ListView1.Update()
+                                    End If
                                 End If
-                            End If
                             Catch ex As ObjectDisposedException
                             Catch ex As InvalidOperationException
                             Catch ex As ArgumentException
@@ -6558,15 +6558,15 @@ Public Class LTFSWriter
                     Dim locateResult As Boolean = False
                     LTE = New AutoResetEvent(False)
                     locateTask = Task.Run(Sub()
-                                                          Try
-                                                              locateResult = LocateToWritePosition()
-                                                          Finally
-                                                              Try
-                                                                  LTE.Set()
-                                                              Catch
-                                                              End Try
-                                                          End Try
-                                                       End Sub)
+                                              Try
+                                                  locateResult = LocateToWritePosition()
+                                              Finally
+                                                  Try
+                                                      LTE.Set()
+                                                  Catch
+                                                  End Try
+                                              End Try
+                                          End Sub)
                     IsWriting = True
                     My.Settings.LTFSWriter_PreLoadBytes = My.Settings.LTFSWriter_PreLoadBytes
                     RingBufferEnabled = My.Settings.LTFSWriter_RingBufferEnabled
@@ -6770,12 +6770,12 @@ Public Class LTFSWriter
                                         fr.File.extentinfo.Clear()
                                         For Each ext As ltfsindex.file.extent In dupeFile.extentinfo
                                             fr.File.extentinfo.Add(ext)
-                                         Next
-                                         fr.File.MarkLazyRecordDirty()
-                                         If currentPlan.NewReferenceIndex >= 0 Then
-                                             ReleaseManagedDedupeReference(WriteList, currentPlan.NewReferenceIndex, dedupeReferenceUseCount)
-                                         End If
-                                         If fr.fs IsNot Nothing Then fr.Close()
+                                        Next
+                                        fr.File.MarkLazyRecordDirty()
+                                        If currentPlan.NewReferenceIndex >= 0 Then
+                                            ReleaseManagedDedupeReference(WriteList, currentPlan.NewReferenceIndex, dedupeReferenceUseCount)
+                                        End If
+                                        If fr.fs IsNot Nothing Then fr.Close()
                                         PrintMsg($"{My.Resources.ResText_Skip} {fr.File.name}  {My.Resources.ResText_Size} {IOManager.FormatSize(fr.File.length)}", False,
                                                  $"{My.Resources.ResText_Skip}: {fr.SourcePath}{vbCrLf}{My.Resources.ResText_Size}: {IOManager.FormatSize(fr.File.length)}{vbCrLf _
                                                  }{My.Resources.ResText_WrittenTotal}: {IOManager.FormatSize(TotalBytesProcessed) _
@@ -6809,9 +6809,9 @@ Public Class LTFSWriter
                                             End If
                                             Select Case fr.Open()
                                                 Case DialogResult.Ignore
-                                                     PrintMsg($"Cannot open file {fr.SourcePath}", LogOnly:=True, ForceLog:=True)
-                                                     StopFlag = True
-                                                     Throw New IO.IOException($"Cannot open file {fr.SourcePath}")
+                                                    PrintMsg($"Cannot open file {fr.SourcePath}", LogOnly:=True, ForceLog:=True)
+                                                    StopFlag = True
+                                                    Throw New IO.IOException($"Cannot open file {fr.SourcePath}")
                                                 Case DialogResult.Abort
                                                     StopFlag = True
                                                     Throw New Exception(My.Resources.ResText_FileOpenError)
@@ -6892,9 +6892,9 @@ Public Class LTFSWriter
                                                         Case DialogResult.Retry
 
                                                         Case DialogResult.Ignore
-                                                             PrintMsg($"Cannot read file {fr.SourcePath}", LogOnly:=True, ForceLog:=True)
-                                                             StopFlag = True
-                                                             Exit For
+                                                            PrintMsg($"Cannot read file {fr.SourcePath}", LogOnly:=True, ForceLog:=True)
+                                                            StopFlag = True
+                                                            Exit For
                                                     End Select
                                                 End Try
                                             End While
@@ -6958,37 +6958,37 @@ Public Class LTFSWriter
                                                 Else
                                                     succ = True
                                                 End If
-                                             End While
-                                              If succ AndAlso HashOnWrite Then
-                                                  Dim hashTask As Task = Task.Factory.StartNew(
+                                            End While
+                                            If succ AndAlso HashOnWrite Then
+                                                Dim hashTask As Task = Task.Factory.StartNew(
                                                       Sub(state As Object)
-                                                               Dim hashState = DirectCast(state, Tuple(Of FileRecord, Byte()))
-                                                               Dim hashRecord As FileRecord = hashState.Item1
-                                                               Dim hashData As Byte() = hashState.Item2
-                                                               Dim sh As New IOManager.CheckSumBlockwiseCalculator
-                                                               Try
-                                                               sh.Propagate(hashData)
-                                                             sh.ProcessFinalBlock()
-                                                             If My.Settings.LTFSWriter_ChecksumEnabled_SHA1 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.SHA1, sh.SHA1Value)
-                                                             If My.Settings.LTFSWriter_ChecksumEnabled_SHA256 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.SHA256, sh.SHA256Value)
-                                                             If My.Settings.LTFSWriter_ChecksumEnabled_SHA512 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.SHA512, sh.SHA512Value)
-                                                             If My.Settings.LTFSWriter_ChecksumEnabled_CRC32 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.CRC32, sh.CRC32Value)
-                                                             If My.Settings.LTFSWriter_ChecksumEnabled_MD5 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.MD5, sh.MD5Value)
-                                                             If sh.BlakeValue IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_BLAKE3 Then
-                                                                 hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, sh.BlakeValue)
-                                                             End If
-                                                             If sh.XXHash3Value IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_XxHash3 Then
-                                                                 hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, sh.XXHash3Value)
-                                                             End If
+                                                          Dim hashState = DirectCast(state, Tuple(Of FileRecord, Byte()))
+                                                          Dim hashRecord As FileRecord = hashState.Item1
+                                                          Dim hashData As Byte() = hashState.Item2
+                                                          Dim sh As New IOManager.CheckSumBlockwiseCalculator
+                                                          Try
+                                                              sh.Propagate(hashData)
+                                                              sh.ProcessFinalBlock()
+                                                              If My.Settings.LTFSWriter_ChecksumEnabled_SHA1 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.SHA1, sh.SHA1Value)
+                                                              If My.Settings.LTFSWriter_ChecksumEnabled_SHA256 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.SHA256, sh.SHA256Value)
+                                                              If My.Settings.LTFSWriter_ChecksumEnabled_SHA512 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.SHA512, sh.SHA512Value)
+                                                              If My.Settings.LTFSWriter_ChecksumEnabled_CRC32 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.CRC32, sh.CRC32Value)
+                                                              If My.Settings.LTFSWriter_ChecksumEnabled_MD5 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.MD5, sh.MD5Value)
+                                                              If sh.BlakeValue IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_BLAKE3 Then
+                                                                  hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, sh.BlakeValue)
+                                                              End If
+                                                              If sh.XXHash3Value IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_XxHash3 Then
+                                                                  hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, sh.XXHash3Value)
+                                                              End If
                                                               If sh.XXHash128Value IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_XxHash128 Then
                                                                   hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, sh.XXHash128Value)
-                                                               End If
-                                                               Finally
-                                                                   sh.StopFlag = True
-                                                               End Try
-                                                           End Sub, Tuple.Create(fr, FileData))
-                                                  hashTasks.Add(hashTask)
-                                             End If
+                                                              End If
+                                                          Finally
+                                                              sh.StopFlag = True
+                                                          End Try
+                                                      End Sub, Tuple.Create(fr, FileData))
+                                                hashTasks.Add(hashTask)
+                                            End If
                                             If fr.fs IsNot Nothing Then fr.Close()
                                             If Flush Then
                                                 If CheckFlush() Then
@@ -7026,17 +7026,17 @@ Public Class LTFSWriter
                                                 RingBufferReader = provider.RingBuffer
                                             Else
                                                 PipeReader = provider.Reader
-                                             End If
-                                             Dim remainingInFile As Long = fr.SegmentLength
-                                             Dim LWTE As New AutoResetEvent(False)
-                                             writeWaitHandles.Add(LWTE)
+                                            End If
+                                            Dim remainingInFile As Long = fr.SegmentLength
+                                            Dim LWTE As New AutoResetEvent(False)
+                                            writeWaitHandles.Add(LWTE)
                                             While Not StopFlag AndAlso remainingInFile > 0
                                                 Dim toRead As Integer = CInt(Math.Min(plabel.blocksize, remainingInFile))
                                                 Dim buffer As Byte() = IOManager.PublicArrayPool.Rent(plabel.blocksize)
                                                 Dim BytesReaded As Integer = 0
 
-                                 ' 从 Pipe 读取当前文件需要的字节
-                                 Try
+                                                ' 从 Pipe 读取当前文件需要的字节
+                                                Try
                                                     If RingBufferEnabled Then
                                                         BytesReaded = PipeReadExactly(RingBufferReader, buffer, toRead)
                                                     Else
@@ -7081,12 +7081,12 @@ Public Class LTFSWriter
                                                         ExitWhileFlag = True
                                                         Exit While
                                                     End If
-                                                 Catch ex As Exception
-                                                     Try
-                                                         IOManager.PublicArrayPool.Return(buffer)
-                                                     Catch
-                                                     End Try
-                                                     Dim dResult As DialogResult
+                                                Catch ex As Exception
+                                                    Try
+                                                        IOManager.PublicArrayPool.Return(buffer)
+                                                    Catch
+                                                    End Try
+                                                    Dim dResult As DialogResult
                                                     Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr }{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
                                                     Select Case dResult
                                                         Case DialogResult.Abort
@@ -7095,10 +7095,10 @@ Public Class LTFSWriter
                                                         Case DialogResult.Retry
                                                             Continue While
                                                         Case DialogResult.Ignore
-                                                             PrintMsg($"Cannot read file {fr.SourcePath}", LogOnly:=True, ForceLog:=True)
-                                                             SetStatusLight(LWStatus.Err)
-                                                             StopFlag = True
-                                                             Exit For
+                                                            PrintMsg($"Cannot read file {fr.SourcePath}", LogOnly:=True, ForceLog:=True)
+                                                            SetStatusLight(LWStatus.Err)
+                                                            StopFlag = True
+                                                            Exit For
                                                     End Select
                                                 End Try
 
@@ -7106,9 +7106,9 @@ Public Class LTFSWriter
                                                     tarScanner.Process(buffer, 0, BytesReaded)
                                                 End If
 
-                              If LastWriteTask IsNot Nothing Then
-                                  Dim lwcounter As Integer = 0
-                                  While Not (LastWriteTask.IsCompleted OrElse LastWriteTask.IsCanceled OrElse LastWriteTask.IsFaulted)
+                                                If LastWriteTask IsNot Nothing Then
+                                                    Dim lwcounter As Integer = 0
+                                                    While Not (LastWriteTask.IsCompleted OrElse LastWriteTask.IsCanceled OrElse LastWriteTask.IsFaulted)
                                                         LWTE.WaitOne(10)
                                                         lwcounter += 1
                                                         If lwcounter >= 100 Then
@@ -7118,17 +7118,17 @@ Public Class LTFSWriter
                                                             Else
                                                                 PipeBufferLength = PipeGetLength(PipeReader)
                                                             End If
-                                                     End If
-                                                  End While
-                                                  Try
-                                                      ObserveTask(LastWriteTask)
-                                                  Catch
-                                                      IOManager.PublicArrayPool.Return(buffer)
-                                                      Throw
-                                                  End Try
-                                                  writeTasks.Remove(LastWriteTask)
-                                              End If
-                                             If ExitWhileFlag Then Exit While
+                                                        End If
+                                                    End While
+                                                    Try
+                                                        ObserveTask(LastWriteTask)
+                                                    Catch
+                                                        IOManager.PublicArrayPool.Return(buffer)
+                                                        Throw
+                                                    End Try
+                                                    writeTasks.Remove(LastWriteTask)
+                                                End If
+                                                If ExitWhileFlag Then Exit While
 
                                                 LastWriteTask = Task.Factory.StartNew(
                                                  Sub(state)
@@ -7137,166 +7137,166 @@ Public Class LTFSWriter
                                                      Dim bytesToWrite As Integer = writeState.Item2
                                                      Dim bufferReturned As Boolean = False
                                                      Try
-                                                     If bytesToWrite > 0 Then
-                                                        ' 限速（保留原逻辑）
-                                                        CheckCount += 1
-                                                        If CheckCount >= CheckCycle Then CheckCount = 0
-                                                        If SpeedLimit > 0 AndAlso CheckCount = 0 Then
-                                                            Dim ts As Double = (Now - SpeedLimitLastTriggerTime).TotalSeconds
-                                                            While SpeedLimit > 0 AndAlso ts > 0 AndAlso ((plabel.blocksize * CheckCycle / 1048576) / ts) > SpeedLimit
-                                                                Threading.Thread.Sleep(0)
-                                                                ts = (Now - SpeedLimitLastTriggerTime).TotalSeconds
-                                                            End While
-                                                            SpeedLimitLastTriggerTime = Now
-                                                        End If
-
-                                                        ' 写带（保留原 TapeUtils.Write + sense 处理）
-                                                        Marshal.Copy(buf, 0, wBufferPtr, bytesToWrite)
-                                                        Dim succ As Boolean = False Or IsIndexPartition
-                                                        While ((Not succ) AndAlso (Not IsIndexPartition))
-                                                            Dim sense As Byte()
-                                                            Try
-                                                                sense = TapeUtils.Write(driveHandle, wBufferPtr, CUInt(bytesToWrite), True)
-                                                                SyncLock p
-                                                                    p.BlockNumber = CULng(p.BlockNumber + 1)
-                                                                End SyncLock
-                              Catch ex As Exception
-                                  Dim dResult As DialogResult
-                                                                Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErrSCSI}{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
-                                                                Select Case dResult
-                                                                    Case DialogResult.Abort
-                                                                        StopFlag = True
-                                                                        Throw
-                                                                    Case DialogResult.Retry
-                                                                        succ = False
-                                                                    Case DialogResult.Ignore
-                                                                        succ = True
-                                                                        Exit While
-                                                                End Select
-                                                                p = New TapeUtils.PositionData(driveHandle)
-                                                                Continue While
-                                                            End Try
-                                                            If (((sense(2) >> 6) And &H1) = 1) Then
-                                                                If ((sense(2) And &HF) = 13) AndAlso (Not My.Settings.LTFSWriter_IgnoreVolumeOverflow) Then
-                                                                    PrintMsg(My.Resources.ResText_VOF)
-                                                                    Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_VOF))
-                                                                    StopFlag = True
-                                                                    Try
-                                                                        PipeBufferLength = 0
-                                                                        provider.Cancel()
-                                                                        provider.CompleteAsync().GetAwaiter().GetResult()
-                                                                    Catch
-                                                                        PrintMsg("pipe complete failed", LogOnly:=True)
-                                                                    End Try
-                                                                    Exit Sub
-                                                                Else
-                                                                    PrintMsg(If(((sense(2) And &HF) = 13), My.Resources.ResText_VOF, My.Resources.ResText_EWEOM), True, DeDupe:=True)
-                                                                    succ = True
-                                                                    Exit While
-                                                                End If
-                                                            ElseIf (sense(2) And &HF) <> 0 Then
-                                                                Try
-                                                                    Throw New Exception("SCSI sense error")
-                                                                Catch ex As Exception
-                                                                    Dim dResult As DialogResult
-                                                                    Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{TapeUtils.ParseSenseData(sense)}{vbCrLf}{vbCrLf}sense{vbCrLf}{TapeUtils.Byte2Hex(sense, True)}{vbCrLf}{ex.StackTrace}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
-                                                                    Select Case dResult
-                                                                        Case DialogResult.Abort
-                                                                            StopFlag = True
-                                                                            Throw New Exception(TapeUtils.ParseSenseData(sense))
-                                                                        Case DialogResult.Retry
-                                                                            succ = False
-                                                                        Case DialogResult.Ignore
-                                                                            succ = True
-                                                                            Exit While
-                                                                    End Select
-                                                                End Try
-                                                                p = New TapeUtils.PositionData(driveHandle)
-                                                            Else
-                                                                succ = True
-                                                                Exit While
-                                                            End If
-                                                        End While
-                                                        If sh IsNot Nothing AndAlso succ Then
-                                                            If 异步校验CPU占用高ToolStripMenuItem.Checked Then
-                                                                sh.PropagateAsync(buf, bytesToWrite, Sub(qb As Byte())
-                                                                                                        IOManager.PublicArrayPool.Return(qb)
-                                                                                                    End Sub)
-                                                         Else
-                                                             sh.Propagate(buf, bytesToWrite, Sub(qb As Byte())
-                                                                                                IOManager.PublicArrayPool.Return(qb)
-                                                                                            End Sub)
-                                                         End If
-                                                         bufferReturned = True
-                                                     Else
-                                                         IOManager.PublicArrayPool.Return(buf)
-                                                         bufferReturned = True
-                                                     End If
-                                                        If Flush Then
-                                                            Dim flushResult As Boolean = False
-                                                            Dim tFE As New AutoResetEvent(False)
-                                                            Dim tFlush As Task = Task.Run(Sub()
-                                                                                              flushResult = CheckFlush()
-                                                                                              tFE.Set()
-                                                                                          End Sub)
-                                                            Dim counter As Integer = 0
-                                                            While Not (tFlush.IsCompleted OrElse tFlush.IsCanceled OrElse tFlush.IsFaulted)
-                                                                tFE.WaitOne(10)
-                                                                counter += 1
-                                                                If counter >= 100 Then
-                                                                    counter = 0
-                                                                    If RingBufferEnabled Then
-                                                                        PipeBufferLength = PipeGetLength(RingBufferReader)
-                                                                    Else
-                                                                        PipeBufferLength = PipeGetLength(PipeReader)
-                                                                    End If
+                                                         If bytesToWrite > 0 Then
+                                                             ' 限速（保留原逻辑）
+                                                             CheckCount += 1
+                                                             If CheckCount >= CheckCycle Then CheckCount = 0
+                                                             If SpeedLimit > 0 AndAlso CheckCount = 0 Then
+                                                                 Dim ts As Double = (Now - SpeedLimitLastTriggerTime).TotalSeconds
+                                                                 While SpeedLimit > 0 AndAlso ts > 0 AndAlso ((plabel.blocksize * CheckCycle / 1048576) / ts) > SpeedLimit
+                                                                     Threading.Thread.Sleep(0)
+                                                                     ts = (Now - SpeedLimitLastTriggerTime).TotalSeconds
+                                                                 End While
+                                                                 SpeedLimitLastTriggerTime = Now
                                                              End If
-                                                         End While
-                                                         Try
-                                                             ObserveTask(tFlush)
-                                                         Finally
-                                                             tFE.Dispose()
-                                                         End Try
-                                                             If flushResult Then
-                                                                If My.Settings.LTFSWriter_PowerPolicyOnWriteBegin <> Guid.Empty Then
-                                                                    Process.Start(New ProcessStartInfo With {.FileName = "powercfg",
+
+                                                             ' 写带（保留原 TapeUtils.Write + sense 处理）
+                                                             Marshal.Copy(buf, 0, wBufferPtr, bytesToWrite)
+                                                             Dim succ As Boolean = False Or IsIndexPartition
+                                                             While ((Not succ) AndAlso (Not IsIndexPartition))
+                                                                 Dim sense As Byte()
+                                                                 Try
+                                                                     sense = TapeUtils.Write(driveHandle, wBufferPtr, CUInt(bytesToWrite), True)
+                                                                     SyncLock p
+                                                                         p.BlockNumber = CULng(p.BlockNumber + 1)
+                                                                     End SyncLock
+                                                                 Catch ex As Exception
+                                                                     Dim dResult As DialogResult
+                                                                     Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErrSCSI}{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
+                                                                     Select Case dResult
+                                                                         Case DialogResult.Abort
+                                                                             StopFlag = True
+                                                                             Throw
+                                                                         Case DialogResult.Retry
+                                                                             succ = False
+                                                                         Case DialogResult.Ignore
+                                                                             succ = True
+                                                                             Exit While
+                                                                     End Select
+                                                                     p = New TapeUtils.PositionData(driveHandle)
+                                                                     Continue While
+                                                                 End Try
+                                                                 If (((sense(2) >> 6) And &H1) = 1) Then
+                                                                     If ((sense(2) And &HF) = 13) AndAlso (Not My.Settings.LTFSWriter_IgnoreVolumeOverflow) Then
+                                                                         PrintMsg(My.Resources.ResText_VOF)
+                                                                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_VOF))
+                                                                         StopFlag = True
+                                                                         Try
+                                                                             PipeBufferLength = 0
+                                                                             provider.Cancel()
+                                                                             provider.CompleteAsync().GetAwaiter().GetResult()
+                                                                         Catch
+                                                                             PrintMsg("pipe complete failed", LogOnly:=True)
+                                                                         End Try
+                                                                         Exit Sub
+                                                                     Else
+                                                                         PrintMsg(If(((sense(2) And &HF) = 13), My.Resources.ResText_VOF, My.Resources.ResText_EWEOM), True, DeDupe:=True)
+                                                                         succ = True
+                                                                         Exit While
+                                                                     End If
+                                                                 ElseIf (sense(2) And &HF) <> 0 Then
+                                                                     Try
+                                                                         Throw New Exception("SCSI sense error")
+                                                                     Catch ex As Exception
+                                                                         Dim dResult As DialogResult
+                                                                         Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{TapeUtils.ParseSenseData(sense)}{vbCrLf}{vbCrLf}sense{vbCrLf}{TapeUtils.Byte2Hex(sense, True)}{vbCrLf}{ex.StackTrace}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
+                                                                         Select Case dResult
+                                                                             Case DialogResult.Abort
+                                                                                 StopFlag = True
+                                                                                 Throw New Exception(TapeUtils.ParseSenseData(sense))
+                                                                             Case DialogResult.Retry
+                                                                                 succ = False
+                                                                             Case DialogResult.Ignore
+                                                                                 succ = True
+                                                                                 Exit While
+                                                                         End Select
+                                                                     End Try
+                                                                     p = New TapeUtils.PositionData(driveHandle)
+                                                                 Else
+                                                                     succ = True
+                                                                     Exit While
+                                                                 End If
+                                                             End While
+                                                             If sh IsNot Nothing AndAlso succ Then
+                                                                 If 异步校验CPU占用高ToolStripMenuItem.Checked Then
+                                                                     sh.PropagateAsync(buf, bytesToWrite, Sub(qb As Byte())
+                                                                                                              IOManager.PublicArrayPool.Return(qb)
+                                                                                                          End Sub)
+                                                                 Else
+                                                                     sh.Propagate(buf, bytesToWrite, Sub(qb As Byte())
+                                                                                                         IOManager.PublicArrayPool.Return(qb)
+                                                                                                     End Sub)
+                                                                 End If
+                                                                 bufferReturned = True
+                                                             Else
+                                                                 IOManager.PublicArrayPool.Return(buf)
+                                                                 bufferReturned = True
+                                                             End If
+                                                             If Flush Then
+                                                                 Dim flushResult As Boolean = False
+                                                                 Dim tFE As New AutoResetEvent(False)
+                                                                 Dim tFlush As Task = Task.Run(Sub()
+                                                                                                   flushResult = CheckFlush()
+                                                                                                   tFE.Set()
+                                                                                               End Sub)
+                                                                 Dim counter As Integer = 0
+                                                                 While Not (tFlush.IsCompleted OrElse tFlush.IsCanceled OrElse tFlush.IsFaulted)
+                                                                     tFE.WaitOne(10)
+                                                                     counter += 1
+                                                                     If counter >= 100 Then
+                                                                         counter = 0
+                                                                         If RingBufferEnabled Then
+                                                                             PipeBufferLength = PipeGetLength(RingBufferReader)
+                                                                         Else
+                                                                             PipeBufferLength = PipeGetLength(PipeReader)
+                                                                         End If
+                                                                     End If
+                                                                 End While
+                                                                 Try
+                                                                     ObserveTask(tFlush)
+                                                                 Finally
+                                                                     tFE.Dispose()
+                                                                 End Try
+                                                                 If flushResult Then
+                                                                     If My.Settings.LTFSWriter_PowerPolicyOnWriteBegin <> Guid.Empty Then
+                                                                         Process.Start(New ProcessStartInfo With {.FileName = "powercfg",
                                                                         .Arguments = $"/s {My.Settings.LTFSWriter_PowerPolicyOnWriteBegin.ToString()}",
                                                                         .WindowStyle = ProcessWindowStyle.Hidden})
-                                                                End If
-                                                            End If
-                                                        End If
-                                                        If Clean Then
-                                                            Dim tCE As New AutoResetEvent(False)
-                                                            Dim tClean As Task = Task.Run(Sub()
-                                                                                              CheckClean(True)
-                                                                                              tCE.Set()
-                                                                                          End Sub)
-                                                            Dim counter As Integer = 0
-                                                            While Not (tClean.IsCompleted OrElse tClean.IsCanceled OrElse tClean.IsFaulted)
-                                                                tCE.WaitOne(10)
-                                                                counter += 1
-                                                                If counter >= 100 Then
-                                                                    counter = 0
-                                                                    If RingBufferEnabled Then
-                                                                        PipeBufferLength = PipeGetLength(RingBufferReader)
-                                                                    Else
-                                                                        PipeBufferLength = PipeGetLength(PipeReader)
-                                                                    End If
+                                                                     End If
+                                                                 End If
                                                              End If
-                                                         End While
-                                                         Try
-                                                             ObserveTask(tClean)
-                                                         Finally
-                                                             tCE.Dispose()
-                                                         End Try
+                                                             If Clean Then
+                                                                 Dim tCE As New AutoResetEvent(False)
+                                                                 Dim tClean As Task = Task.Run(Sub()
+                                                                                                   CheckClean(True)
+                                                                                                   tCE.Set()
+                                                                                               End Sub)
+                                                                 Dim counter As Integer = 0
+                                                                 While Not (tClean.IsCompleted OrElse tClean.IsCanceled OrElse tClean.IsFaulted)
+                                                                     tCE.WaitOne(10)
+                                                                     counter += 1
+                                                                     If counter >= 100 Then
+                                                                         counter = 0
+                                                                         If RingBufferEnabled Then
+                                                                             PipeBufferLength = PipeGetLength(RingBufferReader)
+                                                                         Else
+                                                                             PipeBufferLength = PipeGetLength(PipeReader)
+                                                                         End If
+                                                                     End If
+                                                                 End While
+                                                                 Try
+                                                                     ObserveTask(tClean)
+                                                                 Finally
+                                                                     tCE.Dispose()
+                                                                 End Try
+                                                             End If
+                                                             fr.File.WrittenBytes += bytesToWrite
+                                                             TotalBytesProcessed += bytesToWrite
+                                                             CurrentBytesProcessed += bytesToWrite
+                                                             TotalBytesUnindexed += bytesToWrite
+                                                         Else
+                                                             ExitWhileFlag = True
                                                          End If
-                                                        fr.File.WrittenBytes += bytesToWrite
-                                                        TotalBytesProcessed += bytesToWrite
-                                                        CurrentBytesProcessed += bytesToWrite
-                                                        TotalBytesUnindexed += bytesToWrite
-                                                    Else
-                                                        ExitWhileFlag = True
-                                                    End If
                                                      Finally
                                                          If Not bufferReturned Then
                                                              IOManager.PublicArrayPool.Return(buf)
@@ -7307,8 +7307,8 @@ Public Class LTFSWriter
                                                          End Try
                                                      End Try
                                                  End Sub, Tuple.Create(buffer, BytesReaded))
-                                                 writeTasks.Add(LastWriteTask)
-                                                 remainingInFile -= BytesReaded
+                                                writeTasks.Add(LastWriteTask)
+                                                remainingInFile -= BytesReaded
                                             End While
 
                                             'If i < WriteList.Count - 1 Then WriteList(i + 1).BeginOpen()
@@ -7323,44 +7323,44 @@ Public Class LTFSWriter
                                                             PipeBufferLength = PipeGetLength(RingBufferReader)
                                                         Else
                                                             PipeBufferLength = PipeGetLength(PipeReader)
-                                                         End If
-                                                     End If
-                                                  End While
-                                                  ObserveTask(LastWriteTask)
-                                                  writeTasks.Remove(LastWriteTask)
-                                              End If
-                                             fr.Close()
-                                              If HashOnWrite AndAlso sh IsNot Nothing AndAlso Not StopFlag Then
-                                                  Dim hashTask As Task = Task.Factory.StartNew(
+                                                        End If
+                                                    End If
+                                                End While
+                                                ObserveTask(LastWriteTask)
+                                                writeTasks.Remove(LastWriteTask)
+                                            End If
+                                            fr.Close()
+                                            If HashOnWrite AndAlso sh IsNot Nothing AndAlso Not StopFlag Then
+                                                Dim hashTask As Task = Task.Factory.StartNew(
                                                       Sub(state As Object)
-                                                               Dim hashState = DirectCast(state, Tuple(Of FileRecord, IOManager.CheckSumBlockwiseCalculator))
-                                                               Dim hashRecord As FileRecord = hashState.Item1
-                                                               Dim hashCalculator As IOManager.CheckSumBlockwiseCalculator = hashState.Item2
-                                                               Try
-                                                               hashCalculator.ProcessFinalBlock()
-                                                             If My.Settings.LTFSWriter_ChecksumEnabled_SHA1 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.SHA1, hashCalculator.SHA1Value)
-                                                             If My.Settings.LTFSWriter_ChecksumEnabled_SHA256 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.SHA256, hashCalculator.SHA256Value)
-                                                             If My.Settings.LTFSWriter_ChecksumEnabled_SHA512 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.SHA512, hashCalculator.SHA512Value)
-                                                             If My.Settings.LTFSWriter_ChecksumEnabled_CRC32 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.CRC32, hashCalculator.CRC32Value)
-                                                             If My.Settings.LTFSWriter_ChecksumEnabled_MD5 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.MD5, hashCalculator.MD5Value)
-                                                             If hashCalculator.BlakeValue IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_BLAKE3 Then
-                                                                 hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, hashCalculator.BlakeValue)
-                                                             End If
-                                                             If hashCalculator.XXHash3Value IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_XxHash3 Then
-                                                                 hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, hashCalculator.XXHash3Value)
-                                                             End If
-                                                             If hashCalculator.XXHash128Value IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_XxHash128 Then
-                                                                 hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, hashCalculator.XXHash128Value)
+                                                          Dim hashState = DirectCast(state, Tuple(Of FileRecord, IOManager.CheckSumBlockwiseCalculator))
+                                                          Dim hashRecord As FileRecord = hashState.Item1
+                                                          Dim hashCalculator As IOManager.CheckSumBlockwiseCalculator = hashState.Item2
+                                                          Try
+                                                              hashCalculator.ProcessFinalBlock()
+                                                              If My.Settings.LTFSWriter_ChecksumEnabled_SHA1 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.SHA1, hashCalculator.SHA1Value)
+                                                              If My.Settings.LTFSWriter_ChecksumEnabled_SHA256 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.SHA256, hashCalculator.SHA256Value)
+                                                              If My.Settings.LTFSWriter_ChecksumEnabled_SHA512 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.SHA512, hashCalculator.SHA512Value)
+                                                              If My.Settings.LTFSWriter_ChecksumEnabled_CRC32 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.CRC32, hashCalculator.CRC32Value)
+                                                              If My.Settings.LTFSWriter_ChecksumEnabled_MD5 Then hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.MD5, hashCalculator.MD5Value)
+                                                              If hashCalculator.BlakeValue IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_BLAKE3 Then
+                                                                  hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, hashCalculator.BlakeValue)
                                                               End If
-                                                               Finally
-                                                                   hashCalculator.StopFlag = True
-                                                               End Try
-                                                           End Sub, Tuple.Create(fr, sh))
-                                                 hashTasks.Add(hashTask)
-                                                 If CheckUnindexedDataLimit(CheckOnly:=True) Then
-                                                     WaitForHashTasks(hashTasks)
-                                                     SetStatusLight(LWStatus.Busy)
-                                                 End If
+                                                              If hashCalculator.XXHash3Value IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_XxHash3 Then
+                                                                  hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, hashCalculator.XXHash3Value)
+                                                              End If
+                                                              If hashCalculator.XXHash128Value IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_XxHash128 Then
+                                                                  hashRecord.File.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, hashCalculator.XXHash128Value)
+                                                              End If
+                                                          Finally
+                                                              hashCalculator.StopFlag = True
+                                                          End Try
+                                                      End Sub, Tuple.Create(fr, sh))
+                                                hashTasks.Add(hashTask)
+                                                If CheckUnindexedDataLimit(CheckOnly:=True) Then
+                                                    WaitForHashTasks(hashTasks)
+                                                    SetStatusLight(LWStatus.Busy)
+                                                End If
                                             ElseIf sh IsNot Nothing Then
                                                 sh.StopFlag = True
                                             End If
@@ -7683,9 +7683,9 @@ Public Class LTFSWriter
                            If Not StopFlag AndAlso WA0ToolStripMenuItem.Checked AndAlso MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_WFUp, My.Resources.ResText_OpSucc, MessageBoxButtons.OKCancel) = DialogResult.OK Then
                                更新数据区索引ToolStripMenuItem_Click(sender, e)
                            End If
-                            PrintMsg(OnWriteFinishMessage)
-                            SetStatusLight(If(StopFlag, LWStatus.Err, LWStatus.Succ))
-                            RaiseEvent WriteFinished()
+                           PrintMsg(OnWriteFinishMessage)
+                           SetStatusLight(If(StopFlag, LWStatus.Err, LWStatus.Succ))
+                           RaiseEvent WriteFinished()
                        End Sub)
                 IsWriting = False
             End Sub)
@@ -9879,12 +9879,18 @@ Public Class LTFSWriter
                 Else
                     SetChecksumColor(file, name, Color.Red)
                     Threading.Interlocked.Increment(errorCount)
-                    PrintMsg($"{name} Mismatch at fileuid={file.fileuid} filename={file.name} logged={actual} calculated={expected}", ForceLog:=True)
+                    PrintMsg($"{name} mismatch at fileuid={file.fileuid} filename={file.name} logged={actual} calculated={expected}", ForceLog:=True)
                 End If
             ElseIf updateHashes Then
                 If Not String.Equals(actual, expected, StringComparison.OrdinalIgnoreCase) Then
                     SetChecksumValue(file, name, expected)
-                    SetChecksumColor(file, name, Color.Blue)
+                    If actual = "" Then
+                        SetChecksumColor(file, name, Color.Blue)
+                    Else
+                        SetChecksumColor(file, name, Color.OrangeRed)
+                        Threading.Interlocked.Increment(errorCount)
+                        PrintMsg($"{name} changed at fileuid={file.fileuid} filename={file.name} logged={actual} calculated={expected}", ForceLog:=True)
+                    End If
                 Else
                     SetChecksumColor(file, name, Color.Green)
                 End If
@@ -10576,9 +10582,9 @@ Public Class LTFSWriter
                     PG1.Text = $"{TextBoxSelectedPath.Text}\{selectedFile.name}"
                     If PG1.ShowDialog() = DialogResult.OK Then
                         ApplyFileDetailsEdit(selectedFile, editableFile)
-                         If wasPending Then SynchronizePendingFileEdit(selectedDirectory, selectedFile, previousLength)
-                         Modified = True
-                         If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
+                        If wasPending Then SynchronizePendingFileEdit(selectedDirectory, selectedFile, previousLength)
+                        Modified = True
+                        If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
                         RequestListDisplayRefresh()
                     End If
                 End If
@@ -10590,9 +10596,9 @@ Public Class LTFSWriter
                 PG1.PropertyGrid1.SelectedObject = editableDirectory
                 PG1.Text = $"{TextBoxSelectedPath.Text}\{selectedDirectory.name}"
                 If PG1.ShowDialog() = DialogResult.OK Then
-                     ApplyDirectoryDetailsEdit(selectedDirectory, editableDirectory)
-                     Modified = True
-                     If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
+                    ApplyDirectoryDetailsEdit(selectedDirectory, editableDirectory)
+                    Modified = True
+                    If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
                     RefreshDisplay()
                 End If
             End If
@@ -11264,8 +11270,8 @@ Public Class LTFSWriter
                              TapeUtils.PreventMediaRemoval(driveHandle)
                              mediumRemovalPrevented = True
                              If Not LocateToWritePosition() Then Exit Sub
-                         Dim pos As New TapeUtils.PositionData(driveHandle)
-                         Dim fadd As New ltfsindex.file With {.name = d.name,
+                             Dim pos As New TapeUtils.PositionData(driveHandle)
+                             Dim fadd As New ltfsindex.file With {.name = d.name,
                                  .accesstime = d.accesstime,
                                  .backuptime = d.backuptime,
                                  .changetime = d.changetime,
@@ -11282,125 +11288,125 @@ Public Class LTFSWriter
                                   .partition = CType(pos.PartitionNumber, ltfsindex.PartitionLabel)}
                                   }.ToList()}
 
-                         Dim LastWriteTask As Task = Nothing
-                         Dim ExitWhileFlag As Boolean = False
-                         wBufferPtr = Marshal.AllocHGlobal(plabel.blocksize)
-                         Dim sh As New IOManager.CheckSumBlockwiseCalculator
-                         While Not StopFlag
-                             Dim buffer(plabel.blocksize - 1) As Byte
-                             Dim BytesReaded As Integer = ms.Read(buffer, 0, plabel.blocksize)
-                             sh.Propagate(buffer, BytesReaded)
-                             If ExitWhileFlag Then Exit While
-                             If BytesReaded > 0 Then
-                                 CheckCount += 1
-                                 If CheckCount >= CheckCycle Then CheckCount = 0
-                                 If SpeedLimit > 0 AndAlso CheckCount = 0 Then
-                                     Dim ts As Double = (Now - SpeedLimitLastTriggerTime).TotalSeconds
-                                     While SpeedLimit > 0 AndAlso ts > 0 AndAlso ((plabel.blocksize * CheckCycle / 1048576) / ts) > SpeedLimit
-                                         Threading.Thread.Sleep(0)
-                                         ts = (Now - SpeedLimitLastTriggerTime).TotalSeconds
-                                     End While
-                                     SpeedLimitLastTriggerTime = Now
-                                 End If
-                                 Marshal.Copy(buffer, 0, wBufferPtr, BytesReaded)
-                                 Dim succ As Boolean = False
-                                 While Not succ
-                                     Dim sense As Byte()
-                                     Try
-                                         sense = TapeUtils.Write(handle:=driveHandle, Data:=wBufferPtr, Length:=CUInt(BytesReaded), senseEnabled:=True)
-                                         SyncLock pos
-                                             pos.BlockNumber = CULng(pos.BlockNumber + 1)
-                                         End SyncLock
-                                     Catch ex As Exception
-                                         Dim dResult As DialogResult
-                                         Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{ My.Resources.ResText_WErrSCSI}{vbCrLf}{ex.StackTrace}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
-                                         Select Case dResult
-                                             Case DialogResult.Abort
-                                                 SetStatusLight(LWStatus.Err)
-                                                 Throw ex
-                                             Case DialogResult.Retry
-                                                 succ = False
-                                             Case DialogResult.Ignore
-                                                 succ = True
-                                                 Exit While
-                                         End Select
-                                         pos = New TapeUtils.PositionData(driveHandle)
-                                         Continue While
-                                     End Try
-                                     If (((sense(2) >> 6) And &H1) = 1) Then
-                                         If ((sense(2) And &HF) = 13) Then
-                                             PrintMsg(My.Resources.ResText_VOF)
-                                             Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_VOF))
-                                             StopFlag = True
-                                             ms.Close()
-                                             SetStatusLight(LWStatus.Err)
-                                             Exit Sub
-                                         Else
-                                             PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
-                                             succ = True
-                                             Exit While
-                                         End If
-                                     ElseIf (sense(2) And &HF) <> 0 Then
+                             Dim LastWriteTask As Task = Nothing
+                             Dim ExitWhileFlag As Boolean = False
+                             wBufferPtr = Marshal.AllocHGlobal(plabel.blocksize)
+                             Dim sh As New IOManager.CheckSumBlockwiseCalculator
+                             While Not StopFlag
+                                 Dim buffer(plabel.blocksize - 1) As Byte
+                                 Dim BytesReaded As Integer = ms.Read(buffer, 0, plabel.blocksize)
+                                 sh.Propagate(buffer, BytesReaded)
+                                 If ExitWhileFlag Then Exit While
+                                 If BytesReaded > 0 Then
+                                     CheckCount += 1
+                                     If CheckCount >= CheckCycle Then CheckCount = 0
+                                     If SpeedLimit > 0 AndAlso CheckCount = 0 Then
+                                         Dim ts As Double = (Now - SpeedLimitLastTriggerTime).TotalSeconds
+                                         While SpeedLimit > 0 AndAlso ts > 0 AndAlso ((plabel.blocksize * CheckCycle / 1048576) / ts) > SpeedLimit
+                                             Threading.Thread.Sleep(0)
+                                             ts = (Now - SpeedLimitLastTriggerTime).TotalSeconds
+                                         End While
+                                         SpeedLimitLastTriggerTime = Now
+                                     End If
+                                     Marshal.Copy(buffer, 0, wBufferPtr, BytesReaded)
+                                     Dim succ As Boolean = False
+                                     While Not succ
+                                         Dim sense As Byte()
                                          Try
-                                             Throw New Exception("SCSI sense error")
+                                             sense = TapeUtils.Write(handle:=driveHandle, Data:=wBufferPtr, Length:=CUInt(BytesReaded), senseEnabled:=True)
+                                             SyncLock pos
+                                                 pos.BlockNumber = CULng(pos.BlockNumber + 1)
+                                             End SyncLock
                                          Catch ex As Exception
                                              Dim dResult As DialogResult
-                                             Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{TapeUtils.ParseSenseData(sense)}{vbCrLf}{vbCrLf}sense{vbCrLf}{TapeUtils.Byte2Hex(sense, True)}{vbCrLf}{ex.StackTrace}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
+                                             Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{ My.Resources.ResText_WErrSCSI}{vbCrLf}{ex.StackTrace}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
                                              Select Case dResult
                                                  Case DialogResult.Abort
                                                      SetStatusLight(LWStatus.Err)
-                                                     Throw New Exception(TapeUtils.ParseSenseData(sense))
+                                                     Throw ex
                                                  Case DialogResult.Retry
                                                      succ = False
                                                  Case DialogResult.Ignore
                                                      succ = True
                                                      Exit While
                                              End Select
+                                             pos = New TapeUtils.PositionData(driveHandle)
+                                             Continue While
                                          End Try
+                                         If (((sense(2) >> 6) And &H1) = 1) Then
+                                             If ((sense(2) And &HF) = 13) Then
+                                                 PrintMsg(My.Resources.ResText_VOF)
+                                                 Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_VOF))
+                                                 StopFlag = True
+                                                 ms.Close()
+                                                 SetStatusLight(LWStatus.Err)
+                                                 Exit Sub
+                                             Else
+                                                 PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                                                 succ = True
+                                                 Exit While
+                                             End If
+                                         ElseIf (sense(2) And &HF) <> 0 Then
+                                             Try
+                                                 Throw New Exception("SCSI sense error")
+                                             Catch ex As Exception
+                                                 Dim dResult As DialogResult
+                                                 Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{TapeUtils.ParseSenseData(sense)}{vbCrLf}{vbCrLf}sense{vbCrLf}{TapeUtils.Byte2Hex(sense, True)}{vbCrLf}{ex.StackTrace}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
+                                                 Select Case dResult
+                                                     Case DialogResult.Abort
+                                                         SetStatusLight(LWStatus.Err)
+                                                         Throw New Exception(TapeUtils.ParseSenseData(sense))
+                                                     Case DialogResult.Retry
+                                                         succ = False
+                                                     Case DialogResult.Ignore
+                                                         succ = True
+                                                         Exit While
+                                                 End Select
+                                             End Try
 
-                                         pos = New TapeUtils.PositionData(driveHandle)
-                                     Else
-                                         succ = True
-                                         Exit While
-                                     End If
-                                 End While
-                                 If Flush Then CheckFlush()
-                                 If Clean Then CheckClean(True)
-                                 TotalBytesProcessed += BytesReaded
-                                 CurrentBytesProcessed += BytesReaded
-                                 TotalBytesUnindexed += BytesReaded
-                          Else
-                              ExitWhileFlag = True
-                          End If
-                      End While
-                          If StopFlag Then Exit Sub
-                          sh.ProcessFinalBlock()
-                         If sh.SHA1Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.SHA1, sh.SHA1Value)
-                         If sh.MD5Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.MD5, sh.MD5Value)
-                         If sh.BlakeValue IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, sh.BlakeValue)
-                          If sh.XXHash3Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, sh.XXHash3Value)
-                          If sh.XXHash128Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, sh.XXHash128Value)
-                           If LastWriteTask IsNot Nothing Then ObserveTask(LastWriteTask)
-                          'Do not expose the archive in the schema until every
-                          'byte has been written successfully.  If the write
-                          'fails, the original directory remains reachable.
-                          p.AddFile(fadd)
-                          schema.highestfileuid += 1
-                          p.RemoveDirectory(d)
-                          TotalFilesProcessed += 1
-                          CurrentFilesProcessed += 1
-                          If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
-                         pos = GetPos
-                         If pos.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
-                         PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
-                          CurrentHeight = CLng(pos.BlockNumber)
-                          Invoke(Sub() 更新数据区索引ToolStripMenuItem.Enabled = True)
-                          SetStatusLight(LWStatus.Succ)
-                          TapeUtils.Flush(driveHandle)
-                           Invoke(Sub() TreeView1.SelectedNode = TreeView1.SelectedNode.Parent)
-                          RefreshDisplay()
-                          RefreshCapacity()
-                          Modified = True
+                                             pos = New TapeUtils.PositionData(driveHandle)
+                                         Else
+                                             succ = True
+                                             Exit While
+                                         End If
+                                     End While
+                                     If Flush Then CheckFlush()
+                                     If Clean Then CheckClean(True)
+                                     TotalBytesProcessed += BytesReaded
+                                     CurrentBytesProcessed += BytesReaded
+                                     TotalBytesUnindexed += BytesReaded
+                                 Else
+                                     ExitWhileFlag = True
+                                 End If
+                             End While
+                             If StopFlag Then Exit Sub
+                             sh.ProcessFinalBlock()
+                             If sh.SHA1Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.SHA1, sh.SHA1Value)
+                             If sh.MD5Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.MD5, sh.MD5Value)
+                             If sh.BlakeValue IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, sh.BlakeValue)
+                             If sh.XXHash3Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, sh.XXHash3Value)
+                             If sh.XXHash128Value IsNot Nothing Then fadd.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, sh.XXHash128Value)
+                             If LastWriteTask IsNot Nothing Then ObserveTask(LastWriteTask)
+                             'Do not expose the archive in the schema until every
+                             'byte has been written successfully.  If the write
+                             'fails, the original directory remains reachable.
+                             p.AddFile(fadd)
+                             schema.highestfileuid += 1
+                             p.RemoveDirectory(d)
+                             TotalFilesProcessed += 1
+                             CurrentFilesProcessed += 1
+                             If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
+                             pos = GetPos
+                             If pos.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                             PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
+                             CurrentHeight = CLng(pos.BlockNumber)
+                             Invoke(Sub() 更新数据区索引ToolStripMenuItem.Enabled = True)
+                             SetStatusLight(LWStatus.Succ)
+                             TapeUtils.Flush(driveHandle)
+                             Invoke(Sub() TreeView1.SelectedNode = TreeView1.SelectedNode.Parent)
+                             RefreshDisplay()
+                             RefreshCapacity()
+                             Modified = True
                          Catch ex As Exception
                              SetStatusLight(LWStatus.Err)
                              PrintMsg($"压缩索引出错：{ex.Message}{vbCrLf}{ex.StackTrace}", ForceLog:=True)
@@ -11441,7 +11447,7 @@ Public Class LTFSWriter
                              End If
                              LockGUI(False)
                          End Try
-                      End Sub)
+                     End Sub)
         End If
     End Sub
 
@@ -12039,16 +12045,16 @@ Public Class LTFSWriter
                             fr.Close()
                             If HashOnWrite AndAlso sh IsNot Nothing AndAlso Not StopFlag Then
                                 Dim hashTask As Task = Task.Run(Sub()
-                                             Try
-                                                 sh.ProcessFinalBlock()
-                                                 If sh.SHA1Value IsNot Nothing Then fr.File.SetXattr(ltfsindex.file.xattr.HashType.SHA1, sh.SHA1Value)
-                                                 If sh.MD5Value IsNot Nothing Then fr.File.SetXattr(ltfsindex.file.xattr.HashType.MD5, sh.MD5Value)
-                                                 If sh.BlakeValue IsNot Nothing Then fr.File.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, sh.BlakeValue)
-                                                 If sh.XXHash3Value IsNot Nothing Then fr.File.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, sh.XXHash3Value)
-                                             Finally
-                                                 sh.StopFlag = True
-                                             End Try
-                                         End Sub)
+                                                                    Try
+                                                                        sh.ProcessFinalBlock()
+                                                                        If sh.SHA1Value IsNot Nothing Then fr.File.SetXattr(ltfsindex.file.xattr.HashType.SHA1, sh.SHA1Value)
+                                                                        If sh.MD5Value IsNot Nothing Then fr.File.SetXattr(ltfsindex.file.xattr.HashType.MD5, sh.MD5Value)
+                                                                        If sh.BlakeValue IsNot Nothing Then fr.File.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, sh.BlakeValue)
+                                                                        If sh.XXHash3Value IsNot Nothing Then fr.File.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, sh.XXHash3Value)
+                                                                    Finally
+                                                                        sh.StopFlag = True
+                                                                    End Try
+                                                                End Sub)
                                 hashTasks.Add(hashTask)
                                 WaitForHashTasks(hashTasks)
                             ElseIf sh IsNot Nothing Then
@@ -12206,8 +12212,8 @@ Public Class LTFSWriter
                                更新数据区索引ToolStripMenuItem_Click(sender, e)
                            End If
                            PrintMsg(OnWriteFinishMessage)
-                            SetStatusLight(If(StopFlag, LWStatus.Err, LWStatus.Succ))
-                            RaiseEvent WriteFinished()
+                           SetStatusLight(If(StopFlag, LWStatus.Err, LWStatus.Succ))
+                           RaiseEvent WriteFinished()
                        End Sub)
             End Sub)
             StopFlag = False
@@ -14035,161 +14041,367 @@ Public Class LTFSWriter
                          TapeUtils.PreventMediaRemoval(driveHandle)
                          mediumRemovalPrevented = True
                          Dim locateResult As Boolean = False
-                     LTE = New AutoResetEvent(False)
-                     locateTask = Task.Run(Sub()
-                                                           Try
-                                                               locateResult = LocateToWritePosition()
-                                                           Finally
-                                                               Try
-                                                                   LTE.Set()
-                                                               Catch
-                                                               End Try
-                                                           End Try
-                                                       End Sub)
-                     IsWriting = True
-                     My.Settings.LTFSWriter_PreLoadBytes = My.Settings.LTFSWriter_PreLoadBytes
-                     RingBufferEnabled = My.Settings.LTFSWriter_RingBufferEnabled
-                      provider = New HardDriveDataProvider(cfg.DrivePath, cfg.StartLBA, cfg.SectorCount, pipeBufferBytes:=My.Settings.LTFSWriter_PreLoadBytes)
-                     GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency
-                     provider.Start()
-                     Dim lcounter As Integer = 0
-                     While Not (locateTask.IsCompleted OrElse locateTask.IsCanceled OrElse locateTask.IsFaulted)
-                         LTE.WaitOne(10)
-                         lcounter += 1
-                         If lcounter >= 100 Then
-                             lcounter = 0
-                             If provider IsNot Nothing Then PipeBufferLength = If(RingBufferEnabled, PipeGetLength(provider.RingBuffer), PipeGetLength(provider.Reader))
+                         LTE = New AutoResetEvent(False)
+                         locateTask = Task.Run(Sub()
+                                                   Try
+                                                       locateResult = LocateToWritePosition()
+                                                   Finally
+                                                       Try
+                                                           LTE.Set()
+                                                       Catch
+                                                       End Try
+                                                   End Try
+                                               End Sub)
+                         IsWriting = True
+                         My.Settings.LTFSWriter_PreLoadBytes = My.Settings.LTFSWriter_PreLoadBytes
+                         RingBufferEnabled = My.Settings.LTFSWriter_RingBufferEnabled
+                         provider = New HardDriveDataProvider(cfg.DrivePath, cfg.StartLBA, cfg.SectorCount, pipeBufferBytes:=My.Settings.LTFSWriter_PreLoadBytes)
+                         GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency
+                         provider.Start()
+                         Dim lcounter As Integer = 0
+                         While Not (locateTask.IsCompleted OrElse locateTask.IsCanceled OrElse locateTask.IsFaulted)
+                             LTE.WaitOne(10)
+                             lcounter += 1
+                             If lcounter >= 100 Then
+                                 lcounter = 0
+                                 If provider IsNot Nothing Then PipeBufferLength = If(RingBufferEnabled, PipeGetLength(provider.RingBuffer), PipeGetLength(provider.Reader))
+                             End If
+                         End While
+                         If locateTask.IsFaulted Then ObserveTask(locateTask)
+                         If Not locateResult Then
+                             Exit Sub
                          End If
-                     End While
-                     If locateTask.IsFaulted Then ObserveTask(locateTask)
-                     If Not locateResult Then
-                         Exit Sub
-                     End If
-                     Invoke(Sub() 更新数据区索引ToolStripMenuItem.Enabled = True)
-                     If My.Settings.LTFSWriter_PowerPolicyOnWriteBegin <> Guid.Empty Then
-                         Process.Start(New ProcessStartInfo With {.FileName = "powercfg",
+                         Invoke(Sub() 更新数据区索引ToolStripMenuItem.Enabled = True)
+                         If My.Settings.LTFSWriter_PowerPolicyOnWriteBegin <> Guid.Empty Then
+                             Process.Start(New ProcessStartInfo With {.FileName = "powercfg",
                                   .Arguments = $"/s {My.Settings.LTFSWriter_PowerPolicyOnWriteBegin.ToString()}",
                                   .WindowStyle = ProcessWindowStyle.Hidden})
-                     End If
-                      wBufferPtr = Marshal.AllocHGlobal(CInt(plabel.blocksize))
+                         End If
+                         wBufferPtr = Marshal.AllocHGlobal(CInt(plabel.blocksize))
 
-                      Dim ExitForFlag As Boolean = False
-                     IndexLastUpdateTime = Now
-                     Dim p As New TapeUtils.PositionData(driveHandle)
+                         Dim ExitForFlag As Boolean = False
+                         IndexLastUpdateTime = Now
+                         Dim p As New TapeUtils.PositionData(driveHandle)
 
-                     Dim lastpos As New TapeUtils.PositionData(driveHandle)
-                     TapeUtils.SetBlockSize(driveHandle, plabel.blocksize)
-                     Try
-                         While Not provider.SectorLenUpdated AndAlso Not StopFlag
-                             If provider.ProducerCompleted Then
-                                 Throw New IO.EndOfStreamException($"Hard-drive data provider completed before device geometry was available: {cfg.DrivePath}")
-                             End If
-                             Threading.Thread.Sleep(1)
-                         End While
-                         If StopFlag Then Exit Sub
-                         Dim newfile As New ltfsindex.file
-                         d.UnwrittenFiles.Add(newfile)
-                         newfile.fileuid = schema.highestfileuid + 1
-                         schema.highestfileuid += 1
-                         newfile.length = provider.SectorCount * provider.SectorLength
-                         UnwrittenSizeOverrideValue = CULng(newfile.length)
-                         newfile.name = cfg.DrivePath.Replace("\", "").Replace(".", "") & StartTime.ToString("_yyyyMMdd_HHmmss_fffffff") & ".img"
-                         Dim fileextent As New ltfsindex.file.extent With
+                         Dim lastpos As New TapeUtils.PositionData(driveHandle)
+                         TapeUtils.SetBlockSize(driveHandle, plabel.blocksize)
+                         Try
+                             While Not provider.SectorLenUpdated AndAlso Not StopFlag
+                                 If provider.ProducerCompleted Then
+                                     Throw New IO.EndOfStreamException($"Hard-drive data provider completed before device geometry was available: {cfg.DrivePath}")
+                                 End If
+                                 Threading.Thread.Sleep(1)
+                             End While
+                             If StopFlag Then Exit Sub
+                             Dim newfile As New ltfsindex.file
+                             d.UnwrittenFiles.Add(newfile)
+                             newfile.fileuid = schema.highestfileuid + 1
+                             schema.highestfileuid += 1
+                             newfile.length = provider.SectorCount * provider.SectorLength
+                             UnwrittenSizeOverrideValue = CULng(newfile.length)
+                             newfile.name = cfg.DrivePath.Replace("\", "").Replace(".", "") & StartTime.ToString("_yyyyMMdd_HHmmss_fffffff") & ".img"
+                             Dim fileextent As New ltfsindex.file.extent With
                                 {.partition = CType(DataPartition, ltfsindex.PartitionLabel),
                                 .startblock = CLng(p.BlockNumber),
                                 .bytecount = newfile.length,
                                 .byteoffset = 0,
                                 .fileoffset = 0}
-                         newfile.extentinfo.Add(fileextent)
-                         PrintMsg($"{My.Resources.ResText_Writing} {newfile.name}  {My.Resources.ResText_Size} {IOManager.FormatSize(newfile.length)}", False,
+                             newfile.extentinfo.Add(fileextent)
+                             PrintMsg($"{My.Resources.ResText_Writing} {newfile.name}  {My.Resources.ResText_Size} {IOManager.FormatSize(newfile.length)}", False,
                                      $"{My.Resources.ResText_Writing}: {cfg.DrivePath}{vbCrLf}{My.Resources.ResText_Size}: {IOManager.FormatSize(newfile.length)}{vbCrLf _
                                      }{My.Resources.ResText_WrittenTotal}: {IOManager.FormatSize(TotalBytesProcessed) _
                                      } {My.Resources.ResText_Remaining}: {IOManager.FormatSize(CLng(Math.Max(0, UnwrittenSize - CurrentBytesProcessed))) _
                                      } -> {IOManager.FormatSize(CLng(Math.Max(0, UnwrittenSize - CurrentBytesProcessed - newfile.length)))}")
-                         'write to tape
-                         Dim LastWriteTask As Task = Nothing
-                         Dim sh As IOManager.CheckSumBlockwiseCalculator = Nothing
-                         If HashOnWrite Then sh = New IOManager.CheckSumBlockwiseCalculator
-                         Dim ExitWhileFlag As Boolean = False
-                         Dim RingBufferReader As SpscRingBuffer = Nothing
-                         Dim PipeReader As System.IO.Pipelines.PipeReader = Nothing
-                         If RingBufferEnabled Then
-                             RingBufferReader = provider.RingBuffer
-                         Else
-                             PipeReader = provider.Reader
-                         End If
-                         Dim remainingInFile As Long = newfile.length
-                         LWTE = New AutoResetEvent(False)
-                         While Not StopFlag AndAlso remainingInFile > 0
-                             Dim toRead As Integer = CInt(Math.Min(plabel.blocksize, remainingInFile))
-                             Dim buffer As Byte() = IOManager.PublicArrayPool.Rent(plabel.blocksize)
-                             Dim BytesReaded As Integer = 0
+                             'write to tape
+                             Dim LastWriteTask As Task = Nothing
+                             Dim sh As IOManager.CheckSumBlockwiseCalculator = Nothing
+                             If HashOnWrite Then sh = New IOManager.CheckSumBlockwiseCalculator
+                             Dim ExitWhileFlag As Boolean = False
+                             Dim RingBufferReader As SpscRingBuffer = Nothing
+                             Dim PipeReader As System.IO.Pipelines.PipeReader = Nothing
+                             If RingBufferEnabled Then
+                                 RingBufferReader = provider.RingBuffer
+                             Else
+                                 PipeReader = provider.Reader
+                             End If
+                             Dim remainingInFile As Long = newfile.length
+                             LWTE = New AutoResetEvent(False)
+                             While Not StopFlag AndAlso remainingInFile > 0
+                                 Dim toRead As Integer = CInt(Math.Min(plabel.blocksize, remainingInFile))
+                                 Dim buffer As Byte() = IOManager.PublicArrayPool.Rent(plabel.blocksize)
+                                 Dim BytesReaded As Integer = 0
 
-                             ' 从 Pipe 读取当前文件需要的字节
-                             Try
-                                 If RingBufferEnabled Then
-                                     BytesReaded = PipeReadExactly(RingBufferReader, buffer, toRead)
-                                 Else
-                                     Dim pCounter1 As Integer = 0
-                                     Dim pCounter2 As Integer = 0
-                                     Dim lastlen As Long = PipeBufferLength
-                                     While PipePause AndAlso Not StopFlag
-                                         Threading.Thread.Sleep(10)
-                                         Threading.Interlocked.Increment(pCounter1)
-                                         pCounter1 += 1
-                                         pCounter2 += 1
-                                         If pCounter1 >= 100 Then
-                                             pCounter1 = 0
-                                             If RingBufferEnabled Then
-                                                 PipeBufferLength = PipeGetLength(provider.RingBuffer)
-                                             Else
-                                                 PipeBufferLength = PipeGetLength(provider.Reader)
-                                             End If
-                                             If pCounter2 >= 1000 Then
-                                                 If PipeBufferLength = lastlen OrElse PipeBufferLength >= My.Settings.LTFSWriter_PreLoadBytes * 0.75 Then
-                                                     PipePause = False
+                                 ' 从 Pipe 读取当前文件需要的字节
+                                 Try
+                                     If RingBufferEnabled Then
+                                         BytesReaded = PipeReadExactly(RingBufferReader, buffer, toRead)
+                                     Else
+                                         Dim pCounter1 As Integer = 0
+                                         Dim pCounter2 As Integer = 0
+                                         Dim lastlen As Long = PipeBufferLength
+                                         While PipePause AndAlso Not StopFlag
+                                             Threading.Thread.Sleep(10)
+                                             Threading.Interlocked.Increment(pCounter1)
+                                             pCounter1 += 1
+                                             pCounter2 += 1
+                                             If pCounter1 >= 100 Then
+                                                 pCounter1 = 0
+                                                 If RingBufferEnabled Then
+                                                     PipeBufferLength = PipeGetLength(provider.RingBuffer)
+                                                 Else
+                                                     PipeBufferLength = PipeGetLength(provider.Reader)
                                                  End If
-                                                 lastlen = PipeBufferLength
-                                                 pCounter2 = 0
-                                             Else
-                                                 If PipeBufferLength >= My.Settings.LTFSWriter_PreLoadBytes * 0.75 Then
-                                                     PipePause = False
+                                                 If pCounter2 >= 1000 Then
+                                                     If PipeBufferLength = lastlen OrElse PipeBufferLength >= My.Settings.LTFSWriter_PreLoadBytes * 0.75 Then
+                                                         PipePause = False
+                                                     End If
+                                                     lastlen = PipeBufferLength
+                                                     pCounter2 = 0
+                                                 Else
+                                                     If PipeBufferLength >= My.Settings.LTFSWriter_PreLoadBytes * 0.75 Then
+                                                         PipePause = False
+                                                     End If
                                                  End If
                                              End If
+                                         End While
+                                         If StopFlag Then
+                                             IOManager.PublicArrayPool.Return(buffer)
+                                             ExitWhileFlag = True
+                                             Exit While
                                          End If
-                                     End While
-                                     If StopFlag Then
+                                         BytesReaded = PipeReadExactly(PipeReader, buffer, toRead)
+
+                                     End If
+                                     If BytesReaded = 0 Then
                                          IOManager.PublicArrayPool.Return(buffer)
                                          ExitWhileFlag = True
                                          Exit While
                                      End If
-                                     BytesReaded = PipeReadExactly(PipeReader, buffer, toRead)
+                                 Catch ex As Exception
+                                     Try
+                                         IOManager.PublicArrayPool.Return(buffer)
+                                     Catch
+                                     End Try
+                                     Dim dResult As DialogResult
+                                     Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr }{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
+                                     Select Case dResult
+                                         Case DialogResult.Abort
+                                             StopFlag = True
+                                             Throw
+                                         Case DialogResult.Retry
+                                             Continue While
+                                         Case DialogResult.Ignore
+                                             StopFlag = True
+                                             Throw
+                                     End Select
+                                 End Try
 
+                                 If LastWriteTask IsNot Nothing Then
+                                     Dim lwcounter As Integer = 0
+                                     While Not (LastWriteTask.IsCompleted OrElse LastWriteTask.IsCanceled OrElse LastWriteTask.IsFaulted)
+                                         LWTE.WaitOne(10)
+                                         lwcounter += 1
+                                         If lwcounter >= 100 Then
+                                             lwcounter = 0
+                                             If RingBufferEnabled Then
+                                                 PipeBufferLength = PipeGetLength(RingBufferReader)
+                                             Else
+                                                 PipeBufferLength = PipeGetLength(PipeReader)
+                                             End If
+                                         End If
+                                     End While
+                                     Try
+                                         ObserveTask(LastWriteTask)
+                                     Catch
+                                         IOManager.PublicArrayPool.Return(buffer)
+                                         Throw
+                                     End Try
+                                     writeTasks.Remove(LastWriteTask)
                                  End If
-                                   If BytesReaded = 0 Then
-                                       IOManager.PublicArrayPool.Return(buffer)
-                                       ExitWhileFlag = True
-                                       Exit While
-                                  End If
-                              Catch ex As Exception
-                                  Try
-                                      IOManager.PublicArrayPool.Return(buffer)
-                                  Catch
-                                  End Try
-                                  Dim dResult As DialogResult
-                                 Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr }{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
-                                 Select Case dResult
-                                     Case DialogResult.Abort
-                                         StopFlag = True
-                                         Throw
-                                     Case DialogResult.Retry
-                                         Continue While
-                                     Case DialogResult.Ignore
-                                         StopFlag = True
-                                         Throw
-                                 End Select
-                             End Try
+                                 If ExitWhileFlag Then Exit While
 
+                                 LastWriteTask = Task.Factory.StartNew(
+                                  Sub(state)
+                                      Dim writeState = DirectCast(state, Tuple(Of Byte(), Integer))
+                                      Dim buf As Byte() = writeState.Item1
+                                      Dim bytesToWrite As Integer = writeState.Item2
+                                      Dim bufferReturned As Boolean = False
+                                      Try
+                                          If bytesToWrite > 0 Then
+                                              ' 限速（保留原逻辑）
+                                              CheckCount += 1
+                                              If CheckCount >= CheckCycle Then CheckCount = 0
+                                              If SpeedLimit > 0 AndAlso CheckCount = 0 Then
+                                                  Dim ts As Double = (Now - SpeedLimitLastTriggerTime).TotalSeconds
+                                                  While SpeedLimit > 0 AndAlso ts > 0 AndAlso ((plabel.blocksize * CheckCycle / 1048576) / ts) > SpeedLimit
+                                                      Threading.Thread.Sleep(0)
+                                                      ts = (Now - SpeedLimitLastTriggerTime).TotalSeconds
+                                                  End While
+                                                  SpeedLimitLastTriggerTime = Now
+                                              End If
+
+                                              ' 写带（保留原 TapeUtils.Write + sense 处理）
+                                              Marshal.Copy(buf, 0, wBufferPtr, bytesToWrite)
+                                              Dim succ As Boolean = False
+                                              While Not succ
+                                                  Dim sense As Byte()
+                                                  Try
+                                                      sense = TapeUtils.Write(driveHandle, wBufferPtr, CUInt(bytesToWrite), True)
+                                                      SyncLock p
+                                                          p.BlockNumber = CULng(p.BlockNumber + 1)
+                                                      End SyncLock
+                                                  Catch ex As Exception
+                                                      Dim dResult As DialogResult
+                                                      Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErrSCSI}{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
+                                                      Select Case dResult
+                                                          Case DialogResult.Abort
+                                                              StopFlag = True
+                                                              Throw
+                                                          Case DialogResult.Retry
+                                                              succ = False
+                                                          Case DialogResult.Ignore
+                                                              succ = True
+                                                              Exit While
+                                                      End Select
+                                                      p = New TapeUtils.PositionData(driveHandle)
+                                                      Continue While
+                                                  End Try
+                                                  If (((sense(2) >> 6) And &H1) = 1) Then
+                                                      If ((sense(2) And &HF) = 13) AndAlso (Not My.Settings.LTFSWriter_IgnoreVolumeOverflow) Then
+                                                          PrintMsg(My.Resources.ResText_VOF)
+                                                          Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_VOF))
+                                                          StopFlag = True
+                                                          Try
+                                                              PipeBufferLength = 0
+                                                              provider.Cancel()
+                                                              provider.CompleteAsync().GetAwaiter().GetResult()
+                                                          Catch
+                                                              PrintMsg("pipe complete failed", LogOnly:=True)
+                                                          End Try
+                                                          Exit Sub
+                                                      Else
+                                                          PrintMsg(If(((sense(2) And &HF) = 13), My.Resources.ResText_VOF, My.Resources.ResText_EWEOM), True, DeDupe:=True)
+                                                          succ = True
+                                                          Exit While
+                                                      End If
+                                                  ElseIf (sense(2) And &HF) <> 0 Then
+                                                      Try
+                                                          Throw New Exception("SCSI sense error")
+                                                      Catch ex As Exception
+                                                          Dim dResult As DialogResult
+                                                          Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{TapeUtils.ParseSenseData(sense)}{vbCrLf}{vbCrLf}sense{vbCrLf}{TapeUtils.Byte2Hex(sense, True)}{vbCrLf}{ex.StackTrace}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
+                                                          Select Case dResult
+                                                              Case DialogResult.Abort
+                                                                  StopFlag = True
+                                                                  Throw New Exception(TapeUtils.ParseSenseData(sense))
+                                                              Case DialogResult.Retry
+                                                                  succ = False
+                                                              Case DialogResult.Ignore
+                                                                  succ = True
+                                                                  Exit While
+                                                          End Select
+                                                      End Try
+                                                      p = New TapeUtils.PositionData(driveHandle)
+                                                  Else
+                                                      succ = True
+                                                      Exit While
+                                                  End If
+                                              End While
+                                              If sh IsNot Nothing AndAlso succ Then
+                                                  If 异步校验CPU占用高ToolStripMenuItem.Checked Then
+                                                      sh.PropagateAsync(buf, bytesToWrite, Sub(qb As Byte())
+                                                                                               IOManager.PublicArrayPool.Return(qb)
+                                                                                           End Sub)
+                                                  Else
+                                                      sh.Propagate(buf, bytesToWrite, Sub(qb As Byte())
+                                                                                          IOManager.PublicArrayPool.Return(qb)
+                                                                                      End Sub)
+                                                  End If
+                                                  bufferReturned = True
+                                              Else
+                                                  IOManager.PublicArrayPool.Return(buf)
+                                                  bufferReturned = True
+                                              End If
+                                              If Flush Then
+                                                  Dim flushResult As Boolean = False
+                                                  Dim tFE As New AutoResetEvent(False)
+                                                  Dim tFlush As Task = Task.Run(Sub()
+                                                                                    flushResult = CheckFlush()
+                                                                                    tFE.Set()
+                                                                                End Sub)
+                                                  Dim counter As Integer = 0
+                                                  While Not (tFlush.IsCompleted OrElse tFlush.IsCanceled OrElse tFlush.IsFaulted)
+                                                      tFE.WaitOne(10)
+                                                      counter += 1
+                                                      If counter >= 100 Then
+                                                          counter = 0
+                                                          If RingBufferEnabled Then
+                                                              PipeBufferLength = PipeGetLength(RingBufferReader)
+                                                          Else
+                                                              PipeBufferLength = PipeGetLength(PipeReader)
+                                                          End If
+                                                      End If
+                                                  End While
+                                                  Try
+                                                      ObserveTask(tFlush)
+                                                  Finally
+                                                      tFE.Dispose()
+                                                  End Try
+                                                  If flushResult Then
+                                                      If My.Settings.LTFSWriter_PowerPolicyOnWriteBegin <> Guid.Empty Then
+                                                          Process.Start(New ProcessStartInfo With {.FileName = "powercfg",
+                                                                .Arguments = $"/s {My.Settings.LTFSWriter_PowerPolicyOnWriteBegin.ToString()}",
+                                                                .WindowStyle = ProcessWindowStyle.Hidden})
+                                                      End If
+                                                  End If
+                                              End If
+                                              If Clean Then
+                                                  Dim tCE As New AutoResetEvent(False)
+                                                  Dim tClean As Task = Task.Run(Sub()
+                                                                                    CheckClean(True)
+                                                                                    tCE.Set()
+                                                                                End Sub)
+                                                  Dim counter As Integer = 0
+                                                  While Not (tClean.IsCompleted OrElse tClean.IsCanceled OrElse tClean.IsFaulted)
+                                                      tCE.WaitOne(10)
+                                                      counter += 1
+                                                      If counter >= 100 Then
+                                                          counter = 0
+                                                          If RingBufferEnabled Then
+                                                              PipeBufferLength = PipeGetLength(RingBufferReader)
+                                                          Else
+                                                              PipeBufferLength = PipeGetLength(PipeReader)
+                                                          End If
+                                                      End If
+                                                  End While
+                                                  Try
+                                                      ObserveTask(tClean)
+                                                  Finally
+                                                      tCE.Dispose()
+                                                  End Try
+                                              End If
+                                              newfile.WrittenBytes += bytesToWrite
+                                              TotalBytesProcessed += bytesToWrite
+                                              CurrentBytesProcessed += bytesToWrite
+                                              TotalBytesUnindexed += bytesToWrite
+                                          Else
+                                              ExitWhileFlag = True
+                                          End If
+                                      Finally
+                                          If Not bufferReturned Then
+                                              IOManager.PublicArrayPool.Return(buf)
+                                          End If
+                                          Try
+                                              LWTE.Set()
+                                          Catch
+                                          End Try
+                                      End Try
+                                  End Sub, Tuple.Create(buffer, BytesReaded))
+                                 writeTasks.Add(LastWriteTask)
+                                 remainingInFile -= BytesReaded
+                             End While
+
+                             'If i < WriteList.Count - 1 Then WriteList(i + 1).BeginOpen()
                              If LastWriteTask IsNot Nothing Then
                                  Dim lwcounter As Integer = 0
                                  While Not (LastWriteTask.IsCompleted OrElse LastWriteTask.IsCanceled OrElse LastWriteTask.IsFaulted)
@@ -14203,333 +14415,127 @@ Public Class LTFSWriter
                                              PipeBufferLength = PipeGetLength(PipeReader)
                                          End If
                                      End If
-                                  End While
-                                  Try
-                                      ObserveTask(LastWriteTask)
-                                  Catch
-                                      IOManager.PublicArrayPool.Return(buffer)
-                                      Throw
-                                  End Try
-                                  writeTasks.Remove(LastWriteTask)
-                              End If
-                              If ExitWhileFlag Then Exit While
-
-                              LastWriteTask = Task.Factory.StartNew(
-                                  Sub(state)
-                                      Dim writeState = DirectCast(state, Tuple(Of Byte(), Integer))
-                                      Dim buf As Byte() = writeState.Item1
-                                      Dim bytesToWrite As Integer = writeState.Item2
-                                      Dim bufferReturned As Boolean = False
-                                      Try
-                                      If bytesToWrite > 0 Then
-                                         ' 限速（保留原逻辑）
-                                         CheckCount += 1
-                                         If CheckCount >= CheckCycle Then CheckCount = 0
-                                         If SpeedLimit > 0 AndAlso CheckCount = 0 Then
-                                             Dim ts As Double = (Now - SpeedLimitLastTriggerTime).TotalSeconds
-                                             While SpeedLimit > 0 AndAlso ts > 0 AndAlso ((plabel.blocksize * CheckCycle / 1048576) / ts) > SpeedLimit
-                                                 Threading.Thread.Sleep(0)
-                                                 ts = (Now - SpeedLimitLastTriggerTime).TotalSeconds
-                                             End While
-                                             SpeedLimitLastTriggerTime = Now
-                                         End If
-
-                                         ' 写带（保留原 TapeUtils.Write + sense 处理）
-                                         Marshal.Copy(buf, 0, wBufferPtr, bytesToWrite)
-                                         Dim succ As Boolean = False
-                                         While Not succ
-                                             Dim sense As Byte()
-                                             Try
-                                                 sense = TapeUtils.Write(driveHandle, wBufferPtr, CUInt(bytesToWrite), True)
-                                                 SyncLock p
-                                                     p.BlockNumber = CULng(p.BlockNumber + 1)
-                                                 End SyncLock
-                                             Catch ex As Exception
-                                                 Dim dResult As DialogResult
-                                                 Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErrSCSI}{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
-                                                 Select Case dResult
-                                                     Case DialogResult.Abort
-                                                         StopFlag = True
-                                                         Throw
-                                                     Case DialogResult.Retry
-                                                         succ = False
-                                                     Case DialogResult.Ignore
-                                                         succ = True
-                                                         Exit While
-                                                 End Select
-                                                 p = New TapeUtils.PositionData(driveHandle)
-                                                 Continue While
-                                             End Try
-                                             If (((sense(2) >> 6) And &H1) = 1) Then
-                                                 If ((sense(2) And &HF) = 13) AndAlso (Not My.Settings.LTFSWriter_IgnoreVolumeOverflow) Then
-                                                     PrintMsg(My.Resources.ResText_VOF)
-                                                     Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_VOF))
-                                                     StopFlag = True
-                                                     Try
-                                                         PipeBufferLength = 0
-                                                         provider.Cancel()
-                                                         provider.CompleteAsync().GetAwaiter().GetResult()
-                                                     Catch
-                                                         PrintMsg("pipe complete failed", LogOnly:=True)
-                                                     End Try
-                                                     Exit Sub
-                                                 Else
-                                                     PrintMsg(If(((sense(2) And &HF) = 13), My.Resources.ResText_VOF, My.Resources.ResText_EWEOM), True, DeDupe:=True)
-                                                     succ = True
-                                                     Exit While
-                                                 End If
-                                             ElseIf (sense(2) And &HF) <> 0 Then
-                                                 Try
-                                                     Throw New Exception("SCSI sense error")
-                                             Catch ex As Exception
-                                                 Dim dResult As DialogResult
-                                                     Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{TapeUtils.ParseSenseData(sense)}{vbCrLf}{vbCrLf}sense{vbCrLf}{TapeUtils.Byte2Hex(sense, True)}{vbCrLf}{ex.StackTrace}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
-                                                     Select Case dResult
-                                                         Case DialogResult.Abort
-                                                             StopFlag = True
-                                                             Throw New Exception(TapeUtils.ParseSenseData(sense))
-                                                         Case DialogResult.Retry
-                                                             succ = False
-                                                         Case DialogResult.Ignore
-                                                             succ = True
-                                                             Exit While
-                                                     End Select
-                                                 End Try
-                                                 p = New TapeUtils.PositionData(driveHandle)
-                                             Else
-                                                 succ = True
-                                                 Exit While
-                                             End If
-                                         End While
-                                         If sh IsNot Nothing AndAlso succ Then
-                                             If 异步校验CPU占用高ToolStripMenuItem.Checked Then
-                                                  sh.PropagateAsync(buf, bytesToWrite, Sub(qb As Byte())
-                                                                                         IOManager.PublicArrayPool.Return(qb)
-                                                                                     End Sub)
-                                              Else
-                                                   sh.Propagate(buf, bytesToWrite, Sub(qb As Byte())
-                                                                                     IOManager.PublicArrayPool.Return(qb)
-                                                                                 End Sub)
-                                              End If
-                                              bufferReturned = True
-                                          Else
-                                             IOManager.PublicArrayPool.Return(buf)
-                                             bufferReturned = True
-                                         End If
-                                         If Flush Then
-                                             Dim flushResult As Boolean = False
-                                             Dim tFE As New AutoResetEvent(False)
-                                             Dim tFlush As Task = Task.Run(Sub()
-                                                                               flushResult = CheckFlush()
-                                                                               tFE.Set()
-                                                                           End Sub)
-                                             Dim counter As Integer = 0
-                                             While Not (tFlush.IsCompleted OrElse tFlush.IsCanceled OrElse tFlush.IsFaulted)
-                                                 tFE.WaitOne(10)
-                                                 counter += 1
-                                                 If counter >= 100 Then
-                                                     counter = 0
-                                                     If RingBufferEnabled Then
-                                                         PipeBufferLength = PipeGetLength(RingBufferReader)
-                                                     Else
-                                                         PipeBufferLength = PipeGetLength(PipeReader)
-                                                     End If
-                                              End If
-                                          End While
-                                          Try
-                                              ObserveTask(tFlush)
-                                          Finally
-                                              tFE.Dispose()
-                                          End Try
-                                              If flushResult Then
-                                                 If My.Settings.LTFSWriter_PowerPolicyOnWriteBegin <> Guid.Empty Then
-                                                     Process.Start(New ProcessStartInfo With {.FileName = "powercfg",
-                                                                .Arguments = $"/s {My.Settings.LTFSWriter_PowerPolicyOnWriteBegin.ToString()}",
-                                                                .WindowStyle = ProcessWindowStyle.Hidden})
-                                                 End If
-                                             End If
-                                         End If
-                                         If Clean Then
-                                             Dim tCE As New AutoResetEvent(False)
-                                             Dim tClean As Task = Task.Run(Sub()
-                                                                               CheckClean(True)
-                                                                               tCE.Set()
-                                                                           End Sub)
-                                             Dim counter As Integer = 0
-                                             While Not (tClean.IsCompleted OrElse tClean.IsCanceled OrElse tClean.IsFaulted)
-                                                 tCE.WaitOne(10)
-                                                 counter += 1
-                                                 If counter >= 100 Then
-                                                     counter = 0
-                                                     If RingBufferEnabled Then
-                                                         PipeBufferLength = PipeGetLength(RingBufferReader)
-                                                     Else
-                                                         PipeBufferLength = PipeGetLength(PipeReader)
-                                                     End If
-                                              End If
-                                          End While
-                                          Try
-                                              ObserveTask(tClean)
-                                          Finally
-                                              tCE.Dispose()
-                                          End Try
-                                          End If
-                                          newfile.WrittenBytes += bytesToWrite
-                                          TotalBytesProcessed += bytesToWrite
-                                          CurrentBytesProcessed += bytesToWrite
-                                          TotalBytesUnindexed += bytesToWrite
-                                     Else
-                                         ExitWhileFlag = True
-                                     End If
-                                     Finally
-                                         If Not bufferReturned Then
-                                             IOManager.PublicArrayPool.Return(buf)
-                                         End If
-                                         Try
-                                             LWTE.Set()
-                                         Catch
-                                         End Try
-                                     End Try
-                                  End Sub, Tuple.Create(buffer, BytesReaded))
-                             writeTasks.Add(LastWriteTask)
-                             remainingInFile -= BytesReaded
-                         End While
-
-                         'If i < WriteList.Count - 1 Then WriteList(i + 1).BeginOpen()
-                         If LastWriteTask IsNot Nothing Then
-                             Dim lwcounter As Integer = 0
-                             While Not (LastWriteTask.IsCompleted OrElse LastWriteTask.IsCanceled OrElse LastWriteTask.IsFaulted)
-                                 LWTE.WaitOne(10)
-                                 lwcounter += 1
-                                 If lwcounter >= 100 Then
-                                     lwcounter = 0
-                                     If RingBufferEnabled Then
-                                         PipeBufferLength = PipeGetLength(RingBufferReader)
-                                     Else
-                                         PipeBufferLength = PipeGetLength(PipeReader)
-                                     End If
-                                 End If
-                              End While
-                              ObserveTask(LastWriteTask)
-                              writeTasks.Remove(LastWriteTask)
-                           End If
-                          If HashOnWrite AndAlso sh IsNot Nothing AndAlso Not StopFlag Then
-                              Dim hashTask As Task = Task.Run(Sub()
-                                                       Try
-                                                           sh.ProcessFinalBlock()
-                                                     If My.Settings.LTFSWriter_ChecksumEnabled_SHA1 Then newfile.SetXattr(ltfsindex.file.xattr.HashType.SHA1, sh.SHA1Value)
-                                                     If My.Settings.LTFSWriter_ChecksumEnabled_SHA256 Then newfile.SetXattr(ltfsindex.file.xattr.HashType.SHA256, sh.SHA256Value)
-                                                     If My.Settings.LTFSWriter_ChecksumEnabled_SHA512 Then newfile.SetXattr(ltfsindex.file.xattr.HashType.SHA512, sh.SHA512Value)
-                                                     If My.Settings.LTFSWriter_ChecksumEnabled_CRC32 Then newfile.SetXattr(ltfsindex.file.xattr.HashType.CRC32, sh.CRC32Value)
-                                                     If My.Settings.LTFSWriter_ChecksumEnabled_MD5 Then newfile.SetXattr(ltfsindex.file.xattr.HashType.MD5, sh.MD5Value)
-                                                     If sh.BlakeValue IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_BLAKE3 Then
-                                                         newfile.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, sh.BlakeValue)
-                                                     End If
-                                                     If sh.XXHash3Value IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_XxHash3 Then
-                                                         newfile.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, sh.XXHash3Value)
-                                                     End If
-                                                     If sh.XXHash128Value IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_XxHash128 Then
-                                                         newfile.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, sh.XXHash128Value)
-                                                      End If
-                                                       Finally
-                                                           sh.StopFlag = True
-                                                       End Try
-                                                   End Sub)
-                              hashTasks.Add(hashTask)
-                              WaitForHashTasks(hashTasks)
-                              SetStatusLight(LWStatus.Busy)
-                          ElseIf sh IsNot Nothing Then
-                             sh.StopFlag = True
-                         End If
-                         TotalFilesProcessed += 1
-                         CurrentFilesProcessed += 1
-                         p = New TapeUtils.PositionData(driveHandle)
-                         lastpos = New TapeUtils.PositionData(driveHandle)
-                         CurrentHeight = CLng(p.BlockNumber)
-                         If p.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
-                         PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
-
-
-                         'mark as written
-                         MarkWriteFileCompleted(newfile)
-                         RequestListDisplayRefresh()
-                         d.AddFile(newfile)
-                         d.UnwrittenFiles.Remove(newfile)
-                         If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
-                         If CheckUnindexedDataLimit() Then
+                                 End While
+                                 ObserveTask(LastWriteTask)
+                                 writeTasks.Remove(LastWriteTask)
+                             End If
+                             If HashOnWrite AndAlso sh IsNot Nothing AndAlso Not StopFlag Then
+                                 Dim hashTask As Task = Task.Run(Sub()
+                                                                     Try
+                                                                         sh.ProcessFinalBlock()
+                                                                         If My.Settings.LTFSWriter_ChecksumEnabled_SHA1 Then newfile.SetXattr(ltfsindex.file.xattr.HashType.SHA1, sh.SHA1Value)
+                                                                         If My.Settings.LTFSWriter_ChecksumEnabled_SHA256 Then newfile.SetXattr(ltfsindex.file.xattr.HashType.SHA256, sh.SHA256Value)
+                                                                         If My.Settings.LTFSWriter_ChecksumEnabled_SHA512 Then newfile.SetXattr(ltfsindex.file.xattr.HashType.SHA512, sh.SHA512Value)
+                                                                         If My.Settings.LTFSWriter_ChecksumEnabled_CRC32 Then newfile.SetXattr(ltfsindex.file.xattr.HashType.CRC32, sh.CRC32Value)
+                                                                         If My.Settings.LTFSWriter_ChecksumEnabled_MD5 Then newfile.SetXattr(ltfsindex.file.xattr.HashType.MD5, sh.MD5Value)
+                                                                         If sh.BlakeValue IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_BLAKE3 Then
+                                                                             newfile.SetXattr(ltfsindex.file.xattr.HashType.BLAKE3, sh.BlakeValue)
+                                                                         End If
+                                                                         If sh.XXHash3Value IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_XxHash3 Then
+                                                                             newfile.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, sh.XXHash3Value)
+                                                                         End If
+                                                                         If sh.XXHash128Value IsNot Nothing AndAlso My.Settings.LTFSWriter_ChecksumEnabled_XxHash128 Then
+                                                                             newfile.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, sh.XXHash128Value)
+                                                                         End If
+                                                                     Finally
+                                                                         sh.StopFlag = True
+                                                                     End Try
+                                                                 End Sub)
+                                 hashTasks.Add(hashTask)
+                                 WaitForHashTasks(hashTasks)
+                                 SetStatusLight(LWStatus.Busy)
+                             ElseIf sh IsNot Nothing Then
+                                 sh.StopFlag = True
+                             End If
+                             TotalFilesProcessed += 1
+                             CurrentFilesProcessed += 1
                              p = New TapeUtils.PositionData(driveHandle)
                              lastpos = New TapeUtils.PositionData(driveHandle)
                              CurrentHeight = CLng(p.BlockNumber)
-                             SetStatusLight(LWStatus.Busy)
-                         End If
-                         If CapacityRefreshInterval > 0 AndAlso (Now - LastRefresh).TotalSeconds > CapacityRefreshInterval Then
-                             p = New TapeUtils.PositionData(driveHandle)
-                             Dim capValue As Long() = RefreshCapacity()
-                             newfile.SetXattr(ltfsindex.file.xattr.ApplicationSpecific.CapacityRemain, CStr(capValue(p.PartitionNumber * 2)))
-                             Dim p2 As New TapeUtils.PositionData(driveHandle)
-                             If p2.BlockNumber <> p.BlockNumber OrElse p2.PartitionNumber <> p.PartitionNumber Then
-                                 Invoke(Sub()
-                                            While True
-                                                Select Case MessageBox.Show(New Form With {.TopMost = True}, $"Position changed! {p.BlockNumber} -> {p2.BlockNumber}", "Warning", MessageBoxButtons.AbortRetryIgnore)
-                                                    Case DialogResult.Abort
-                                                        StopFlag = True
-                                                    Case DialogResult.Retry
-                                                        TapeUtils.Locate(driveHandle, p.BlockNumber, p.PartitionNumber)
-                                                        p2 = New TapeUtils.PositionData(driveHandle)
-                                                        If p2.BlockNumber = p.BlockNumber AndAlso p2.PartitionNumber = p.PartitionNumber Then Exit While
-                                                    Case DialogResult.Ignore
-                                                        Exit While
-                                                End Select
-                                            End While
+                             If p.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                             PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
 
-                                        End Sub)
+
+                             'mark as written
+                             MarkWriteFileCompleted(newfile)
+                             RequestListDisplayRefresh()
+                             d.AddFile(newfile)
+                             d.UnwrittenFiles.Remove(newfile)
+                             If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
+                             If CheckUnindexedDataLimit() Then
+                                 p = New TapeUtils.PositionData(driveHandle)
+                                 lastpos = New TapeUtils.PositionData(driveHandle)
+                                 CurrentHeight = CLng(p.BlockNumber)
+                                 SetStatusLight(LWStatus.Busy)
                              End If
+                             If CapacityRefreshInterval > 0 AndAlso (Now - LastRefresh).TotalSeconds > CapacityRefreshInterval Then
+                                 p = New TapeUtils.PositionData(driveHandle)
+                                 Dim capValue As Long() = RefreshCapacity()
+                                 newfile.SetXattr(ltfsindex.file.xattr.ApplicationSpecific.CapacityRemain, CStr(capValue(p.PartitionNumber * 2)))
+                                 Dim p2 As New TapeUtils.PositionData(driveHandle)
+                                 If p2.BlockNumber <> p.BlockNumber OrElse p2.PartitionNumber <> p.PartitionNumber Then
+                                     Invoke(Sub()
+                                                While True
+                                                    Select Case MessageBox.Show(New Form With {.TopMost = True}, $"Position changed! {p.BlockNumber} -> {p2.BlockNumber}", "Warning", MessageBoxButtons.AbortRetryIgnore)
+                                                        Case DialogResult.Abort
+                                                            StopFlag = True
+                                                        Case DialogResult.Retry
+                                                            TapeUtils.Locate(driveHandle, p.BlockNumber, p.PartitionNumber)
+                                                            p2 = New TapeUtils.PositionData(driveHandle)
+                                                            If p2.BlockNumber = p.BlockNumber AndAlso p2.PartitionNumber = p.PartitionNumber Then Exit While
+                                                        Case DialogResult.Ignore
+                                                            Exit While
+                                                    End Select
+                                                End While
+
+                                            End Sub)
+                                 End If
+                             End If
+                         Catch ex As Exception
+                             Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{ex.ToString}"))
+                             PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}")
+                             SetStatusLight(LWStatus.Err)
+                             StopFlag = True
+                         End Try
+                         Me.Invoke(Sub() Timer1_Tick(sender, e))
+                         Dim TotalBytesWritten As Long = CLng(UnwrittenSizeOverrideValue)
+                         While True
+                             Threading.Thread.Sleep(0)
+                             SyncLock UFReadCount
+                                 If UFReadCount > 0 Then Continue While
+                                 UnwrittenSizeOverrideValue = 0
+                                 UnwrittenCountOverrideValue = 0
+                                 If Not My.Settings.LTFSWriter_KeepUnwrittenFilesOnAbort Then
+                                     ClearPendingWriteQueues(d)
+                                 Else
+                                     UnwrittenSizeOverrideValue = UnwrittenSize
+                                     UnwrittenCountOverrideValue = UnwrittenCount
+                                 End If
+                                 CurrentFilesProcessed = 0
+                                 CurrentBytesProcessed = 0
+                                 Exit While
+                             End SyncLock
+                         End While
+                         Modified = True
+                         Dim OnWriteFinishMessage As String = ""
+                         If Not StopFlag Then
+                             Dim TimeCost As TimeSpan = Now - StartTime
+                             OnWriteFinishMessage = ($"{My.Resources.ResText_WFTime}{(Math.Floor(TimeCost.TotalHours)).ToString().PadLeft(2, "0"c)}:{TimeCost.Minutes.ToString().PadLeft(2, "0"c)}:{TimeCost.Seconds.ToString().PadLeft(2, "0"c)} {My.Resources.ResText_AvgS}{IOManager.FormatSize(TotalBytesWritten \ CLng(Math.Max(1, TimeCost.TotalSeconds)))}/s")
+                             OnWriteFinished()
+                         Else
+                             OnWriteFinishMessage = (My.Resources.ResText_WCnd)
                          End If
-                     Catch ex As Exception
-                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{ex.ToString}"))
-                         PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}")
-                         SetStatusLight(LWStatus.Err)
-                         StopFlag = True
-                    End Try
-                    Me.Invoke(Sub() Timer1_Tick(sender, e))
-                    Dim TotalBytesWritten As Long = CLng(UnwrittenSizeOverrideValue)
-                     While True
-                         Threading.Thread.Sleep(0)
-                         SyncLock UFReadCount
-                             If UFReadCount > 0 Then Continue While
-                             UnwrittenSizeOverrideValue = 0
-                             UnwrittenCountOverrideValue = 0
-                             If Not My.Settings.LTFSWriter_KeepUnwrittenFilesOnAbort Then
-                                 ClearPendingWriteQueues(d)
-                             Else
-                                 UnwrittenSizeOverrideValue = UnwrittenSize
-                                 UnwrittenCountOverrideValue = UnwrittenCount
-                             End If
-                             CurrentFilesProcessed = 0
-                             CurrentBytesProcessed = 0
-                             Exit While
-                         End SyncLock
-                     End While
-                     Modified = True
-                     Dim OnWriteFinishMessage As String = ""
-                     If Not StopFlag Then
-                         Dim TimeCost As TimeSpan = Now - StartTime
-                         OnWriteFinishMessage = ($"{My.Resources.ResText_WFTime}{(Math.Floor(TimeCost.TotalHours)).ToString().PadLeft(2, "0"c)}:{TimeCost.Minutes.ToString().PadLeft(2, "0"c)}:{TimeCost.Seconds.ToString().PadLeft(2, "0"c)} {My.Resources.ResText_AvgS}{IOManager.FormatSize(TotalBytesWritten \ CLng(Math.Max(1, TimeCost.TotalSeconds)))}/s")
-                         OnWriteFinished()
-                     Else
-                         OnWriteFinishMessage = (My.Resources.ResText_WCnd)
-                     End If
-                      RefreshDisplay()
-                      ClearWriteCompletionState()
-                      RefreshCapacity()
-                     Invoke(Sub()
-                                If Not StopFlag AndAlso WA0ToolStripMenuItem.Checked AndAlso MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_WFUp, My.Resources.ResText_OpSucc, MessageBoxButtons.OKCancel) = DialogResult.OK Then
-                                    更新数据区索引ToolStripMenuItem_Click(sender, e)
-                                End If
-                                PrintMsg(OnWriteFinishMessage)
-                                 SetStatusLight(If(StopFlag, LWStatus.Err, LWStatus.Succ))
-                                 RaiseEvent WriteFinished()
-                             End Sub)
+                         RefreshDisplay()
+                         ClearWriteCompletionState()
+                         RefreshCapacity()
+                         Invoke(Sub()
+                                    If Not StopFlag AndAlso WA0ToolStripMenuItem.Checked AndAlso MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_WFUp, My.Resources.ResText_OpSucc, MessageBoxButtons.OKCancel) = DialogResult.OK Then
+                                        更新数据区索引ToolStripMenuItem_Click(sender, e)
+                                    End If
+                                    PrintMsg(OnWriteFinishMessage)
+                                    SetStatusLight(If(StopFlag, LWStatus.Err, LWStatus.Succ))
+                                    RaiseEvent WriteFinished()
+                                End Sub)
                      Catch ex As Exception
                          Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{ex.ToString}"))
                          PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}")
