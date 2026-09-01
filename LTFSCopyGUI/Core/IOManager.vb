@@ -16,6 +16,11 @@ Imports LTFSCopyGUI.Native
 <TypeConverter(GetType(ExpandableObjectConverter))>
 Public Class IOManager
     Public Shared PublicArrayPool As ArrayPool(Of Byte) = ArrayPool(Of Byte).Create(16777216, 2048)
+
+    Private Shared Function ResolveReadablePath(filename As String) As String
+        Return FileSystemPathResolver.ResolveExistingFilePath(filename)
+    End Function
+
     <TypeConverter(GetType(ExpandableObjectConverter))>
     Public Class fsReport
         Public fs As BufferedStream
@@ -145,7 +150,7 @@ Public Class IOManager
         If OnFinished Is Nothing Then
 
             Using _
-                fsin0 As FileStream = File.Open(filename, FileMode.Open, FileAccess.Read, FileShare.Read)
+                fsin0 As FileStream = File.Open(ResolveReadablePath(filename), FileMode.Open, FileAccess.Read, FileShare.Read)
                 Dim fsinb As New BufferedStream(fsin0, 512 * 1024)
                 Dim fsine As New EventedStream With {.baseStream = fsinb}
                 If OnFileReading IsNot Nothing Then _
@@ -170,9 +175,10 @@ Public Class IOManager
                 End Using
             End Using
         Else
+            Dim resolvedFilename As String = ResolveReadablePath(filename)
             Dim thHash As New Thread(
                 Sub()
-                    Using fsin0 As FileStream = File.Open(filename, FileMode.Open, FileAccess.Read)
+                    Using fsin0 As FileStream = File.Open(resolvedFilename, FileMode.Open, FileAccess.Read)
                         Dim fsinb As New BufferedStream(fsin0, 512 * 1024)
                         Dim fsine As New EventedStream With {.baseStream = fsinb}
                         AddHandler fsine.Readed,
@@ -205,7 +211,7 @@ Public Class IOManager
     Public Shared Function GetSHA256(filename As String) As String
         Dim hashValue() As Byte
         Dim hasher As SHA256 = SHA256.Create()
-        Using fshash As New FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
+        Using fshash As New FileStream(ResolveReadablePath(filename), FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
             hashValue = hasher.ComputeHash(fshash)
         End Using
         hasher.Dispose()
@@ -214,7 +220,7 @@ Public Class IOManager
     Public Shared Function GetSHA512(filename As String) As String
         Dim hashValue() As Byte
         Dim hasher As SHA512 = SHA512.Create()
-        Using fshash As New FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
+        Using fshash As New FileStream(ResolveReadablePath(filename), FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
             hashValue = hasher.ComputeHash(fshash)
         End Using
         hasher.Dispose()
@@ -223,7 +229,7 @@ Public Class IOManager
     Public Shared Function GetMD5(filename As String) As String
         Dim hashValue() As Byte
         Dim hasher As MD5 = MD5.Create()
-        Using fshash As New FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
+        Using fshash As New FileStream(ResolveReadablePath(filename), FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
             hashValue = hasher.ComputeHash(fshash)
         End Using
         hasher.Dispose()
@@ -234,7 +240,7 @@ Public Class IOManager
         Dim pool As ArrayPool(Of Byte) = ArrayPool(Of Byte).Create(16, 16)
         Dim block() As Byte = pool.Rent(8388608)
         Try
-            Using fshash As New FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
+            Using fshash As New FileStream(ResolveReadablePath(filename), FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
                 Dim readed As Integer = Integer.MaxValue
                 While readed > 0
                     readed = fshash.Read(block, 0, block.Length)
@@ -258,7 +264,7 @@ Public Class IOManager
         Dim pool As ArrayPool(Of Byte) = ArrayPool(Of Byte).Create(16, 16)
         Dim block() As Byte = pool.Rent(8388608)
         Try
-            Using fshash As New FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
+            Using fshash As New FileStream(ResolveReadablePath(filename), FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
                 Dim readed As Integer = Integer.MaxValue
                 While readed > 0
                     readed = fshash.Read(block, 0, block.Length)
@@ -281,7 +287,7 @@ Public Class IOManager
         Dim pool As ArrayPool(Of Byte) = ArrayPool(Of Byte).Create(16, 16)
         Dim block() As Byte = pool.Rent(8388608)
         Try
-            Using fshash As New FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
+            Using fshash As New FileStream(ResolveReadablePath(filename), FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
                 Dim readed As Integer = Integer.MaxValue
                 While readed > 0
                     readed = fshash.Read(block, 0, block.Length)
@@ -304,7 +310,7 @@ Public Class IOManager
         Dim pool As ArrayPool(Of Byte) = ArrayPool(Of Byte).Create(16, 16)
         Dim block() As Byte = pool.Rent(8388608)
         Try
-            Using fshash As New FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
+            Using fshash As New FileStream(ResolveReadablePath(filename), FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous Or FileOptions.SequentialScan)
                 Dim readed As Integer = Integer.MaxValue
                 While readed > 0
                     readed = fshash.Read(block, 0, block.Length)
@@ -544,9 +550,14 @@ Public Class IOManager
                             pauseGate.Wait()
                             Dim SkipCurrent As Boolean = False
                             Try
+                                Dim relativePath As String = f.fullpath
                                 If TargetDirectory <> "" AndAlso TargetDirectory <> "\" Then _
-                                                 f_outpath = "\\?\" & Path.Combine(TargetDirectory, f.fullpath)
-                                f.fullpath = "\\?\" & Path.Combine(BaseDirectory, f.fullpath)
+                                                 f_outpath = "\\?\" & Path.Combine(TargetDirectory, relativePath)
+                                ' Schema paths are relative and may have been
+                                ' combined with a base directory whose casing
+                                ' differs from the actual SMB/NTFS path.
+                                f.fullpath = FileSystemPathResolver.ResolveExistingFilePath(
+                                    "\\?\" & Path.Combine(BaseDirectory, relativePath))
 
                                 If f.sha1 Is Nothing Then f.sha1 = ""
                                 If f.sha1 = "" Or Not IgnoreExisting Or f.sha1.Length <> 40 Or

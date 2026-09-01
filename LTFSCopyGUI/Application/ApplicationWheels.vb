@@ -438,7 +438,7 @@ End Class
 Public Class GlobHelper
     Public Property schema As ltfsindex
     Public Property OnStopFlagInquiry As Func(Of Boolean)
-    Private ReadOnly _directoryCache As New Dictionary(Of String, ltfsindex.directory)(StringComparer.OrdinalIgnoreCase)
+    Private ReadOnly _directoryCache As New Dictionary(Of String, ltfsindex.directory)(StringComparer.Ordinal)
     Private ReadOnly _directoryCacheOrder As New Queue(Of String)
     Private Const DirectoryCacheCapacity As Integer = 4096
     Public ReadOnly Property StopFlag As Boolean
@@ -766,10 +766,10 @@ Public Module GlobCollector
 
         Dim plan As New GlobHelper.AddPlan()
 
-        Dim seenSource As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-        Dim seenRelative As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-        Dim dirSet As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-        Dim parentDirSet As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim seenSource As New HashSet(Of String)(StringComparer.Ordinal)
+        Dim seenRelative As New HashSet(Of String)(StringComparer.Ordinal)
+        Dim dirSet As New HashSet(Of String)(StringComparer.Ordinal)
+        Dim parentDirSet As New HashSet(Of String)(StringComparer.Ordinal)
 
         For Each rawInputPath As String In inputs
             If String.IsNullOrWhiteSpace(rawInputPath) Then Continue For
@@ -843,14 +843,14 @@ Public Module GlobCollector
             AddParentDirsOfRelativePath(parentRel, dirSet)
         Next
 
-        plan.Dirs.AddRange(dirSet.OrderBy(Function(s) s, StringComparer.OrdinalIgnoreCase))
-        plan.Files.Sort(Function(a, b) StringComparer.OrdinalIgnoreCase.Compare(a.RelativePath, b.RelativePath))
+        plan.Dirs.AddRange(dirSet.OrderBy(Function(s) s, StringComparer.Ordinal))
+        plan.Files.Sort(Function(a, b) StringComparer.Ordinal.Compare(a.RelativePath, b.RelativePath))
 
         Return plan
     End Function
 
     Private Function NormalizeFullPath(p As String) As String
-        Dim full = Path.GetFullPath(p)
+        Dim full = FileSystemPathResolver.ResolveExistingPath(p)
         Return TrailingTrimSeparators(full)
     End Function
 

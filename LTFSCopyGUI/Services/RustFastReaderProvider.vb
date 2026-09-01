@@ -191,8 +191,8 @@ Public Class RustFastReaderProvider
     Private Const HashBlake3 As UInteger = 1UI << 5
     Private Const HashXxh3 As UInteger = 1UI << 6
     Private Const HashXxh128 As UInteger = 1UI << 7
-    Private Const ReadChunkSize As UInteger = 16UI * 1024UI * 1024UI
-    Private Const QueueDepth As UInteger = 4UI
+    Private Const ReadChunkSize As UInteger = 1UI * 1024UI * 1024UI
+    Private Const QueueDepth As UInteger = 16UI
     Private Const NextFilePrimeDepth As UInteger = 1UI
     Private Const SmallOpenConcurrency As UInteger = 32UI
     Private Const SmallActiveFileLimit As UInteger = 64UI
@@ -369,6 +369,7 @@ Public Class RustFastReaderProvider
             For index = 0 To _writeList.Count - 1
                 Dim fr = _writeList(index)
                 If fr Is Nothing OrElse fr.File Is Nothing Then Continue For
+                fr.EnsureSourcePathResolved()
                 If String.IsNullOrEmpty(fr.SourcePath) Then Throw New InvalidDataException($"Missing source path for file index {index}")
                 CheckResult(NativeMethods.lfr_add_file(Context,
                                                        index,

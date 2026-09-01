@@ -439,7 +439,7 @@ Public Class FileDataProvider
             End Using
             While True
                 Try
-                    Dim result As Byte() = File.ReadAllBytes(fr.SourcePath)
+                    Dim result As Byte() = File.ReadAllBytes(fr.EnsureSourcePathResolved())
                     fr.IsOpened = True
                     Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileDataProvider))
                         Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileProvider")
@@ -470,6 +470,7 @@ Public Class FileDataProvider
     End Function
     Private Async Function StreamFileToPipeAsync(fr As LTFSWriter.FileRecord, ct As CancellationToken) As Task
         Dim fs As FileStream = Nothing
+        Dim sourcePath As String = fr.EnsureSourcePathResolved()
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(FileDataProvider))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FileProvider")
                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
@@ -483,7 +484,7 @@ Public Class FileDataProvider
             End Using
         End Using
         Try
-            fs = New FileStream(fr.SourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, My.Settings.LTFSWriter_FileStreamBufferSize, FileOptions.Asynchronous Or FileOptions.SequentialScan)
+            fs = New FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, My.Settings.LTFSWriter_FileStreamBufferSize, FileOptions.Asynchronous Or FileOptions.SequentialScan)
             If fr.File.length = 0 Then
                 fr.File.length = fs.Length
                 fr.FileOffset = 0

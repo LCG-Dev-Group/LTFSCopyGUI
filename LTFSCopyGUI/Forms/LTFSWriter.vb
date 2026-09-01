@@ -1069,7 +1069,22 @@ Public Class LTFSWriter
     <TypeConverter(GetType(ExpandableObjectConverter))>
     Public Class FileRecord
         Public Property ParentDirectory As ltfsindex.directory
+        Private _sourcePath As String
         Public Property SourcePath As String
+            Get
+                Return _sourcePath
+            End Get
+            Set(value As String)
+                If String.IsNullOrWhiteSpace(value) Then
+                    _sourcePath = value
+                Else
+                    ' Keep the path spelling returned by the filesystem when
+                    ' the supplied path differs only by case.  This is needed
+                    ' for case-sensitive NTFS directories and SMB shares.
+                    _sourcePath = FileSystemPathResolver.ResolveExistingFilePath(value)
+                End If
+            End Set
+        End Property
         Public Property File As ltfsindex.file
         Public Property FileOffset As Long
         Public Property SegmentLength As Long
@@ -1086,20 +1101,27 @@ Public Class LTFSWriter
             File = New ltfsindex.file
         End Sub
         Public Sub New(Path As String, ParentDir As ltfsindex.directory)
-            If Not Path.StartsWith("\\") Then Path = $"\\?\{Path}"
+            Dim resolvedPath As String = FileSystemPathResolver.ResolveExistingFilePath(Path)
+            If Not resolvedPath.StartsWith("\\") Then resolvedPath = $"\\?\{resolvedPath}"
             Dim xattrPath As String = Nothing
-            If IO.File.Exists(Path & ".xattr") Then xattrPath = Path & ".xattr"
-            Initialize(New IO.FileInfo(Path), ParentDir, xattrPath)
+            Dim xattrCandidate As String = FileSystemPathResolver.ResolveExistingFilePath(resolvedPath & ".xattr")
+            If IO.File.Exists(xattrCandidate) Then xattrPath = xattrCandidate
+            Initialize(New IO.FileInfo(resolvedPath), ParentDir, xattrPath)
         End Sub
         Public Sub New(FileInfo As IO.FileInfo, ParentDir As ltfsindex.directory, XattrPath As String)
             Initialize(FileInfo, ParentDir, XattrPath)
         End Sub
         Public Sub New(FileInfo As IO.FileInfo, ParentDir As ltfsindex.directory)
+            Dim resolvedPath As String = FileSystemPathResolver.ResolveExistingFilePath(FileInfo.FullName)
             Dim xattrPath As String = Nothing
-            If IO.File.Exists(FileInfo.FullName & ".xattr") Then xattrPath = FileInfo.FullName & ".xattr"
-            Initialize(FileInfo, ParentDir, xattrPath)
+            Dim xattrCandidate As String = FileSystemPathResolver.ResolveExistingFilePath(resolvedPath & ".xattr")
+            If IO.File.Exists(xattrCandidate) Then xattrPath = xattrCandidate
+            Initialize(New IO.FileInfo(resolvedPath), ParentDir, xattrPath)
         End Sub
         Private Sub Initialize(finf As IO.FileInfo, ParentDir As ltfsindex.directory, xattrPath As String)
+            If finf Is Nothing Then Throw New ArgumentNullException(NameOf(finf))
+            Dim resolvedPath As String = FileSystemPathResolver.ResolveExistingFilePath(finf.FullName)
+            finf = New IO.FileInfo(resolvedPath)
             ParentDirectory = ParentDir
             SourcePath = finf.FullName
             If Not SourcePath.StartsWith("\\") Then SourcePath = $"\\?\{SourcePath}"
@@ -1131,6 +1153,7 @@ Public Class LTFSWriter
                 .backuptime = Now.ToUniversalTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z")
                 Try
                     If xattrPath IsNot Nothing Then
+                        xattrPath = FileSystemPathResolver.ResolveExistingFilePath(xattrPath)
                         If Not xattrPath.StartsWith("\\") Then xattrPath = $"\\?\{xattrPath}"
                         Dim x As String = IO.File.ReadAllText(xattrPath)
                         Dim xlist As List(Of ltfsindex.file.xattr) = ltfsindex.file.xattr.FromXMLList(x)
@@ -1161,6 +1184,16 @@ Public Class LTFSWriter
         Public Shared PreReadBufferSize As Long = 65536
         Public Shared PreReadBlockSize As Long = 4096
         Public PreReadBuffer As Byte() = Nothing
+
+        Public Function EnsureSourcePathResolved() As String
+            If String.IsNullOrWhiteSpace(_sourcePath) Then Return _sourcePath
+            Dim resolvedPath As String = FileSystemPathResolver.ResolveExistingFilePath(_sourcePath)
+            If Not String.Equals(_sourcePath, resolvedPath, StringComparison.Ordinal) Then
+                _sourcePath = resolvedPath
+            End If
+            Return _sourcePath
+        End Function
+
         Public Function Open(Optional BufferSize As Integer = 65536) As Integer
             SyncLock OperationLock
                 While True
@@ -1169,7 +1202,7 @@ Public Class LTFSWriter
                             IsOpened = True
                             Return 1
                         End If
-                        fs = New IO.FileStream(SourcePath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, BufferSize, True)
+                        fs = New IO.FileStream(EnsureSourcePathResolved(), IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.Read, BufferSize, True)
                         If FileOffset > 0 Then fs.Seek(FileOffset, IO.SeekOrigin.Begin)
                         IsOpened = True
                         Exit While
@@ -1251,7 +1284,7 @@ Public Class LTFSWriter
                 Buffer = Nothing
                 Return result
             Else
-                Return IO.File.ReadAllBytes(SourcePath)
+                Return IO.File.ReadAllBytes(EnsureSourcePathResolved())
             End If
         End Function
     End Class
@@ -1355,7 +1388,7 @@ Public Class LTFSWriter
 
         Dim byName As Dictionary(Of String, FileRecord) = Nothing
         If Not _pendingByDirectory.TryGetValue(record.ParentDirectory, byName) Then
-            byName = New Dictionary(Of String, FileRecord)(StringComparer.OrdinalIgnoreCase)
+            byName = New Dictionary(Of String, FileRecord)(StringComparer.Ordinal)
             _pendingByDirectory(record.ParentDirectory) = byName
         Else
             Dim canonicalDirectory As ltfsindex.directory = ResolvePendingDirectoryUnsafe(record.ParentDirectory)
@@ -1381,7 +1414,7 @@ Public Class LTFSWriter
         Dim byName As Dictionary(Of String, FileRecord) = Nothing
         If _pendingByDirectory.TryGetValue(directory, byName) Then Return byName
 
-        byName = New Dictionary(Of String, FileRecord)(StringComparer.OrdinalIgnoreCase)
+        byName = New Dictionary(Of String, FileRecord)(StringComparer.Ordinal)
         If UnwrittenFiles IsNot Nothing Then
             For Each record As FileRecord In UnwrittenFiles
                 If record IsNot Nothing AndAlso
@@ -1472,7 +1505,7 @@ Public Class LTFSWriter
             Dim byName As Dictionary(Of String, FileRecord) = GetPendingDirectoryIndexUnsafe(directory)
             Dim record As FileRecord = Nothing
             If byName.TryGetValue(fileName, record) AndAlso record IsNot Nothing AndAlso record.File IsNot Nothing AndAlso
-               String.Equals(record.File.name, fileName, StringComparison.OrdinalIgnoreCase) Then
+                   String.Equals(record.File.name, fileName, StringComparison.Ordinal) Then
                 Return RemovePendingRecord(record)
             End If
 
@@ -1484,7 +1517,7 @@ Public Class LTFSWriter
                 SyncLock directory.UnwrittenFiles
                     For i As Integer = directory.UnwrittenFiles.Count - 1 To 0 Step -1
                         Dim pendingFile As ltfsindex.file = directory.UnwrittenFiles(i)
-                        If pendingFile IsNot Nothing AndAlso String.Equals(pendingFile.name, fileName, StringComparison.OrdinalIgnoreCase) Then
+                        If pendingFile IsNot Nothing AndAlso String.Equals(pendingFile.name, fileName, StringComparison.Ordinal) Then
                             removedFiles.Add(pendingFile)
                             directory.UnwrittenFiles.RemoveAt(i)
                         End If
@@ -1498,7 +1531,7 @@ Public Class LTFSWriter
                     If pendingRecord IsNot Nothing AndAlso
                        DirectoryRecordComparer.Instance.Equals(pendingRecord.ParentDirectory, directory) AndAlso
                        pendingRecord.File IsNot Nothing AndAlso
-                       (removedFiles.Contains(pendingRecord.File) OrElse String.Equals(pendingRecord.File.name, fileName, StringComparison.OrdinalIgnoreCase)) Then
+                       (removedFiles.Contains(pendingRecord.File) OrElse String.Equals(pendingRecord.File.name, fileName, StringComparison.Ordinal)) Then
                         UnwrittenFiles.RemoveAt(i)
                         _pendingSize -= pendingRecord.File.length
                         RemovePendingIndexUnsafe(pendingRecord)
@@ -1576,7 +1609,7 @@ Public Class LTFSWriter
                 Return directory.FindFilesByName(fileName)
             End If
 
-            byName = New Dictionary(Of String, List(Of ltfsindex.file))(StringComparer.OrdinalIgnoreCase)
+            byName = New Dictionary(Of String, List(Of ltfsindex.file))(StringComparer.Ordinal)
             For Each existing As ltfsindex.file In directory.EnumerateLazyFiles()
                 If existing Is Nothing Then Continue For
                 Dim key As String = If(existing.name, String.Empty)
@@ -4163,7 +4196,7 @@ Public Class LTFSWriter
             Dim SameFile As Boolean = False
             '检查磁带已有文件
             For Each oldf As ltfsindex.file In GetExistingFilesForAdd(d, f.Name)
-                If String.Equals(oldf.name, f.Name, StringComparison.OrdinalIgnoreCase) Then
+                If String.Equals(oldf.name, f.Name, StringComparison.Ordinal) Then
                     SameFile = IsSameFile(f, oldf)
                     If OverWrite AndAlso Not SameFile Then
                         d.RemoveFile(oldf)
@@ -4578,7 +4611,7 @@ Public Class LTFSWriter
 
             Dim sequence As IEnumerable(Of GlobHelper.AddFile) = fileSeq
             If My.Settings.LTFSWriter_SkipSymlink Then
-                Dim reparseCache As New Dictionary(Of String, Boolean)(StringComparer.OrdinalIgnoreCase)
+                Dim reparseCache As New Dictionary(Of String, Boolean)(StringComparer.Ordinal)
                 sequence = sequence.Where(Function(candidate) KeepPlannedSourceFile(candidate, reparseCache))
             End If
 
@@ -4687,6 +4720,7 @@ Public Class LTFSWriter
                         Dim numi As Integer = 0
                         For Each path As String In Paths
                             If String.IsNullOrWhiteSpace(path) Then Continue For
+                            path = FileSystemPathResolver.ResolveExistingPath(path)
                             If Not path.StartsWith("\\") Then path = $"\\?\{path}"
                             Dim i As Integer = Threading.Interlocked.Increment(numi)
                             If StopFlag Then Exit For
@@ -5991,14 +6025,14 @@ Public Class LTFSWriter
     End Function
 
     Private Sub SnapshotPlannedSource(fr As FileRecord, plan As PlannedWrite)
-        Dim info As New IO.FileInfo(fr.SourcePath)
+        Dim info As New IO.FileInfo(fr.EnsureSourcePathResolved())
         plan.SourceLength = info.Length
         plan.SourceLastWriteUtcTicks = info.LastWriteTimeUtc.Ticks
     End Sub
 
     Private Sub ValidatePlannedSource(fr As FileRecord, plan As PlannedWrite)
         If plan Is Nothing OrElse plan.SourceLength < 0 Then Return
-        Dim info As New IO.FileInfo(fr.SourcePath)
+        Dim info As New IO.FileInfo(fr.EnsureSourcePathResolved())
         If info.Length <> plan.SourceLength OrElse info.LastWriteTimeUtc.Ticks <> plan.SourceLastWriteUtcTicks Then
             Throw New IO.IOException($"Source file changed after dedupe pre-scan: {fr.SourcePath}")
         End If
