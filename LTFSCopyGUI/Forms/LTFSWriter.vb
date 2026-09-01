@@ -963,11 +963,15 @@ Public Class LTFSWriter
                     ToolStripDropDownButton3.ToolTipText = $"{My.Resources.ResText_C0}{vbCrLf}{My.Resources.ResText_C1}{CapReduceCount}{vbCrLf}"
                     If CapReduceCount >= CleanCycle Then ToolStripDropDownButton3.ToolTipText &= $"{My.Resources.ResText_C2}{Clean_last.ToString("yyyy/MM/dd HH:mm:ss")}"
                 End If
-                Flush = AutoFlushTriggered
-                If AutoFlushTriggered Then
-                    If CleanCycle > 0 AndAlso CapReduceCount > 0 AndAlso (CapReduceCount Mod CleanCycle = 0) Then
-                        Flush = False
-                        Clean = True
+                If ForceFlush Then
+                    Flush = True
+                Else
+                    Flush = AutoFlushTriggered
+                    If AutoFlushTriggered Then
+                        If CleanCycle > 0 AndAlso CapReduceCount > 0 AndAlso (CapReduceCount Mod CleanCycle = 0) Then
+                            Flush = False
+                            Clean = True
+                        End If
                     End If
                 End If
             End If
@@ -5660,6 +5664,8 @@ Public Class LTFSWriter
     Private _PipeBufferLength As Long = 0
     Private _stopFlagValue As Integer = 0
     Private _activeFastReaderProvider As RustFastReaderProvider = Nothing
+    Private _fastReaderWaitCancellation As CancellationTokenSource = Nothing
+    Private _fastReaderWaitSuppressed As Integer
     Public Property PipeBufferLength As Long
         Get
             Return _PipeBufferLength
@@ -6279,8 +6285,47 @@ Public Class LTFSWriter
         End If
     End Sub
 
+    Private Sub WaitForFastReaderFillFraction(fastProvider As RustFastReaderProvider,
+                                               fraction As Double,
+                                               operation As String)
+        If Not My.Settings.LTFSWriter_WaitOnBufferEmpty OrElse
+           StopFlag OrElse
+           Threading.Volatile.Read(_fastReaderWaitSuppressed) <> 0 Then
+            PipePause = False
+            Return
+        End If
+
+        PipePause = True
+        Dim waitCancellation As New CancellationTokenSource()
+        Dim previousWaitCancellation = Threading.Interlocked.Exchange(_fastReaderWaitCancellation, waitCancellation)
+        If previousWaitCancellation IsNot Nothing Then
+            Try
+                previousWaitCancellation.Cancel()
+            Catch ex As ObjectDisposedException
+            End Try
+        End If
+        If Threading.Volatile.Read(_fastReaderWaitSuppressed) <> 0 Then waitCancellation.Cancel()
+
+        Try
+            Dim before = fastProvider.GetPerformanceStats()
+            Dim timer = Stopwatch.StartNew()
+            fastProvider.WaitForStreamFillFraction(fraction, waitCancellation.Token)
+            timer.Stop()
+            LogFastReaderFillStats(operation, before, fastProvider.GetPerformanceStats(), timer.Elapsed)
+        Catch ex As OperationCanceledException When waitCancellation.IsCancellationRequested AndAlso Not StopFlag
+            PrintMsg($"fastreader {operation} wait cancelled", LogOnly:=True, ForceLog:=True)
+        Finally
+            Threading.Interlocked.CompareExchange(_fastReaderWaitCancellation, Nothing, waitCancellation)
+            waitCancellation.Dispose()
+            PipeBufferLength = fastProvider.BufferedBytes
+            PipePause = False
+        End Try
+    End Sub
+
     Private Sub WaitForFastReaderRefill(fastProvider As RustFastReaderProvider)
-        If Not My.Settings.LTFSWriter_WaitOnBufferEmpty OrElse StopFlag Then
+        If Not My.Settings.LTFSWriter_WaitOnBufferEmpty OrElse
+           StopFlag OrElse
+           Threading.Volatile.Read(_fastReaderWaitSuppressed) <> 0 Then
             PipePause = False
             Return
         End If
@@ -6292,32 +6337,28 @@ Public Class LTFSWriter
         Dim lowWater = CLng(Math.Ceiling(fastProvider.BufferCapacityBytes * lowWaterFraction))
         If Not PipePause AndAlso buffered > lowWater Then Return
 
-        PipePause = True
-        Try
-            Dim before = fastProvider.GetPerformanceStats()
-            Dim timer = Stopwatch.StartNew()
-            fastProvider.WaitForStreamFillFraction(fillFraction, Threading.CancellationToken.None)
-            timer.Stop()
-            LogFastReaderFillStats("refill", before, fastProvider.GetPerformanceStats(), timer.Elapsed)
-        Finally
-            PipeBufferLength = fastProvider.BufferedBytes
-            PipePause = False
-        End Try
+        WaitForFastReaderFillFraction(fastProvider, fillFraction, "refill")
     End Sub
 
     Private Sub WaitForInitialFastReaderFill(fastProvider As RustFastReaderProvider)
         If Not My.Settings.LTFSWriter_WaitOnBufferEmpty OrElse StopFlag Then Return
-        PipePause = True
-        Try
-            Dim before = fastProvider.GetPerformanceStats()
-            Dim timer = Stopwatch.StartNew()
-            fastProvider.WaitForStreamFillFraction(0.75, Threading.CancellationToken.None)
-            timer.Stop()
-            LogFastReaderFillStats("initial fill", before, fastProvider.GetPerformanceStats(), timer.Elapsed)
-        Finally
-            PipeBufferLength = fastProvider.BufferedBytes
-            PipePause = False
-        End Try
+        WaitForFastReaderFillFraction(fastProvider, 0.75, "initial fill")
+    End Sub
+
+    Private Sub ResetFastReaderBufferWait()
+        Threading.Interlocked.Exchange(_fastReaderWaitSuppressed, 0)
+    End Sub
+
+    Private Sub StopFastReaderBufferWait()
+        Threading.Interlocked.Exchange(_fastReaderWaitSuppressed, 1)
+        PipePause = False
+        Dim waitCancellation = Threading.Volatile.Read(_fastReaderWaitCancellation)
+        If waitCancellation IsNot Nothing Then
+            Try
+                waitCancellation.Cancel()
+            Catch ex As ObjectDisposedException
+            End Try
+        End If
     End Sub
 
     Private Sub LogFastReaderFillStats(operation As String,
@@ -6597,6 +6638,14 @@ Public Class LTFSWriter
             Finally
                 fastProvider.AdvanceSlot(slot)
             End Try
+            If Flush AndAlso CheckFlush() Then
+                If My.Settings.LTFSWriter_PowerPolicyOnWriteBegin <> Guid.Empty Then
+                    Process.Start(New ProcessStartInfo With {.FileName = "powercfg",
+                                  .Arguments = $"/s {My.Settings.LTFSWriter_PowerPolicyOnWriteBegin.ToString()}",
+                                  .WindowStyle = ProcessWindowStyle.Hidden})
+                End If
+            End If
+            If Clean Then CheckClean(True)
             Dim slotWriteSeconds = (Stopwatch.GetTimestamp() - writeStarted) / CDbl(Stopwatch.Frequency)
             writeByteCount += bytesReaded
             writeElapsedSeconds += slotWriteSeconds
@@ -6745,6 +6794,7 @@ Public Class LTFSWriter
                     SetStatusLight(LWStatus.Busy)
                     StartTime = Now
                     PipePause = False
+                    ResetFastReaderBufferWait()
                     PrintMsg("", True)
                     PrintMsg($"Position = {GetPos.ToString()}", LogOnly:=True)
                     PrintMsg(My.Resources.ResText_PrepW)
@@ -7800,6 +7850,7 @@ Public Class LTFSWriter
                     Catch cleanupEx As Exception
                         Log.Error(cleanupEx, "Fast reader cleanup failed.")
                     End Try
+                    ResetFastReaderBufferWait()
                     Try
                         If provider IsNot Nothing Then
                             PipeBufferLength = 0
@@ -8906,7 +8957,7 @@ Public Class LTFSWriter
             If (Not ForceFlush) AndAlso (ChanLRValue < My.Settings.LTFSWriter_AutoCleanErrRateLogThreashould) Then
                 PrintMsg("Error rate log OK, ignore", LogOnly:=True)
                 Return False
-            ElseIf (LRHistory = 0) OrElse (ChanLRValue <> 0) Then
+            ElseIf ForceFlush OrElse (LRHistory = 0) OrElse (ChanLRValue <> 0) Then
                 Threading.Interlocked.Increment(CapReduceCount)
                 TapeUtils.Flush(driveHandle)
                 If Not ForceFlush Then
@@ -13971,7 +14022,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 停止等待缓存ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 停止等待缓存ToolStripMenuItem.Click
-        PipePause = False
+        StopFastReaderBufferWait()
     End Sub
 
     Private Sub 自适应限速ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 自适应限速ToolStripMenuItem.Click

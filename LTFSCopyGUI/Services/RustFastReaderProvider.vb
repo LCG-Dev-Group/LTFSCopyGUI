@@ -200,6 +200,7 @@ Public Class RustFastReaderProvider
     Private Const SmallMaximumThreshold As Long = 4L * 1024L * 1024L
     Private Const SmallMaximumInflightBytes As Long = 512L * 1024L * 1024L
     Private Const NativeWaitSliceMs As UInteger = 50UI
+    Private Const BufferWaitSliceMs As UInteger = 1000UI
     Private Const RefillNoChangeMs As UInteger = 10000UI
     Private Const StallWarningIntervalMs As Long = 5000L
     Private Const DefaultReadStallTimeoutMs As UInteger = 30000UI
@@ -903,6 +904,8 @@ Public Class RustFastReaderProvider
         Dim boundedFraction = Math.Max(0.0, Math.Min(1.0, fraction))
         Dim waitTimer = Stopwatch.StartNew()
         Dim waitStartedLogged As Boolean = False
+        Dim nextWarningMs As Long = RefillNoChangeMs
+        Dim nativeWaitSliceMs As UInteger = Math.Min(RefillNoChangeMs, BufferWaitSliceMs)
         While True
             ct.ThrowIfCancellationRequested()
             ThrowIfFailed()
@@ -945,7 +948,7 @@ Public Class RustFastReaderProvider
                     End Using
                 End Using
             End If
-            Dim result = NativeMethods.lfr_wait_until_buffered(Context, CULng(target), RefillNoChangeMs)
+            Dim result = NativeMethods.lfr_wait_until_buffered(Context, CULng(target), nativeWaitSliceMs)
             If result = ResultOk Then
                 Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(RustFastReaderProvider))
                     Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")
@@ -965,22 +968,25 @@ Public Class RustFastReaderProvider
                 Return
             End If
             If result = ResultTimeout Then
-                Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(RustFastReaderProvider))
-                    Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")
-                        Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                            Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "BufferWait")
-                                Log.Warning("Fast reader buffer refill made no progress. Fraction={Fraction} TargetBytes={TargetBytes} BufferedBytes={BufferedBytes} CapacityBytes={CapacityBytes} RemainingBytes={RemainingBytes} WaitedMilliseconds={WaitedMilliseconds} OccupiedSlots={OccupiedSlots}.",
-                                            boundedFraction,
-                                            target,
-                                            BufferedBytes,
-                                            BufferCapacityBytes,
-                                            Interlocked.Read(_remainingBytes),
-                                            waitTimer.ElapsedMilliseconds,
-                                            OccupiedSlotCount)
+                If waitTimer.ElapsedMilliseconds >= nextWarningMs Then
+                    Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(RustFastReaderProvider))
+                        Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")
+                            Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
+                                Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "BufferWait")
+                                    Log.Warning("Fast reader buffer refill made no progress. Fraction={Fraction} TargetBytes={TargetBytes} BufferedBytes={BufferedBytes} CapacityBytes={CapacityBytes} RemainingBytes={RemainingBytes} WaitedMilliseconds={WaitedMilliseconds} OccupiedSlots={OccupiedSlots}.",
+                                                boundedFraction,
+                                                target,
+                                                BufferedBytes,
+                                                BufferCapacityBytes,
+                                                Interlocked.Read(_remainingBytes),
+                                                waitTimer.ElapsedMilliseconds,
+                                                OccupiedSlotCount)
+                                End Using
                             End Using
                         End Using
                     End Using
-                End Using
+                    nextWarningMs += RefillNoChangeMs
+                End If
                 Continue While
             End If
             If result <> ResultTimeout Then ThrowNative(result, "wait for native buffer fill")
