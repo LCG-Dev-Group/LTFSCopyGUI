@@ -37,14 +37,14 @@ fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
     let Some(source) = args.get(1) else {
         eprintln!(
-            "usage: ltfscopy-fastreader-bench <file-or-directory> [--pipeline-capacity-mib 6144] [--pipeline-slot-kib 512] [--pipeline-read-mib 16] [--pipeline-depth 4] [--pipeline-prefill 75]"
+            "usage: ltfscopy-fastreader-bench <file-or-directory> [--pipeline-capacity-mib 6144] [--pipeline-slot-kib 512] [--pipeline-read-mib 1] [--pipeline-depth 16] [--pipeline-prefill 75]"
         );
         std::process::exit(2);
     };
     let capacity = value(&args, "--pipeline-capacity-mib", 6144) * 1024 * 1024;
     let slot_size = value(&args, "--pipeline-slot-kib", 512) * 1024;
-    let read_size = value(&args, "--pipeline-read-mib", 16) * 1024 * 1024;
-    let depth = value(&args, "--pipeline-depth", 4) as u32;
+    let read_size = value(&args, "--pipeline-read-mib", 1) * 1024 * 1024;
+    let depth = value(&args, "--pipeline-depth", 16) as u32;
     let prefill_percent = value(&args, "--pipeline-prefill", 75).min(100);
 
     let mut files = Vec::new();

@@ -4,13 +4,14 @@ use md5::Md5;
 use rustc_hash::FxHashMap;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
+use std::alloc::{GlobalAlloc, Layout};
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::mem::ManuallyDrop;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
-use std::ptr::{null, null_mut};
+use std::ptr::{NonNull, null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -24,8 +25,10 @@ use windows_sys::Win32::Foundation::{
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_FLAG_SEQUENTIAL_SCAN,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileSizeEx, OPEN_EXISTING, ReadFile,
+    CreateFileW, FILE_ALIGNMENT_INFO, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_NO_BUFFERING,
+    FILE_FLAG_OVERLAPPED, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STORAGE_INFO,
+    FileAlignmentInfo, FileStorageInfo, GetFileInformationByHandleEx, GetFileSizeEx, OPEN_EXISTING,
+    ReadFile,
 };
 use windows_sys::Win32::System::IO::{
     CancelIoEx, CancelSynchronousIo, CreateIoCompletionPort, DeviceIoControl, GetOverlappedResult,
@@ -39,9 +42,14 @@ use windows_sys::Win32::System::Ioctl::{
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const FLAG_EOF: u32 = 1;
 const IO_QUEUE_DEPTH: usize = 16;
-const HASH_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+const HASH_CHUNK_SIZE: usize = 1024 * 1024;
+const DEFAULT_DIRECT_IO_ALIGNMENT: usize = 4096;
+const MIN_DIRECT_BUFFER_ALIGNMENT: usize = 64 * 1024;
 const CANCEL_POLL_MS: u32 = 100;
 const DEFAULT_READ_STALL_TIMEOUT_MS: u32 = 30_000;
 const DEFAULT_IO_CANCEL_GRACE_MS: u32 = 5_000;
@@ -763,23 +771,132 @@ enum RequestState {
     Completed(Result<u32, u32>),
 }
 
+struct AlignedBuffer {
+    pointer: NonNull<u8>,
+    layout: Layout,
+}
+
+unsafe impl Send for AlignedBuffer {}
+
+impl AlignedBuffer {
+    fn new(len: usize, alignment: usize) -> io::Result<Self> {
+        let layout = Layout::from_size_align(len, alignment).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid direct-I/O buffer layout: length={len} alignment={alignment}"),
+            )
+        })?;
+        let pointer =
+            NonNull::new(unsafe { GLOBAL_ALLOCATOR.alloc_zeroed(layout) }).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    format!("unable to allocate {len} aligned direct-I/O bytes"),
+                )
+            })?;
+        Ok(Self { pointer, layout })
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.pointer.as_ptr()
+    }
+
+    fn as_slice(&self, len: usize) -> &[u8] {
+        debug_assert!(len <= self.layout.size());
+        unsafe { std::slice::from_raw_parts(self.pointer.as_ptr(), len) }
+    }
+}
+
+impl Drop for AlignedBuffer {
+    fn drop(&mut self) {
+        unsafe { GLOBAL_ALLOCATOR.dealloc(self.pointer.as_ptr(), self.layout) }
+    }
+}
+
+fn valid_direct_io_alignment(value: u32) -> Option<usize> {
+    let value = value as usize;
+    (value >= 512 && value.is_power_of_two() && value <= 1024 * 1024).then_some(value)
+}
+
+fn direct_io_requirements(file: HANDLE) -> (usize, usize) {
+    let mut transfer_alignment = DEFAULT_DIRECT_IO_ALIGNMENT;
+    let mut buffer_alignment = MIN_DIRECT_BUFFER_ALIGNMENT;
+
+    let mut storage = FILE_STORAGE_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file,
+            FileStorageInfo,
+            (&raw mut storage).cast(),
+            std::mem::size_of_val(&storage) as u32,
+        )
+    } != 0
+    {
+        if let Some(value) = valid_direct_io_alignment(storage.LogicalBytesPerSector) {
+            transfer_alignment = value;
+        }
+        for value in [
+            storage.PhysicalBytesPerSectorForAtomicity,
+            storage.PhysicalBytesPerSectorForPerformance,
+            storage.FileSystemEffectivePhysicalBytesPerSectorForAtomicity,
+        ] {
+            if let Some(value) = valid_direct_io_alignment(value) {
+                buffer_alignment = buffer_alignment.max(value);
+            }
+        }
+    }
+
+    let mut alignment = FILE_ALIGNMENT_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file,
+            FileAlignmentInfo,
+            (&raw mut alignment).cast(),
+            std::mem::size_of_val(&alignment) as u32,
+        )
+    } != 0
+        && let Some(value) = alignment
+            .AlignmentRequirement
+            .checked_add(1)
+            .and_then(valid_direct_io_alignment)
+    {
+        buffer_alignment = buffer_alignment.max(value);
+    }
+
+    (transfer_alignment, buffer_alignment)
+}
+
+fn align_up(value: usize, alignment: usize) -> io::Result<usize> {
+    debug_assert!(alignment.is_power_of_two());
+    value
+        .checked_add(alignment - 1)
+        .map(|value| value & !(alignment - 1))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "direct-I/O request size overflow",
+            )
+        })
+}
+
 struct ReadRequest {
     overlapped: OVERLAPPED,
-    buffer: Vec<u8>,
+    buffer: AlignedBuffer,
     offset: u64,
     requested: u32,
+    logical: u32,
     state: RequestState,
 }
 
 impl ReadRequest {
-    fn new(chunk_size: usize) -> Self {
-        Self {
+    fn new(buffer_size: usize, buffer_alignment: usize) -> io::Result<Self> {
+        Ok(Self {
             overlapped: OVERLAPPED::default(),
-            buffer: vec![0u8; chunk_size],
+            buffer: AlignedBuffer::new(buffer_size, buffer_alignment)?,
             offset: 0,
             requested: 0,
+            logical: 0,
             state: RequestState::Idle,
-        }
+        })
     }
 }
 
@@ -789,6 +906,7 @@ struct AsyncSequentialReader {
     requests: Vec<ReadRequest>,
     file_len: u64,
     chunk_size: usize,
+    transfer_alignment: usize,
     next_submit: u64,
     next_consume: u64,
     outstanding: usize,
@@ -851,7 +969,7 @@ impl AsyncSequentialReader {
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 null(),
                 OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED | FILE_FLAG_SEQUENTIAL_SCAN,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING,
                 null_mut(),
             )
         };
@@ -859,6 +977,15 @@ impl AsyncSequentialReader {
             return Err(io::Error::last_os_error());
         }
         let file = Handle(file);
+        let (transfer_alignment, buffer_alignment) = direct_io_requirements(file.0);
+        if !chunk_size.is_multiple_of(transfer_alignment) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "direct-I/O chunk size is not sector aligned: chunk={chunk_size} alignment={transfer_alignment}"
+                ),
+            ));
+        }
 
         let mut actual_len = 0i64;
         if unsafe { GetFileSizeEx(file.0, &mut actual_len) } == 0 {
@@ -884,10 +1011,13 @@ impl AsyncSequentialReader {
                 .div_ceil(chunk_size as u64)
                 .min(queue_depth as u64) as usize
         };
-        let request_buffer_size = remaining_len.min(chunk_size as u64) as usize;
+        let request_buffer_size = align_up(
+            remaining_len.min(chunk_size as u64) as usize,
+            transfer_alignment,
+        )?;
         let requests = (0..request_count)
-            .map(|_| ReadRequest::new(request_buffer_size))
-            .collect();
+            .map(|_| ReadRequest::new(request_buffer_size, buffer_alignment))
+            .collect::<io::Result<Vec<_>>>()?;
 
         Ok(Self {
             file: ManuallyDrop::new(file),
@@ -895,6 +1025,7 @@ impl AsyncSequentialReader {
             requests,
             file_len: expected_len,
             chunk_size,
+            transfer_alignment,
             next_submit: start_offset,
             next_consume: start_offset,
             outstanding: 0,
@@ -915,12 +1046,14 @@ impl AsyncSequentialReader {
         let request = &mut self.requests[request_index];
         debug_assert!(matches!(request.state, RequestState::Idle));
         let offset = self.next_submit;
-        let requested = (self.file_len - offset).min(self.chunk_size as u64) as u32;
+        let logical = (self.file_len - offset).min(self.chunk_size as u64) as u32;
+        let requested = align_up(logical as usize, self.transfer_alignment)? as u32;
         request.overlapped = OVERLAPPED::default();
         request.overlapped.Anonymous.Anonymous.Offset = offset as u32;
         request.overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
         request.offset = offset;
         request.requested = requested;
+        request.logical = logical;
         request.state = RequestState::InFlight;
 
         let ok = unsafe {
@@ -939,7 +1072,7 @@ impl AsyncSequentialReader {
                 return Err(error);
             }
         }
-        self.next_submit += requested as u64;
+        self.next_submit += logical as u64;
         self.outstanding += 1;
         Ok(())
     }
@@ -1085,21 +1218,22 @@ impl AsyncSequentialReader {
                 AsyncReaderRunError::Io(io::Error::from_raw_os_error(code as i32))
             })?;
             let requested = self.requests[index].requested;
-            if transferred != requested {
+            let logical = self.requests[index].logical;
+            if transferred < logical || transferred > requested {
                 return Err(AsyncReaderRunError::Io(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     format!(
-                        "short asynchronous read at offset {}: expected={} actual={}",
-                        self.next_consume, requested, transferred
+                        "short direct-I/O read at offset {}: logical={} requested={} actual={}",
+                        self.next_consume, logical, requested, transferred
                     ),
                 )));
             }
             consume(
                 self.requests[index].offset,
-                &self.requests[index].buffer[..transferred as usize],
+                self.requests[index].buffer.as_slice(logical as usize),
             )
             .map_err(AsyncReaderRunError::Consumer)?;
-            self.next_consume += transferred as u64;
+            self.next_consume += logical as u64;
             self.requests[index].state = RequestState::Idle;
             self.submit(index).map_err(AsyncReaderRunError::Io)?;
         }
@@ -4141,9 +4275,9 @@ mod tests {
     #[test]
     fn completed_requests_are_selected_by_offset() {
         let mut requests = vec![
-            ReadRequest::new(1),
-            ReadRequest::new(1),
-            ReadRequest::new(1),
+            ReadRequest::new(4096, MIN_DIRECT_BUFFER_ALIGNMENT).unwrap(),
+            ReadRequest::new(4096, MIN_DIRECT_BUFFER_ALIGNMENT).unwrap(),
+            ReadRequest::new(4096, MIN_DIRECT_BUFFER_ALIGNMENT).unwrap(),
         ];
         for (request, offset) in requests.iter_mut().zip([8192, 0, 4096]) {
             request.offset = offset;
