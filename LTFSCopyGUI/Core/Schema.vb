@@ -692,7 +692,7 @@ Public Class ltfsindex
         Friend Function FindFileByName(fileName As String) As file
             If fileName Is Nothing Then Return Nothing
             For Each item As file In EnumerateLazyFiles()
-                If String.Equals(item.name, fileName, StringComparison.OrdinalIgnoreCase) Then Return item
+                If String.Equals(item.name, fileName, StringComparison.Ordinal) Then Return item
             Next
             Return Nothing
         End Function
@@ -700,7 +700,7 @@ Public Class ltfsindex
         Friend Iterator Function EnumerateFilesByName(fileName As String) As IEnumerable(Of file)
             If fileName Is Nothing Then Exit Function
             For Each item As file In EnumerateLazyFiles()
-                If String.Equals(item.name, fileName, StringComparison.OrdinalIgnoreCase) Then Yield item
+                If String.Equals(item.name, fileName, StringComparison.Ordinal) Then Yield item
             Next
         End Function
 
@@ -715,7 +715,7 @@ Public Class ltfsindex
         Friend Function FindDirectoryByName(directoryName As String) As directory
             If directoryName Is Nothing Then Return Nothing
             For Each item As directory In EnumerateLazyDirectories()
-                If String.Equals(item.name, directoryName, StringComparison.OrdinalIgnoreCase) Then Return item
+                If String.Equals(item.name, directoryName, StringComparison.Ordinal) Then Return item
             Next
             Return Nothing
         End Function
@@ -723,7 +723,7 @@ Public Class ltfsindex
         Friend Iterator Function EnumerateDirectoriesByName(directoryName As String) As IEnumerable(Of directory)
             If directoryName Is Nothing Then Exit Function
             For Each item As directory In EnumerateLazyDirectories()
-                If String.Equals(item.name, directoryName, StringComparison.OrdinalIgnoreCase) Then Yield item
+                If String.Equals(item.name, directoryName, StringComparison.Ordinal) Then Yield item
             Next
         End Function
 
