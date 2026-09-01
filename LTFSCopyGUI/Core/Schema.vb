@@ -655,6 +655,12 @@ Public Class ltfsindex
             _lazyParent = parent
         End Sub
 
+        Friend ReadOnly Property LazyParent As directory
+            Get
+                Return _lazyParent
+            End Get
+        End Property
+
         Private Sub PropagateLazyTotalDelta(fileDelta As Long, directoryDelta As Long)
             If fileDelta = 0 AndAlso directoryDelta = 0 Then Exit Sub
             If _lazyContentsLoaded Then _totalCountsDirty = True

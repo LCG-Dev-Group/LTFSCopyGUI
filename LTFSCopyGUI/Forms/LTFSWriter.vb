@@ -257,7 +257,8 @@ Public Class LTFSWriter
     Private _logSessionId As String = $"writer-{Guid.NewGuid().ToString("N").Substring(0, 8)}"
     Private ReadOnly _messageStateLock As New Object()
     Private ReadOnly _pendingQueueLock As New Object()
-    Private ReadOnly _pendingByDirectory As New Dictionary(Of ltfsindex.directory, Dictionary(Of String, FileRecord))(DirectoryReferenceComparer.Instance)
+    Private ReadOnly _pendingByDirectory As New Dictionary(Of ltfsindex.directory, Dictionary(Of String, FileRecord))(DirectoryRecordComparer.Instance)
+    Private _pendingTreeCountByDirectory As New Dictionary(Of ltfsindex.directory, Long)(DirectoryRecordComparer.Instance)
     Private _pendingSize As Long
     Private _activeAddFileLookup As Dictionary(Of ltfsindex.directory, Dictionary(Of String, List(Of ltfsindex.file)))
     Private _activeAddFileLookupCalls As Dictionary(Of ltfsindex.directory, Integer)
@@ -1273,6 +1274,82 @@ Public Class LTFSWriter
         End Function
     End Class
 
+    Private NotInheritable Class DirectoryRecordComparer
+        Implements IEqualityComparer(Of ltfsindex.directory)
+
+        Public Shared ReadOnly Instance As New DirectoryRecordComparer
+
+        Public Overloads Function Equals(left As ltfsindex.directory,
+                                          right As ltfsindex.directory) As Boolean _
+            Implements IEqualityComparer(Of ltfsindex.directory).Equals
+            If Object.ReferenceEquals(left, right) Then Return True
+            If left Is Nothing OrElse right Is Nothing Then Return False
+            Return left.HasLazyRecord AndAlso right.HasLazyRecord AndAlso
+                   left.LazyRecordOffset = right.LazyRecordOffset AndAlso
+                   Object.ReferenceEquals(left.LazyStoreReference, right.LazyStoreReference)
+        End Function
+
+        Public Shadows Function GetHashCode(value As ltfsindex.directory) As Integer _
+            Implements IEqualityComparer(Of ltfsindex.directory).GetHashCode
+            If value Is Nothing Then Return 0
+            If Not value.HasLazyRecord Then Return RuntimeHelpers.GetHashCode(value)
+
+            Dim storeHash As Integer = RuntimeHelpers.GetHashCode(value.LazyStoreReference)
+            Return storeHash Xor value.LazyRecordOffset.GetHashCode()
+        End Function
+    End Class
+
+    Private Function ResolvePendingDirectoryUnsafe(directory As ltfsindex.directory) As ltfsindex.directory
+        If directory Is Nothing Then Return Nothing
+
+        Dim byName As Dictionary(Of String, FileRecord) = Nothing
+        If _pendingByDirectory.TryGetValue(directory, byName) Then
+            For Each record As FileRecord In byName.Values
+                If record IsNot Nothing AndAlso record.ParentDirectory IsNot Nothing Then
+                    Return record.ParentDirectory
+                End If
+            Next
+        End If
+        Return directory
+    End Function
+
+    Private Function ResolvePendingDirectory(directory As ltfsindex.directory) As ltfsindex.directory
+        SyncLock _pendingQueueLock
+            Return ResolvePendingDirectoryUnsafe(directory)
+        End SyncLock
+    End Function
+
+    Private Sub RefreshPendingTreeCounts()
+        Dim counts As New Dictionary(Of ltfsindex.directory, Long)(DirectoryRecordComparer.Instance)
+        SyncLock _pendingQueueLock
+            For Each pendingDirectory As ltfsindex.directory In _pendingByDirectory.Keys
+                Dim current As ltfsindex.directory = ResolvePendingDirectoryUnsafe(pendingDirectory)
+                If current Is Nothing OrElse current.UnwrittenFiles Is Nothing Then Continue For
+                Dim directCount As Long
+                SyncLock current.UnwrittenFiles
+                    directCount = current.UnwrittenFiles.Count
+                End SyncLock
+                If directCount = 0 Then Continue For
+
+                Dim visited As New HashSet(Of ltfsindex.directory)(DirectoryRecordComparer.Instance)
+                While current IsNot Nothing AndAlso visited.Add(current)
+                    Dim currentCount As Long = 0
+                    counts.TryGetValue(current, currentCount)
+                    counts(current) = currentCount + directCount
+                    current = current.LazyParent
+                End While
+            Next
+        End SyncLock
+        _pendingTreeCountByDirectory = counts
+    End Sub
+
+    Private Function GetPendingTreeFileCount(directory As ltfsindex.directory) As Long
+        If directory Is Nothing Then Return 0
+        Dim count As Long = 0
+        If _pendingTreeCountByDirectory.TryGetValue(directory, count) Then Return count
+        Return 0
+    End Function
+
     Private Sub RegisterPendingRecordUnsafe(record As FileRecord)
         If record Is Nothing OrElse record.ParentDirectory Is Nothing OrElse record.File Is Nothing Then Return
 
@@ -1280,6 +1357,22 @@ Public Class LTFSWriter
         If Not _pendingByDirectory.TryGetValue(record.ParentDirectory, byName) Then
             byName = New Dictionary(Of String, FileRecord)(StringComparer.OrdinalIgnoreCase)
             _pendingByDirectory(record.ParentDirectory) = byName
+        Else
+            Dim canonicalDirectory As ltfsindex.directory = ResolvePendingDirectoryUnsafe(record.ParentDirectory)
+            If canonicalDirectory IsNot Nothing AndAlso Not Object.ReferenceEquals(canonicalDirectory, record.ParentDirectory) Then
+                Dim previousDirectory As ltfsindex.directory = record.ParentDirectory
+                If previousDirectory.UnwrittenFiles IsNot Nothing Then
+                    SyncLock previousDirectory.UnwrittenFiles
+                        previousDirectory.UnwrittenFiles.Remove(record.File)
+                    End SyncLock
+                End If
+                record.ParentDirectory = canonicalDirectory
+                SyncLock canonicalDirectory.UnwrittenFiles
+                    If Not canonicalDirectory.UnwrittenFiles.Contains(record.File) Then
+                        canonicalDirectory.UnwrittenFiles.Add(record.File)
+                    End If
+                End SyncLock
+            End If
         End If
         byName(If(record.File.name, String.Empty)) = record
     End Sub
@@ -1291,7 +1384,9 @@ Public Class LTFSWriter
         byName = New Dictionary(Of String, FileRecord)(StringComparer.OrdinalIgnoreCase)
         If UnwrittenFiles IsNot Nothing Then
             For Each record As FileRecord In UnwrittenFiles
-                If record IsNot Nothing AndAlso record.ParentDirectory Is directory AndAlso record.File IsNot Nothing Then
+                If record IsNot Nothing AndAlso
+                   DirectoryRecordComparer.Instance.Equals(record.ParentDirectory, directory) AndAlso
+                   record.File IsNot Nothing Then
                     byName(If(record.File.name, String.Empty)) = record
                 End If
             Next
@@ -1346,6 +1441,7 @@ Public Class LTFSWriter
     Private Function RemovePendingByFile(directory As ltfsindex.directory, file As ltfsindex.file) As Boolean
         If directory Is Nothing OrElse file Is Nothing Then Return False
         SyncLock _pendingQueueLock
+            directory = ResolvePendingDirectoryUnsafe(directory)
             Dim removed As Boolean = False
             If directory.UnwrittenFiles IsNot Nothing Then
                 SyncLock directory.UnwrittenFiles
@@ -1355,7 +1451,9 @@ Public Class LTFSWriter
             If UnwrittenFiles IsNot Nothing Then
                 For i As Integer = UnwrittenFiles.Count - 1 To 0 Step -1
                     Dim record As FileRecord = UnwrittenFiles(i)
-                    If record IsNot Nothing AndAlso record.ParentDirectory Is directory AndAlso record.File Is file Then
+                    If record IsNot Nothing AndAlso
+                       DirectoryRecordComparer.Instance.Equals(record.ParentDirectory, directory) AndAlso
+                       record.File Is file Then
                         UnwrittenFiles.RemoveAt(i)
                         If record.File IsNot Nothing Then _pendingSize -= record.File.length
                         RemovePendingIndexUnsafe(record)
@@ -1370,6 +1468,7 @@ Public Class LTFSWriter
     Private Function RemovePendingByName(directory As ltfsindex.directory, fileName As String) As Boolean
         If directory Is Nothing OrElse fileName Is Nothing Then Return False
         SyncLock _pendingQueueLock
+            directory = ResolvePendingDirectoryUnsafe(directory)
             Dim byName As Dictionary(Of String, FileRecord) = GetPendingDirectoryIndexUnsafe(directory)
             Dim record As FileRecord = Nothing
             If byName.TryGetValue(fileName, record) AndAlso record IsNot Nothing AndAlso record.File IsNot Nothing AndAlso
@@ -1396,7 +1495,8 @@ Public Class LTFSWriter
             If UnwrittenFiles IsNot Nothing Then
                 For i As Integer = UnwrittenFiles.Count - 1 To 0 Step -1
                     Dim pendingRecord As FileRecord = UnwrittenFiles(i)
-                    If pendingRecord IsNot Nothing AndAlso pendingRecord.ParentDirectory Is directory AndAlso
+                    If pendingRecord IsNot Nothing AndAlso
+                       DirectoryRecordComparer.Instance.Equals(pendingRecord.ParentDirectory, directory) AndAlso
                        pendingRecord.File IsNot Nothing AndAlso
                        (removedFiles.Contains(pendingRecord.File) OrElse String.Equals(pendingRecord.File.name, fileName, StringComparison.OrdinalIgnoreCase)) Then
                         UnwrittenFiles.RemoveAt(i)
@@ -1508,6 +1608,7 @@ Public Class LTFSWriter
     Private Sub ReindexPendingFile(directory As ltfsindex.directory, file As ltfsindex.file)
         If directory Is Nothing OrElse file Is Nothing Then Return
         SyncLock _pendingQueueLock
+            directory = ResolvePendingDirectoryUnsafe(directory)
             Dim byName As Dictionary(Of String, FileRecord) = Nothing
             If Not _pendingByDirectory.TryGetValue(directory, byName) Then Return
             Dim staleKeys As New List(Of String)
@@ -1518,7 +1619,9 @@ Public Class LTFSWriter
                 byName.Remove(key)
             Next
             For Each record As FileRecord In UnwrittenFiles
-                If record IsNot Nothing AndAlso record.ParentDirectory Is directory AndAlso record.File Is file Then
+                If record IsNot Nothing AndAlso
+                   DirectoryRecordComparer.Instance.Equals(record.ParentDirectory, directory) AndAlso
+                   record.File Is file Then
                     byName(If(file.name, String.Empty)) = record
                     Exit For
                 End If
@@ -2341,17 +2444,23 @@ Public Class LTFSWriter
         Public Property NextDirectoryIndex As Integer
         Public Property NextFileIndex As Integer
         Public Property FileChildrenScanned As Boolean
+        Public FileMetadataScanQueued As Integer
         Public Property IsPlaceholder As Boolean
     End Class
 
     Private Function CreateDirectoryTreeNode(directory As ltfsindex.directory, rootNode As Boolean) As WriterTreeNode
         If directory Is Nothing Then Return Nothing
+        'Lazy directory wrappers are recreated while rebuilding the tree.  Keep
+        'using the instance owned by the pending queue so its UnwrittenFiles
+        'collection remains visible when an inner directory is selected again.
+        directory = ResolvePendingDirectory(directory)
         Dim nodeText As String = If(directory.name, String.Empty)
         If Not rootNode AndAlso My.Settings.LTFSWriter_ShowFileCount Then
-            If directory.TotalFilesUnwritten = 0 Then
+            Dim pendingFileCount As Long = GetPendingTreeFileCount(directory)
+            If pendingFileCount = 0 Then
                 nodeText = $"{directory.TotalFiles.ToString.PadRight(6)}| {directory.name}"
             Else
-                nodeText = $"{$"{directory.TotalFiles.ToString}+{directory.TotalFilesUnwritten.ToString}".PadRight(6)}| {directory.name}"
+                nodeText = $"{$"{directory.TotalFiles.ToString}+{pendingFileCount.ToString}".PadRight(6)}| {directory.name}"
             End If
         End If
         Dim directoryCount As Integer = directory.GetLazyDirectDirectoryCount()
@@ -2460,7 +2569,28 @@ Public Class LTFSWriter
         If Not writerNode.ChildrenComplete Then AddUnloadedChildMarker(node)
     End Sub
 
-    Private Sub LoadTreeNodeChildren(node As TreeNode)
+    Private Sub QueueDirectoryFileMetadataScan(node As TreeNode)
+        Dim writerNode As WriterTreeNode = TryCast(node, WriterTreeNode)
+        Dim directory As ltfsindex.directory = If(node Is Nothing, Nothing, TryCast(node.Tag, ltfsindex.directory))
+        If writerNode Is Nothing OrElse directory Is Nothing OrElse writerNode.FileChildrenScanned Then Return
+        If Threading.Interlocked.Exchange(writerNode.FileMetadataScanQueued, 1) <> 0 Then Return
+
+        Try
+            BeginInvoke(
+                Sub()
+                    Threading.Interlocked.Exchange(writerNode.FileMetadataScanQueued, 0)
+                    If IsDisposed OrElse Not Object.ReferenceEquals(node.TreeView, TreeView1) Then Return
+                    If Not Object.ReferenceEquals(TreeView1.SelectedNode, node) AndAlso Not node.IsExpanded Then Return
+                    LoadTreeNodeChildren(node, scanFilesOnly:=True)
+                End Sub)
+        Catch ex As ObjectDisposedException
+            Threading.Interlocked.Exchange(writerNode.FileMetadataScanQueued, 0)
+        Catch ex As InvalidOperationException
+            Threading.Interlocked.Exchange(writerNode.FileMetadataScanQueued, 0)
+        End Try
+    End Sub
+
+    Private Sub LoadTreeNodeChildren(node As TreeNode, Optional scanFilesOnly As Boolean = False)
         Dim writerNode As WriterTreeNode = TryCast(node, WriterTreeNode)
         If writerNode Is Nothing OrElse writerNode.IsPlaceholder Then Return
         If writerNode.ChildrenComplete AndAlso
@@ -2475,14 +2605,12 @@ Public Class LTFSWriter
                 Dim directory As ltfsindex.directory = DirectCast(node.Tag, ltfsindex.directory)
                 Dim directoryCount As Integer = directory.GetLazyDirectDirectoryCount()
                 Dim fileCount As Integer = directory.GetLazyDirectFileCount()
-                'A file-only directory has no placeholder to expand.  Scan its
-                'files in this load so archive/tarmeta virtual children can be
-                'created without showing an ellipsis for ordinary files.
-                Dim remaining As Integer = If(directoryCount = 0 AndAlso Not writerNode.FileChildrenScanned,
-                                              Integer.MaxValue,
-                                              WriterTreePageSize)
+                'Directory rows remain user-paged.  Archive/tarmeta metadata has
+                'an independent file page so it is not delayed by a directory
+                'that also contains more than 1024 subdirectories.
+                Dim remainingDirectories As Integer = If(scanFilesOnly, 0, WriterTreePageSize)
 
-                While remaining > 0 AndAlso writerNode.NextDirectoryIndex < directoryCount
+                While remainingDirectories > 0 AndAlso writerNode.NextDirectoryIndex < directoryCount
                     Dim childDirectory As ltfsindex.directory = directory.GetLazyDirectoryAt(writerNode.NextDirectoryIndex)
                     writerNode.NextDirectoryIndex += 1
                     If childDirectory Is Nothing Then Continue While
@@ -2502,35 +2630,47 @@ Public Class LTFSWriter
                             AddUnloadedChildMarker(childNode)
                         End If
                     End If
-                    remaining -= 1
+                    remainingDirectories -= 1
                 End While
 
-                While remaining > 0 AndAlso writerNode.NextFileIndex < fileCount
+                Dim remainingFiles As Integer = WriterTreePageSize
+                While remainingFiles > 0 AndAlso writerNode.NextFileIndex < fileCount
                     Dim file As ltfsindex.file = directory.GetLazyFileAt(writerNode.NextFileIndex)
                     writerNode.NextFileIndex += 1
+                    remainingFiles -= 1
                     If file Is Nothing Then Continue While
 
-                    Dim archive As String = file.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.Archive)
-                    If String.Equals(archive, "true", StringComparison.OrdinalIgnoreCase) Then
-                        Dim archiveNode As TreeNode = CreateArchiveTreeNode(file)
-                        If archiveNode IsNot Nothing Then node.Nodes.Add(archiveNode)
-                    End If
-
-                    Dim tarRoot As TarVirtualDirectory = Nothing
-                    If TryGetTarVirtualRoot(file, tarRoot) Then
-                        Dim tarNode As WriterTreeNode = CreateTarDirectoryTreeNode(tarRoot)
-                        If tarNode IsNot Nothing Then
-                            node.Nodes.Add(tarNode)
-                            AddUnloadedChildMarker(tarNode)
+                    Try
+                        Dim archive As String = file.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.Archive)
+                        If String.Equals(archive, "true", StringComparison.OrdinalIgnoreCase) Then
+                            Dim archiveNode As TreeNode = CreateArchiveTreeNode(file)
+                            If archiveNode IsNot Nothing Then node.Nodes.Add(archiveNode)
                         End If
-                    End If
-                    remaining -= 1
+
+                        Dim tarRoot As TarVirtualDirectory = Nothing
+                        If TryGetTarVirtualRoot(file, tarRoot) Then
+                            Dim tarNode As WriterTreeNode = CreateTarDirectoryTreeNode(tarRoot)
+                            If tarNode IsNot Nothing Then
+                                node.Nodes.Add(tarNode)
+                                AddUnloadedChildMarker(tarNode)
+                            End If
+                        End If
+                    Catch
+                        'One malformed metadata record must not prevent later
+                        'files in a large directory from being scanned.
+                    End Try
                 End While
 
                 writerNode.FileChildrenScanned = writerNode.NextFileIndex >= fileCount
-                writerNode.ChildrenComplete = writerNode.NextDirectoryIndex >= directoryCount AndAlso
+                Dim directoryChildrenComplete As Boolean = writerNode.NextDirectoryIndex >= directoryCount
+                writerNode.ChildrenComplete = directoryChildrenComplete AndAlso
                                                writerNode.FileChildrenScanned
-                If Not writerNode.ChildrenComplete Then AddUnloadedChildMarker(node)
+                If Not directoryChildrenComplete Then
+                    AddUnloadedChildMarker(node)
+                End If
+                If Not writerNode.FileChildrenScanned Then
+                    QueueDirectoryFileMetadataScan(node)
+                End If
             ElseIf TypeOf node.Tag Is TarVirtualDirectory Then
                 AddTarVirtualChildren(DirectCast(node.Tag, TarVirtualDirectory), node)
             End If
@@ -2551,11 +2691,15 @@ Public Class LTFSWriter
     End Function
 
     Private Shared Function SameDirectoryRecord(left As ltfsindex.directory, right As ltfsindex.directory) As Boolean
-        If left Is Nothing OrElse right Is Nothing Then Return False
+        Return DirectoryRecordComparer.Instance.Equals(left, right)
+    End Function
+
+    Private Shared Function SameListViewTag(left As Object, right As Object) As Boolean
         If Object.ReferenceEquals(left, right) Then Return True
-        Return left.HasLazyRecord AndAlso right.HasLazyRecord AndAlso
-               left.LazyRecordOffset = right.LazyRecordOffset AndAlso
-               Object.ReferenceEquals(left.LazyStoreReference, right.LazyStoreReference)
+        Dim leftDirectory As ltfsindex.directory = TryCast(left, ltfsindex.directory)
+        Dim rightDirectory As ltfsindex.directory = TryCast(right, ltfsindex.directory)
+        Return leftDirectory IsNot Nothing AndAlso rightDirectory IsNot Nothing AndAlso
+               SameDirectoryRecord(leftDirectory, rightDirectory)
     End Function
 
     Private Function FindOrCreateDirectoryTreeChild(parent As TreeNode, childName As String) As TreeNode
@@ -2621,6 +2765,7 @@ Public Class LTFSWriter
         Invoke(
             Sub()
                 _lastListRefreshTag = Nothing
+                RefreshPendingTreeCounts()
                 If My.Settings.LTFSWriter_ShowFileCount AndAlso schema._directory IsNot Nothing AndAlso schema._directory.Count > 0 Then schema._directory(0).DeepRefreshCount()
                 Dim oldSelectPath As String = String.Empty
                 If TreeView1.SelectedNode IsNot Nothing AndAlso TreeView1.SelectedNode.Tag IsNot Nothing Then
@@ -2694,6 +2839,7 @@ Public Class LTFSWriter
                             'visible immediately.
                             _listItemCache.Clear()
                             _listItemCacheOrder.Clear()
+                            RefreshLazyListRowCounts()
                             Try
                                 If Not IsDisposed AndAlso ListView1.IsHandleCreated Then
                                     If ListView1.VirtualListSize > 0 Then
@@ -3004,6 +3150,22 @@ Public Class LTFSWriter
                 End SyncLock
             End If
         End If
+        UpdateListViewVirtualSize()
+    End Sub
+
+    Private Sub RefreshLazyListRowCounts()
+        If _lazyListDirectory IsNot Nothing Then
+            _lazyListFileCount = _lazyListDirectory.GetLazyDirectFileCount()
+        End If
+        If _lazyListPendingDirectory IsNot Nothing Then
+            SyncLock _lazyListPendingDirectory.UnwrittenFiles
+                _lazyListPendingFileCount = _lazyListPendingDirectory.UnwrittenFiles.Count
+            End SyncLock
+        End If
+        UpdateListViewVirtualSize()
+    End Sub
+
+    Private Sub UpdateListViewVirtualSize()
         Dim rowCount As Long = _listRows.Count
         rowCount += _lazyListPendingFileCount
         If _lazyListDirectory IsNot Nothing Then rowCount += _lazyListFileCount
@@ -3457,7 +3619,8 @@ Public Class LTFSWriter
                 SetStatusLight(LWStatus.Err)
             End Try
             ListView1.EndUpdate()
-            If old_node IsNot Nothing AndAlso ListView1.Tag IsNot Nothing AndAlso GetListViewRowCount() > 0 AndAlso old_node Is ListView1.Tag AndAlso old_select_index >= 0 Then
+            If old_node IsNot Nothing AndAlso ListView1.Tag IsNot Nothing AndAlso GetListViewRowCount() > 0 AndAlso
+               SameListViewTag(old_node, ListView1.Tag) AndAlso old_select_index >= 0 Then
                 SelectListViewIndex(Math.Min(old_select_index, GetListViewRowCount() - 1))
             End If
         End If
@@ -4215,7 +4378,7 @@ Public Class LTFSWriter
     Private Function HasUnwrittenFilesInDirectoryTree(root As ltfsindex.directory) As Boolean
         If root Is Nothing Then Return False
 
-        Dim directories As New HashSet(Of ltfsindex.directory)(DirectoryReferenceComparer.Instance)
+        Dim directories As New HashSet(Of ltfsindex.directory)(DirectoryRecordComparer.Instance)
         Dim pending As New Stack(Of ltfsindex.directory)
         pending.Push(root)
         While pending.Count > 0
@@ -10524,9 +10687,12 @@ Public Class LTFSWriter
     Private Function IsPendingFile(directory As ltfsindex.directory, file As ltfsindex.file) As Boolean
         If directory Is Nothing OrElse file Is Nothing Then Return False
         SyncLock _pendingQueueLock
+            directory = ResolvePendingDirectoryUnsafe(directory)
             If UnwrittenFiles IsNot Nothing Then
                 For Each record As FileRecord In UnwrittenFiles
-                    If record IsNot Nothing AndAlso record.ParentDirectory Is directory AndAlso record.File Is file Then Return True
+                    If record IsNot Nothing AndAlso
+                       DirectoryRecordComparer.Instance.Equals(record.ParentDirectory, directory) AndAlso
+                       record.File Is file Then Return True
                 Next
             End If
             If directory.UnwrittenFiles IsNot Nothing Then
@@ -10543,9 +10709,12 @@ Public Class LTFSWriter
                                             previousLength As Long)
         If directory Is Nothing OrElse file Is Nothing Then Return
         SyncLock _pendingQueueLock
+            directory = ResolvePendingDirectoryUnsafe(directory)
             If UnwrittenFiles Is Nothing Then Return
             For Each record As FileRecord In UnwrittenFiles
-                If record IsNot Nothing AndAlso record.ParentDirectory Is directory AndAlso record.File Is file Then
+                If record IsNot Nothing AndAlso
+                   DirectoryRecordComparer.Instance.Equals(record.ParentDirectory, directory) AndAlso
+                   record.File Is file Then
                     If record.FileOffset < 0 OrElse record.FileOffset > file.length Then record.FileOffset = 0
                     record.SegmentLength = Math.Max(0L, file.length - record.FileOffset)
                     _pendingSize += file.length - previousLength
@@ -12379,6 +12548,9 @@ Public Class LTFSWriter
                                                       directoryPath As String) As IEnumerable(Of SearchEntry)
         If directory Is Nothing Then Exit Function
 
+        'Search intentionally follows only the committed LTFS directory/file
+        'chain.  Pending files live in UnwrittenFiles and are not search hits.
+
         Yield New SearchEntry With {
             .Directory = directory,
             .DirectoryPath = directoryPath,
@@ -12837,10 +13009,11 @@ Public Class LTFSWriter
         'For the first search (or after a session was not established), keep
         'the old behavior of starting after the currently selected file.
         If resumeEntry Is Nothing AndAlso TypeOf ListView1.Tag Is ltfsindex.directory Then
+            Dim selectedDirectory As ltfsindex.directory = DirectCast(ListView1.Tag, ltfsindex.directory)
             Dim selectedFile As ltfsindex.file = GetSelectedListViewFile()
-            If selectedFile IsNot Nothing Then
+            If selectedFile IsNot Nothing AndAlso Not IsPendingFile(selectedDirectory, selectedFile) Then
                 resumeEntry = New SearchEntry With {
-                    .Directory = DirectCast(ListView1.Tag, ltfsindex.directory),
+                    .Directory = selectedDirectory,
                     .File = selectedFile,
                     .MatchKind = SearchMatchFile,
                     .NativeRecordOffset = If(selectedFile.HasLazyRecord, selectedFile.LazyRecordOffset, -1L)}
@@ -12856,12 +13029,8 @@ Public Class LTFSWriter
         If Not fidMode AndAlso searchRoot.HasLazyRecord Then
             nativeStore = TryCast(searchRoot.LazyStoreReference, LazySchemaStore)
             useNativeSearch = nativeStore IsNot Nothing AndAlso nativeStore.CanUseNativeSearch()
-            'The writer keeps not-yet-committed files outside the native store.
-            'Use the managed path while such rows are present so search remains
-            'complete for the current in-memory view.
-            If useNativeSearch AndAlso UnwrittenFiles IsNot Nothing AndAlso UnwrittenFiles.Count > 0 Then
-                useNativeSearch = False
-            End If
+            'Pending files are deliberately outside the search scope, so they
+            'do not disable the native committed-index search fast path.
         End If
 
         Dim nativeResumeKind As UInteger = 0UI
