@@ -4928,6 +4928,7 @@ Public Class LTFSWriter
         Public Property Request As ExtractionFileRequest
         Public Property TempPath As String
         Public Property AlreadyComplete As Boolean
+        Public Property Committed As Boolean
     End Class
 
     Private Class ExtractionExtentWork
@@ -4993,6 +4994,39 @@ Public Class LTFSWriter
         If fileIndex Is Nothing Then Return String.Empty
         If fileIndex.fileuid <> 0 Then Return $"file:{fileIndex.fileuid}"
         Return $"file:{fileIndex.name}|{fileIndex.length}|{fileIndex.creationtime}|{fileIndex.modifytime}"
+    End Function
+
+    Private Function IsExtractionFileFragment(fileIndex As ltfsindex.file) As Boolean
+        If fileIndex Is Nothing Then Return False
+        Return String.Equals(fileIndex.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.Fragment, True),
+                             "true",
+                             StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Const ExtractionTempBase58Alphabet As String = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+    Private Function EncodeExtractionBase58(value As ULong) As String
+        If value = 0UL Then Return ExtractionTempBase58Alphabet(0)
+
+        Dim result As New StringBuilder()
+        While value > 0UL
+            Dim remainder As ULong = value Mod 58UL
+            result.Insert(0, ExtractionTempBase58Alphabet(CInt(remainder)))
+            value \= 58UL
+        End While
+        Return result.ToString()
+    End Function
+
+    Private Function GetExtractionTempPath(targetPath As String) As String
+        Dim normalizedPath As String = NormalizeExtractionPath(targetPath)
+        If String.IsNullOrEmpty(normalizedPath) Then Return String.Empty
+
+        Dim pathBytes As Byte() = Encoding.UTF8.GetBytes(normalizedPath)
+        Dim pathHash As ULong = System.IO.Hashing.XxHash64.HashToUInt64(pathBytes, 0L)
+        Dim tempName As String = EncodeExtractionBase58(pathHash) & ".tmp"
+        Dim parentPath As String = IO.Path.GetDirectoryName(normalizedPath)
+        If String.IsNullOrEmpty(parentPath) Then Return tempName
+        Return IO.Path.Combine(parentPath, tempName)
     End Function
 
     Private Sub AddExtractionPathEntry(entries As Dictionary(Of String, List(Of ExtractionPathEntry)),
@@ -5092,8 +5126,9 @@ Public Class LTFSWriter
                     Continue For
                 End If
                 Dim ownerKey As String = GetExtractionOwnerKey(request.FileIndex)
+                Dim tempPath As String = GetExtractionTempPath(targetPath)
                 AddExtractionPathEntry(entries, targetPath, False, False, ownerKey)
-                AddExtractionPathEntry(entries, targetPath & ".tmp", False, True, ownerKey)
+                AddExtractionPathEntry(entries, tempPath, False, True, ownerKey)
             Next
         End If
 
@@ -5196,9 +5231,7 @@ Public Class LTFSWriter
             If info.Length <> fileIndex.length Then Return False
             If info.CreationTimeUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z") <> fileIndex.creationtime Then Return False
             If info.LastWriteTimeUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z") <> fileIndex.modifytime Then Return False
-            Return Not String.Equals(fileIndex.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.Fragment, True),
-                                     "true",
-                                     StringComparison.OrdinalIgnoreCase)
+            Return Not IsExtractionFileFragment(fileIndex)
         Catch
             Return False
         End Try
@@ -5264,32 +5297,6 @@ Public Class LTFSWriter
         End If
     End Sub
 
-    Private Sub ValidateExtractionCoverage(file As ltfsindex.file,
-                                           extents As List(Of ltfsindex.file.extent))
-        If file Is Nothing OrElse file.length <= 0 Then Return
-        Dim byFileOffset As New List(Of ltfsindex.file.extent)(extents)
-        byFileOffset.Sort(New Comparison(Of ltfsindex.file.extent)(
-            Function(a As ltfsindex.file.extent, b As ltfsindex.file.extent) As Integer
-                Dim comparison As Integer = a.fileoffset.CompareTo(b.fileoffset)
-                If comparison <> 0 Then Return comparison
-                Return a.bytecount.CompareTo(b.bytecount)
-            End Function))
-
-        Dim coveredUntil As Long = 0
-        For Each extent As ltfsindex.file.extent In byFileOffset
-            If extent.bytecount <= 0 Then Continue For
-            If extent.fileoffset > coveredUntil Then
-                Throw New IO.InvalidDataException($"{file.name}: extent map contains a logical gap")
-            End If
-            Dim extentEnd As Long = extent.fileoffset + extent.bytecount
-            If extentEnd > coveredUntil Then coveredUntil = extentEnd
-            If coveredUntil >= file.length Then Exit For
-        Next
-        If coveredUntil < file.length Then
-            Throw New IO.InvalidDataException($"{file.name}: extent map does not cover the complete file")
-        End If
-    End Sub
-
     Private Function PrepareExtractionFile(request As ExtractionFileRequest) As ExtractionFileWork
         If request Is Nothing OrElse request.FileIndex Is Nothing Then Throw New IO.InvalidDataException("Invalid extraction file")
         If request.FileIndex.length < 0 Then Throw New IO.InvalidDataException($"{request.FileIndex.name}: negative file length")
@@ -5298,7 +5305,7 @@ Public Class LTFSWriter
         If String.IsNullOrEmpty(targetPath) Then Throw New IO.InvalidDataException("Extraction target path is empty")
         Dim result As New ExtractionFileWork With {
             .Request = request,
-            .TempPath = targetPath & ".tmp"}
+            .TempPath = GetExtractionTempPath(targetPath)}
 
         If IsExtractionTargetComplete(targetPath, request.FileIndex) Then
             result.AlreadyComplete = True
@@ -5310,41 +5317,63 @@ Public Class LTFSWriter
 
         Dim parentPath As String = IO.Path.GetDirectoryName(targetPath)
         If Not String.IsNullOrEmpty(parentPath) Then IO.Directory.CreateDirectory(parentPath)
-        If IO.File.Exists(result.TempPath) Then
+        Dim tempExists As Boolean = IO.File.Exists(result.TempPath)
+        Dim resetTemp As Boolean = Not tempExists
+        If tempExists Then
             Try
-                Dim tempInfo As New IO.FileInfo(result.TempPath)
-                If (tempInfo.Attributes And IO.FileAttributes.ReadOnly) <> 0 Then
-                    tempInfo.Attributes = tempInfo.Attributes And Not IO.FileAttributes.ReadOnly
+                Dim existingTempInfo As New IO.FileInfo(result.TempPath)
+                If (existingTempInfo.Attributes And IO.FileAttributes.ReadOnly) <> 0 Then
+                    existingTempInfo.Attributes = existingTempInfo.Attributes And Not IO.FileAttributes.ReadOnly
+                End If
+                If existingTempInfo.Length <> request.FileIndex.length Then
+                    resetTemp = True
                 End If
             Catch
+                resetTemp = True
             End Try
         End If
 
-        Dim tempExists As Boolean = IO.File.Exists(result.TempPath)
-        Dim resetTemp As Boolean = Not tempExists
+        If resetTemp Then
+            If Not My.Settings.LTFSWriter_ClearBeforeOverwrite AndAlso IO.File.Exists(targetPath) Then
+                ' Preserve an earlier fragment (or the old target contents) so
+                ' later extents can fill their recorded logical offsets.
+                IO.File.Copy(targetPath, result.TempPath, True)
+            Else
+                Using tempStream As New IO.FileStream(result.TempPath,
+                                                      IO.FileMode.Create,
+                                                      IO.FileAccess.ReadWrite,
+                                                      IO.FileShare.Read,
+                                                      1048576,
+                                                      IO.FileOptions.RandomAccess)
+                End Using
+            End If
+        End If
+
+        Try
+            Dim tempInfo As New IO.FileInfo(result.TempPath)
+            If (tempInfo.Attributes And IO.FileAttributes.ReadOnly) <> 0 Then
+                tempInfo.Attributes = tempInfo.Attributes And Not IO.FileAttributes.ReadOnly
+            End If
+        Catch
+        End Try
+
         Using tempStream As New IO.FileStream(result.TempPath,
                                               IO.FileMode.OpenOrCreate,
                                               IO.FileAccess.ReadWrite,
                                               IO.FileShare.Read,
                                               1048576,
                                               IO.FileOptions.RandomAccess)
-            If tempStream.Length <> request.FileIndex.length Then resetTemp = True
-            If Not resetTemp Then
-                Try
-                    If (IO.File.GetAttributes(result.TempPath) And IO.FileAttributes.SparseFile) = 0 Then
-                        ' Keep the temporary output sparse so an interrupted
-                        ' extraction does not consume the complete logical size.
-                        resetTemp = True
-                    End If
-                Catch
-                    resetTemp = True
-                End Try
+            Dim isSparse As Boolean = False
+            Try
+                isSparse = (IO.File.GetAttributes(result.TempPath) And IO.FileAttributes.SparseFile) <> 0
+            Catch
+            End Try
+            Dim markedSparse As Boolean = isSparse OrElse IOManager.TrySetSparseFile(tempStream)
+            If tempStream.Length <> request.FileIndex.length Then
+                tempStream.SetLength(request.FileIndex.length)
             End If
-            If resetTemp Then tempStream.SetLength(0)
-            Dim markedSparse As Boolean = IOManager.TrySetSparseFile(tempStream)
-            If resetTemp Then tempStream.SetLength(request.FileIndex.length)
             If Not markedSparse Then
-                PrintMsg($"{request.FileIndex.name}: cannot mark temporary file sparse; extraction will reread its extents", Warning:=True, LogOnly:=True)
+                PrintMsg($"{request.FileIndex.name}: sparse files are not supported; using a regular temporary file", Warning:=True, LogOnly:=True)
             End If
         End Using
 
@@ -5545,7 +5574,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub CommitExtractionFile(work As ExtractionFileWork)
-        If work Is Nothing OrElse work.AlreadyComplete OrElse StopFlag Then Return
+        If work Is Nothing OrElse work.AlreadyComplete OrElse work.Committed OrElse StopFlag Then Return
         If Not IO.File.Exists(work.TempPath) Then Throw New IO.FileNotFoundException("Temporary extraction file is missing", work.TempPath)
         Dim targetPath As String = work.Request.FileName
         If Not targetPath.StartsWith("\\", StringComparison.Ordinal) Then targetPath = NormalizeExtractionPath(targetPath)
@@ -5564,6 +5593,7 @@ Public Class LTFSWriter
             IO.File.Move(work.TempPath, targetPath)
         End If
         ApplyExtractionAttributes(targetPath, work.Request.FileIndex)
+        work.Committed = True
         Threading.Interlocked.Increment(CurrentFilesProcessed)
         Threading.Interlocked.Increment(TotalFilesProcessed)
     End Sub
@@ -5651,7 +5681,8 @@ Public Class LTFSWriter
                     .ExtentIndex = i,
                     .PhysicalPartition = GetPartitionNumber(CType(extents(i).partition, ltfslabel.PartitionLabel))})
             Next
-            ValidateExtractionCoverage(request.FileIndex, extents)
+            ' A tape may contain only part of a logical file.  Keep checking
+            ' each extent's bounds above, while missing ranges remain zero-filled.
         Next
 
         plan.Sort(New Comparison(Of ExtractionExtentWork)(
@@ -5685,9 +5716,14 @@ Public Class LTFSWriter
         Dim extractionFileTotal As Long = If(requests Is Nothing, 0L, requests.Count)
         Dim nextExtractionFileNumber As Long = Math.Max(0L, CurrentFilesProcessed)
         Dim extractionFileNumbers As New Dictionary(Of ExtractionFileWork, Long)
+        Dim lastExtentByFile As New Dictionary(Of ExtractionFileWork, Integer)
+        For planIndex As Integer = 0 To plan.Count - 1
+            lastExtentByFile(plan(planIndex).FileWork) = planIndex
+        Next
         Dim currentExtractionFile As ExtractionFileWork = Nothing
-        For Each extentWork As ExtractionExtentWork In plan
+        For planIndex As Integer = 0 To plan.Count - 1
             If StopFlag Then Exit For
+            Dim extentWork As ExtractionExtentWork = plan(planIndex)
             Dim extractionFileNumber As Long = 0
             If Not extractionFileNumbers.TryGetValue(extentWork.FileWork, extractionFileNumber) Then
                 nextExtractionFileNumber += 1
@@ -5706,6 +5742,11 @@ Public Class LTFSWriter
                 currentExtractionFile = extentWork.FileWork
             End If
             RestoreExtractionExtent(extentWork, GetValidationBlockSize())
+            Dim lastExtentIndex As Integer = -1
+            If lastExtentByFile.TryGetValue(extentWork.FileWork, lastExtentIndex) AndAlso
+               lastExtentIndex = planIndex Then
+                CommitExtractionFile(extentWork.FileWork)
+            End If
         Next
         If StopFlag Then Return
         For Each fileWork As ExtractionFileWork In fileWorks
