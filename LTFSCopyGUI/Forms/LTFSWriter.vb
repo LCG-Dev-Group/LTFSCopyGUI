@@ -1792,6 +1792,8 @@ Public Class LTFSWriter
             End If
             _pendingSize = 0
             _pendingByDirectory.Clear()
+            UnwrittenSizeOverrideValue = 0
+            UnwrittenCountOverrideValue = 0
             If extraDirectory IsNot Nothing Then touchedDirectories.Add(extraDirectory)
 
             For Each directory As ltfsindex.directory In touchedDirectories
@@ -9037,7 +9039,7 @@ Public Class LTFSWriter
                         Threading.Thread.Sleep(0)
                         SyncLock UFReadCount
                             If UFReadCount > 0 Then Continue While
-                            ClearGlobalPendingQueue()
+                            ClearPendingWriteQueues()
                             CurrentFilesProcessed = 0
                             CurrentBytesProcessed = 0
                             Exit While
@@ -9102,7 +9104,7 @@ Public Class LTFSWriter
                         Threading.Thread.Sleep(0)
                         SyncLock UFReadCount
                             If UFReadCount > 0 Then Continue While
-                            ClearGlobalPendingQueue()
+                            ClearPendingWriteQueues()
                             CurrentFilesProcessed = 0
                             CurrentBytesProcessed = 0
                             Exit While
@@ -9312,7 +9314,7 @@ Public Class LTFSWriter
                         Threading.Thread.Sleep(0)
                         SyncLock UFReadCount
                             If UFReadCount > 0 Then Continue While
-                            ClearGlobalPendingQueue()
+                            ClearPendingWriteQueues()
                             CurrentFilesProcessed = 0
                             CurrentBytesProcessed = 0
                             TotalBytesUnindexed = 0
@@ -9422,7 +9424,7 @@ Public Class LTFSWriter
                         Threading.Thread.Sleep(0)
                         SyncLock UFReadCount
                             If UFReadCount > 0 Then Continue While
-                            ClearGlobalPendingQueue()
+                            ClearPendingWriteQueues()
                             CurrentFilesProcessed = 0
                             CurrentBytesProcessed = 0
                             TotalBytesUnindexed = 0
@@ -9488,7 +9490,7 @@ Public Class LTFSWriter
                 Threading.Thread.Sleep(0)
                 SyncLock UFReadCount
                     If UFReadCount > 0 Then Continue While
-                    ClearGlobalPendingQueue()
+                    ClearPendingWriteQueues()
                     CurrentFilesProcessed = 0
                     CurrentBytesProcessed = 0
                     Exit While
@@ -13536,7 +13538,7 @@ Public Class LTFSWriter
                         Threading.Thread.Sleep(0)
                         SyncLock UFReadCount
                             If UFReadCount > 0 Then Continue While
-                            ClearGlobalPendingQueue()
+                            ClearPendingWriteQueues()
                             CurrentFilesProcessed = 0
                             CurrentBytesProcessed = 0
                             TotalBytesUnindexed = 0
