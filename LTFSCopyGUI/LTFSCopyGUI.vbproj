@@ -343,6 +343,9 @@
     </Compile>
     <Compile Include="Core\IOManager.vb" />
     <Compile Include="Services\iSCSIService.vb" />
+    <Compile Include="Services\DirectTapeCopyProtocol.vb" />
+    <Compile Include="Services\DirectTapeCopyBridge.vb" />
+    <Compile Include="Services\IFastReaderConsumer.vb" />
     <Compile Include="Services\RustFastReaderProvider.vb" />
     <Compile Include="Core\TarMetadata.vb" />
     <Compile Include="Forms\LTFSConfigurator.Designer.vb">

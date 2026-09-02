@@ -12,7 +12,7 @@ Imports Serilog.Context
 ' CLR memory: Rust owns every slot and TapeUtils.Write consumes its pointer
 ' directly before AdvanceSlot releases it back to Rust.
 Public Class RustFastReaderProvider
-    Implements IDisposable
+    Implements IDisposable, IFastReaderConsumer
 
     Public Structure Slot
         Public Property Token As ULong
@@ -261,28 +261,28 @@ Public Class RustFastReaderProvider
         _fileRetryBaseDelayMs = fileRetryBaseDelayMs
     End Sub
 
-    Public ReadOnly Property BufferedBytes As Long
+    Public ReadOnly Property BufferedBytes As Long Implements IFastReaderConsumer.BufferedBytes
         Get
             If Not HasContext() Then Return 0
             Return CLng(NativeMethods.lfr_buffered_bytes(Context))
         End Get
     End Property
 
-    Public ReadOnly Property BufferCapacityBytes As Long
+    Public ReadOnly Property BufferCapacityBytes As Long Implements IFastReaderConsumer.BufferCapacityBytes
         Get
             If Not HasContext() Then Return _requestedCapacityBytes
             Return CLng(NativeMethods.lfr_buffer_capacity(Context))
         End Get
     End Property
 
-    Public ReadOnly Property OccupiedSlotCount As ULong
+    Public ReadOnly Property OccupiedSlotCount As ULong Implements IFastReaderConsumer.OccupiedSlotCount
         Get
             If Not HasContext() Then Return 0UL
             Return NativeMethods.lfr_occupied_slots(Context)
         End Get
     End Property
 
-    Public ReadOnly Property RemainingBytes As Long
+    Public ReadOnly Property RemainingBytes As Long Implements IFastReaderConsumer.RemainingBytes
         Get
             Return Math.Max(0L, Interlocked.Read(_remainingBytes))
         End Get
@@ -522,7 +522,7 @@ Public Class RustFastReaderProvider
         End If
     End Sub
 
-    Public Function ReadSlot(expectedFileIndex As Long, ct As CancellationToken) As Slot
+    Public Function ReadSlot(expectedFileIndex As Long, ct As CancellationToken) As Slot Implements IFastReaderConsumer.ReadSlot
         QueueFile(expectedFileIndex)
         Dim waitTimer = Stopwatch.StartNew()
         Dim nextWarningMs As Long = StallWarningIntervalMs
@@ -614,7 +614,7 @@ Public Class RustFastReaderProvider
         End While
     End Function
 
-    Public Function GetPerformanceStats() As PerformanceStats
+    Public Function GetPerformanceStats() As PerformanceStats Implements IFastReaderConsumer.GetPerformanceStats
         EnsureStarted()
         Dim result As New PerformanceStats With {
             .StructSize = CUInt(Marshal.SizeOf(GetType(PerformanceStats)))
@@ -623,7 +623,7 @@ Public Class RustFastReaderProvider
         Return result
     End Function
 
-    Public Sub AdvanceSlot(slot As Slot)
+    Public Sub AdvanceSlot(slot As Slot) Implements IFastReaderConsumer.AdvanceSlot
         If slot.Token = 0 Then
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(RustFastReaderProvider))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")
@@ -855,7 +855,7 @@ Public Class RustFastReaderProvider
         Return EmptyHashes()
     End Function
 
-    Public Function GetCompletedFileHashes(fileIndex As Long) As Dictionary(Of String, String)
+    Public Function GetCompletedFileHashes(fileIndex As Long) As Dictionary(Of String, String) Implements IFastReaderConsumer.GetCompletedFileHashes
         EnsureStarted()
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(RustFastReaderProvider))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")
@@ -899,7 +899,7 @@ Public Class RustFastReaderProvider
         Return hashes
     End Function
 
-    Public Sub WaitForStreamFillFraction(fraction As Double, ct As CancellationToken)
+    Public Sub WaitForStreamFillFraction(fraction As Double, ct As CancellationToken) Implements IFastReaderConsumer.WaitForStreamFillFraction
         ThrowIfFailed()
         Dim boundedFraction = Math.Max(0.0, Math.Min(1.0, fraction))
         Dim waitTimer = Stopwatch.StartNew()
@@ -993,7 +993,7 @@ Public Class RustFastReaderProvider
         End While
     End Sub
 
-    Public Sub Cancel()
+    Public Sub Cancel() Implements IFastReaderConsumer.Cancel
         If Interlocked.Exchange(_cancelRequested, 1) <> 0 Then Return
         Dim result As Integer = ResultInvalid
         If HasContext() Then result = NativeMethods.lfr_cancel(Context)

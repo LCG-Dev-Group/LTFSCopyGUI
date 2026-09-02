@@ -15,6 +15,7 @@ Imports Microsoft.Extensions.FileSystemGlobbing
 Imports Serilog
 Imports Serilog.Context
 Imports ZstdSharp
+Imports Newtonsoft.Json
 
 Public Class LTFSWriter
     Private Const WriterTreePageSize As Integer = 1024
@@ -1094,6 +1095,14 @@ Public Class LTFSWriter
         Public Property File As ltfsindex.file
         Public Property FileOffset As Long
         Public Property SegmentLength As Long
+        Public Property DirectCopyOrdinal As Long = -1
+        Public Property DirectCopyTrustedHashes As Dictionary(Of String, String)
+        Public Property DirectCopyExistingFile As ltfsindex.file
+        Public ReadOnly Property IsDirectTapeCopy As Boolean
+            Get
+                Return DirectCopyOrdinal >= 0
+            End Get
+        End Property
         Public Property Buffer As Byte() = Nothing
         Public Property IsOpened As Boolean = False
         Private OperationLock As New Object
@@ -1818,6 +1827,7 @@ Public Class LTFSWriter
         End If
         FileDroper = New FileDropHandler(ListView1)
         Load_Settings()
+        InstallDirectTapeCopyMenus()
         If OfflineMode Then
             LoadComplete = True
             Exit Sub
@@ -6495,9 +6505,16 @@ Public Class LTFSWriter
     Public Property IsWriting As Boolean = False
     Private _PipeBufferLength As Long = 0
     Private _stopFlagValue As Integer = 0
-    Private _activeFastReaderProvider As RustFastReaderProvider = Nothing
+    Private _activeFastReaderProvider As IFastReaderConsumer = Nothing
+    Private _directCopySourceOffer As DirectTapeCopySourceOffer = Nothing
+    Private _directCopyTargetSession As DirectTapeCopyTargetSession = Nothing
+    Private _directCopyManifest As DirectTapeCopyManifest = Nothing
+    Private _directCopyMenuItem As ToolStripMenuItem = Nothing
+    Private _directCopyPasteConnecting As Integer
     Private _fastReaderWaitCancellation As CancellationTokenSource = Nothing
     Private _fastReaderWaitSuppressed As Integer
+    Private Const FastReaderPauseWatermarkFraction As Double = 0.15
+    Private Const FastReaderResumeWatermarkFraction As Double = 0.75
     Public Property PipeBufferLength As Long
         Get
             Return _PipeBufferLength
@@ -7092,6 +7109,78 @@ Public Class LTFSWriter
         Return plans
     End Function
 
+    Private Function BuildDirectWritePlan(writeList As List(Of FileRecord),
+                                          existingFiles As IEnumerable(Of ltfsindex.file)) As List(Of PlannedWrite)
+        Dim plans As New List(Of PlannedWrite)(writeList.Count)
+        For Each record In writeList
+            Dim plan As New PlannedWrite
+            If record Is Nothing OrElse record.File Is Nothing OrElse record.File.length = 0 OrElse
+               Not String.IsNullOrEmpty(record.File.symlink) Then
+                plan.Kind = PlannedWriteKind.ZeroLength
+            Else
+                plan.Kind = PlannedWriteKind.DataPartitionMaterial
+            End If
+            plans.Add(plan)
+        Next
+        If Not My.Settings.LTFSWriter_DeDupe Then Return plans
+
+        Dim requestedSizes As New HashSet(Of Long)(writeList.Where(Function(record) record IsNot Nothing AndAlso record.File IsNot Nothing).
+                                                     Select(Function(record) record.File.length))
+        Dim catalog As New Dictionary(Of Long, Dictionary(Of String, DedupeCanonical))
+        For Each existing In existingFiles
+            If existing Is Nothing OrElse existing.length <= 0 OrElse Not requestedSizes.Contains(existing.length) Then Continue For
+            Dim hash = GetFileDedupeHash(existing)
+            If String.IsNullOrEmpty(hash) Then Continue For
+            Dim byHash As Dictionary(Of String, DedupeCanonical) = Nothing
+            If Not catalog.TryGetValue(existing.length, byHash) Then
+                byHash = New Dictionary(Of String, DedupeCanonical)(StringComparer.OrdinalIgnoreCase)
+                catalog(existing.length) = byHash
+            End If
+            If byHash.ContainsKey(hash) Then Continue For
+            Dim canonical As New DedupeCanonical
+            If existing.HasLazyRecord Then
+                canonical.ExistingStore = TryCast(existing.LazyStoreReference, LazySchemaStore)
+                canonical.ExistingRecordOffset = existing.LazyRecordOffset
+                canonical.ExistingRecordLength = existing.LazyRecordLength
+            End If
+            If canonical.ExistingStore Is Nothing OrElse canonical.ExistingRecordOffset < 0 OrElse canonical.ExistingRecordLength <= 0 Then
+                canonical.ExistingFile = existing.GetCopy(existing.fileuid)
+            End If
+            byHash(hash) = canonical
+        Next
+
+        For index As Integer = 0 To writeList.Count - 1
+            Dim record = writeList(index)
+            If plans(index).Kind <> PlannedWriteKind.DataPartitionMaterial Then Continue For
+            Dim hash = GetFileDedupeHash(record.File)
+            If String.IsNullOrEmpty(hash) Then Continue For
+            plans(index).ExpectedDedupeHash = hash
+            Dim byHash As Dictionary(Of String, DedupeCanonical) = Nothing
+            If Not catalog.TryGetValue(record.File.length, byHash) Then
+                byHash = New Dictionary(Of String, DedupeCanonical)(StringComparer.OrdinalIgnoreCase)
+                catalog(record.File.length) = byHash
+            End If
+            Dim canonical As DedupeCanonical = Nothing
+            If byHash.TryGetValue(hash, canonical) Then
+                plans(index).Kind = PlannedWriteKind.Duplicate
+                plans(index).ExistingReference = canonical.ExistingFile
+                plans(index).ExistingReferenceStore = canonical.ExistingStore
+                plans(index).ExistingReferenceOffset = canonical.ExistingRecordOffset
+                plans(index).ExistingReferenceLength = canonical.ExistingRecordLength
+                plans(index).NewReferenceIndex = canonical.NewFileIndex
+            Else
+                byHash(hash) = New DedupeCanonical With {.NewFileIndex = index}
+            End If
+        Next
+        Return plans
+    End Function
+
+    Private Shared Function AddDirectCopyTotal(total As Long, value As Long) As Long
+        If value <= 0 Then Return total
+        If total > Long.MaxValue - value Then Return Long.MaxValue
+        Return total + value
+    End Function
+
     Private Sub ReleaseManagedWriteRecord(writeList As List(Of FileRecord),
                                           index As Integer,
                                           dedupeReferenceUseCount As Dictionary(Of Integer, Integer))
@@ -7120,7 +7209,7 @@ Public Class LTFSWriter
         End If
     End Sub
 
-    Private Sub WaitForFastReaderFillFraction(fastProvider As RustFastReaderProvider,
+    Private Sub WaitForFastReaderFillFraction(fastProvider As IFastReaderConsumer,
                                                fraction As Double,
                                                operation As String)
         If Not My.Settings.LTFSWriter_WaitOnBufferEmpty OrElse
@@ -7157,7 +7246,12 @@ Public Class LTFSWriter
         End Try
     End Sub
 
-    Private Sub WaitForFastReaderRefill(fastProvider As RustFastReaderProvider)
+    Private Shared Function GetFastReaderWatermark(capacity As Long, fraction As Double) As Long
+        If capacity <= 0 Then Return 0
+        Return Math.Min(capacity, CLng(Math.Ceiling(CDbl(capacity) * fraction)))
+    End Function
+
+    Private Sub WaitForFastReaderRefill(fastProvider As IFastReaderConsumer)
         If Not My.Settings.LTFSWriter_WaitOnBufferEmpty OrElse
            StopFlag OrElse
            Threading.Volatile.Read(_fastReaderWaitSuppressed) <> 0 Then
@@ -7167,17 +7261,19 @@ Public Class LTFSWriter
 
         Dim buffered = fastProvider.BufferedBytes
         PipeBufferLength = buffered
-        Const lowWaterFraction As Double = 0.15
-        Const fillFraction As Double = 0.75
-        Dim lowWater = CLng(Math.Ceiling(fastProvider.BufferCapacityBytes * lowWaterFraction))
+        Dim capacity = fastProvider.BufferCapacityBytes
+        Dim lowWater = GetFastReaderWatermark(capacity, FastReaderPauseWatermarkFraction)
         If Not PipePause AndAlso buffered > lowWater Then Return
 
-        WaitForFastReaderFillFraction(fastProvider, fillFraction, "refill")
+        PrintMsg($"fastreader refill paused: buffered={IOManager.FormatSize(buffered)} low_water={IOManager.FormatSize(lowWater)} resume_water={IOManager.FormatSize(GetFastReaderWatermark(capacity, FastReaderResumeWatermarkFraction))}",
+                 LogOnly:=True,
+                 ForceLog:=True)
+        WaitForFastReaderFillFraction(fastProvider, FastReaderResumeWatermarkFraction, "refill")
     End Sub
 
-    Private Sub WaitForInitialFastReaderFill(fastProvider As RustFastReaderProvider)
+    Private Sub WaitForInitialFastReaderFill(fastProvider As IFastReaderConsumer)
         If Not My.Settings.LTFSWriter_WaitOnBufferEmpty OrElse StopFlag Then Return
-        WaitForFastReaderFillFraction(fastProvider, 0.75, "initial fill")
+        WaitForFastReaderFillFraction(fastProvider, FastReaderResumeWatermarkFraction, "initial fill")
     End Sub
 
     Private Sub ResetFastReaderBufferWait()
@@ -7239,7 +7335,7 @@ Public Class LTFSWriter
                  ForceLog:=True)
     End Sub
 
-    Private Function WriteFileFromFastReader(fastProvider As RustFastReaderProvider,
+    Private Function WriteFileFromFastReader(fastProvider As IFastReaderConsumer,
                                              fileIndex As Integer,
                                              fr As FileRecord,
                                              driveHandle As IntPtr,
@@ -7253,7 +7349,6 @@ Public Class LTFSWriter
         Dim writeElapsedSeconds As Double = 0
         Dim slowestWriteMiBs As Double = Double.PositiveInfinity
         Dim minimumBufferedBytes As Long = Long.MaxValue
-        fastProvider.QueueFile(fileIndex)
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSWriter))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")
                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
@@ -7419,14 +7514,22 @@ Public Class LTFSWriter
                             End Using
                         End Using
                         Dim dResult As DialogResult
-                        Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErrSCSI}{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
+                        Dim errorButtons = If(fr.IsDirectTapeCopy, MessageBoxButtons.RetryCancel, MessageBoxButtons.AbortRetryIgnore)
+                        Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErrSCSI}{vbCrLf}{ex.ToString}", My.Resources.ResText_Warning, errorButtons))
                         Select Case dResult
                             Case DialogResult.Abort
                                 StopFlag = True
                                 Throw
+                            Case DialogResult.Cancel
+                                StopFlag = True
+                                Throw New OperationCanceledException("Direct tape-copy target write was cancelled")
                             Case DialogResult.Retry
                                 succ = False
                             Case DialogResult.Ignore
+                                If fr.IsDirectTapeCopy Then
+                                    StopFlag = True
+                                    Throw New IOException("Direct tape-copy target write cannot ignore an error")
+                                End If
                                 succ = True
                                 Exit While
                         End Select
@@ -7446,14 +7549,22 @@ Public Class LTFSWriter
                         End If
                     ElseIf (sense(2) And &HF) <> 0 Then
                         Dim dResult As DialogResult
-                        Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{TapeUtils.ParseSenseData(sense)}{vbCrLf}{vbCrLf}sense{vbCrLf}{TapeUtils.Byte2Hex(sense, True)}", My.Resources.ResText_Warning, MessageBoxButtons.AbortRetryIgnore))
+                        Dim errorButtons = If(fr.IsDirectTapeCopy, MessageBoxButtons.RetryCancel, MessageBoxButtons.AbortRetryIgnore)
+                        Invoke(Sub() dResult = MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{TapeUtils.ParseSenseData(sense)}{vbCrLf}{vbCrLf}sense{vbCrLf}{TapeUtils.Byte2Hex(sense, True)}", My.Resources.ResText_Warning, errorButtons))
                         Select Case dResult
                             Case DialogResult.Abort
                                 StopFlag = True
                                 Throw New Exception(TapeUtils.ParseSenseData(sense))
+                            Case DialogResult.Cancel
+                                StopFlag = True
+                                Throw New OperationCanceledException("Direct tape-copy target write was cancelled")
                             Case DialogResult.Retry
                                 succ = False
                             Case DialogResult.Ignore
+                                If fr.IsDirectTapeCopy Then
+                                    StopFlag = True
+                                    Throw New IOException("Direct tape-copy target write cannot ignore an error")
+                                End If
                                 succ = True
                                 Exit While
                         End Select
@@ -7577,6 +7688,15 @@ Public Class LTFSWriter
         End If
         If Not StopFlag Then
             Dim hashes = fastProvider.GetCompletedFileHashes(fileIndex)
+            If fr.IsDirectTapeCopy AndAlso fr.DirectCopyTrustedHashes IsNot Nothing Then
+                For Each expected In fr.DirectCopyTrustedHashes
+                    Dim actual As String = Nothing
+                    If hashes.TryGetValue(expected.Key, actual) AndAlso
+                       Not String.Equals(actual, expected.Value, StringComparison.OrdinalIgnoreCase) Then
+                        Throw New IO.InvalidDataException($"Source LTFS checksum mismatch for {fr.File.name}: {expected.Key}")
+                    End If
+                Next
+            End If
             If Not String.IsNullOrEmpty(expectedDedupeHash) Then
                 Dim actualDedupeHash = GetFastReaderDedupeHash(hashes)
                 If Not actualDedupeHash.Equals(expectedDedupeHash, StringComparison.OrdinalIgnoreCase) Then
@@ -7613,7 +7733,8 @@ Public Class LTFSWriter
             Sub()
                 Dim OnWriteFinishMessage As String = ""
                 Dim provider As FileDataProvider = Nothing
-                Dim fastProvider As RustFastReaderProvider = Nothing
+                Dim fastProvider As IFastReaderConsumer = Nothing
+                Dim diskFastProvider As RustFastReaderProvider = Nothing
                 Dim WriteList As New List(Of FileRecord)
                 Dim wBufferPtr As IntPtr = IntPtr.Zero
                 Dim hashTasks As New List(Of Task)
@@ -7624,6 +7745,9 @@ Public Class LTFSWriter
                 Dim tapeUnitReserved As Boolean = False
                 Dim mediumRemovalPrevented As Boolean = False
                 Dim ufReadCountIncremented As Boolean = False
+                Dim directSession As DirectTapeCopyTargetSession = Nothing
+                Dim directManifest As DirectTapeCopyManifest = Nothing
+                Dim isDirectCopy As Boolean = False
                 Try
                     ClearWriteCompletionState()
                     PipeBufferLength = 0
@@ -7648,6 +7772,9 @@ Public Class LTFSWriter
                     Dim useFastReader As Boolean = False
                     Dim writePlan As List(Of PlannedWrite) = Nothing
                     Dim dedupeReferenceUseCount As New Dictionary(Of Integer, Integer)
+                    directSession = _directCopyTargetSession
+                    directManifest = _directCopyManifest
+                    isDirectCopy = directSession IsNot Nothing AndAlso directManifest IsNot Nothing
                     If UnwrittenCount > 0 Then
                         CurrentFilesProcessed = 0
                         CurrentBytesProcessed = 0
@@ -7659,10 +7786,46 @@ Public Class LTFSWriter
                         UnwrittenCountOverrideValue = UnwrittenCount
                         UnwrittenSizeOverrideValue = UnwrittenSize
                         GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency
-                        If My.Settings.LTFSWriter_ExternalReaderEnabled Then
+                        If isDirectCopy Then
                             Try
-                                fastProvider = New RustFastReaderProvider(WriteList, CInt(plabel.blocksize), My.Settings.LTFSWriter_PreLoadBytes)
-                                fastProvider.Start()
+                                Dim existingFiles As IEnumerable(Of ltfsindex.file) = Enumerable.Empty(Of ltfsindex.file)()
+                                If My.Settings.LTFSWriter_DeDupe Then existingFiles = EnumerateSchemaFiles()
+                                writePlan = BuildDirectWritePlan(WriteList, existingFiles)
+                                Dim materialRecords = Enumerable.Range(0, writePlan.Count).
+                                    Where(Function(index) writePlan(index).Kind = PlannedWriteKind.DataPartitionMaterial).
+                                    Select(Function(index) WriteList(index)).ToList()
+                                Dim materialOrdinals = materialRecords.Select(Function(record) record.DirectCopyOrdinal).ToList()
+                                Dim materialBytes = materialRecords.Aggregate(0L, Function(total, record) AddDirectCopyTotal(total, record.File.length))
+                                Dim bridgeName = $"Local\LTFSCopyGUI.DirectTapeCopy.{Process.GetCurrentProcess().Id}.{Guid.NewGuid():N}"
+                                Dim hashMask = DirectTapeCopyNative.BuildHashMask(directManifest.Files)
+                                Dim bridgeProvider = New DirectTapeCopyBridgeConsumer(bridgeName,
+                                                                                      CInt(plabel.blocksize),
+                                                                                      My.Settings.LTFSWriter_PreLoadBytes,
+                                                                                      hashMask,
+                                                                                      materialBytes)
+                                fastProvider = bridgeProvider
+                                useFastReader = True
+                                _activeFastReaderProvider = fastProvider
+                                directSession.Start(bridgeName,
+                                                    materialOrdinals,
+                                                    Sub(message) bridgeProvider.SetPeerError(message))
+                                For Each fr As FileRecord In WriteList
+                                    If fr IsNot Nothing Then fr.IsOpened = True
+                                Next
+                                PrintMsg($"direct tape fastreader enabled: files={materialOrdinals.Count} buffer={IOManager.FormatSize(My.Settings.LTFSWriter_PreLoadBytes)}",
+                                         LogOnly:=True,
+                                         ForceLog:=True)
+                            Catch ex As Exception
+                                If ReferenceEquals(_activeFastReaderProvider, fastProvider) Then _activeFastReaderProvider = Nothing
+                                If fastProvider IsNot Nothing Then fastProvider.Dispose()
+                                fastProvider = Nothing
+                                Throw New IO.IOException("Direct tape FastReader bridge could not be initialized.", ex)
+                            End Try
+                        ElseIf My.Settings.LTFSWriter_ExternalReaderEnabled Then
+                            Try
+                                diskFastProvider = New RustFastReaderProvider(WriteList, CInt(plabel.blocksize), My.Settings.LTFSWriter_PreLoadBytes)
+                                fastProvider = diskFastProvider
+                                diskFastProvider.Start()
                                 useFastReader = True
                                 _activeFastReaderProvider = fastProvider
                                 Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSWriter))
@@ -7695,6 +7858,7 @@ Public Class LTFSWriter
                                 If ReferenceEquals(_activeFastReaderProvider, fastProvider) Then _activeFastReaderProvider = Nothing
                                 If fastProvider IsNot Nothing Then fastProvider.Dispose()
                                 fastProvider = Nothing
+                                diskFastProvider = Nothing
                                 Throw New IO.IOException("External Reader is enabled, but the native fastreader could not be initialized. Managed fallback is disabled.", ex)
                             End Try
                         End If
@@ -7706,17 +7870,17 @@ Public Class LTFSWriter
                             provider.Start()
                         End If
 
-                        If useFastReader Then
+                        If useFastReader AndAlso Not isDirectCopy Then
                             ' The fast reader starts producing only after its ordered
                             ' file list is configured.  Do this before tape positioning
                             ' so its cache can fill while LocateToWritePosition runs.
                             Dim existingFiles As IEnumerable(Of ltfsindex.file) = Enumerable.Empty(Of ltfsindex.file)()
                             If My.Settings.LTFSWriter_DeDupe Then existingFiles = EnumerateSchemaFiles()
-                            writePlan = BuildWritePlan(WriteList, existingFiles, useFastReader, fastProvider)
+                            writePlan = BuildWritePlan(WriteList, existingFiles, useFastReader, diskFastProvider)
                             Dim orderedDataFiles = Enumerable.Range(0, writePlan.Count).
                                 Where(Function(index) writePlan(index).Kind = PlannedWriteKind.DataPartitionMaterial).
                                 Select(Function(index) CLng(index)).ToList()
-                            fastProvider.ConfigureOrderedFiles(orderedDataFiles)
+                            diskFastProvider.ConfigureOrderedFiles(orderedDataFiles)
                         End If
                     End If
 
@@ -7768,7 +7932,7 @@ Public Class LTFSWriter
                         If Not useFastReader Then
                             Dim existingFiles As IEnumerable(Of ltfsindex.file) = Enumerable.Empty(Of ltfsindex.file)()
                             If My.Settings.LTFSWriter_DeDupe Then existingFiles = EnumerateSchemaFiles()
-                            writePlan = BuildWritePlan(WriteList, existingFiles, useFastReader, fastProvider)
+                            writePlan = BuildWritePlan(WriteList, existingFiles, useFastReader, diskFastProvider)
                             For planIndex As Integer = 0 To writePlan.Count - 1
                                 Dim referenceIndex As Integer = writePlan(planIndex).NewReferenceIndex
                                 If referenceIndex >= 0 Then
@@ -7951,7 +8115,8 @@ Public Class LTFSWriter
                                             CurrentFilesProcessed += 1
                                             TotalBytesUnindexed += fr.File.length
                                         ElseIf useFastReader AndAlso Not IsIndexPartition Then
-                                            If Not WriteFileFromFastReader(fastProvider, i, fr, driveHandle, p, currentPlan.ExpectedDedupeHash, tarScanner) Then Exit For
+                                            Dim providerFileIndex = If(fr.IsDirectTapeCopy, CInt(fr.DirectCopyOrdinal), i)
+                                            If Not WriteFileFromFastReader(fastProvider, providerFileIndex, fr, driveHandle, p, currentPlan.ExpectedDedupeHash, tarScanner) Then Exit For
                                         ElseIf (fr.File.length <= plabel.blocksize) AndAlso (fr.FileOffset = 0) AndAlso (fr.File.length = fr.SegmentLength) Then
                                             Dim succ As Boolean = False
                                             Dim FileData(CInt(fr.File.length - 1)) As Byte
@@ -8485,6 +8650,10 @@ Public Class LTFSWriter
                                 If tarScanner IsNot Nothing AndAlso Not StopFlag Then
                                     CommitTarMetadata(fr, tarScanner)
                                 End If
+                                If fr.IsDirectTapeCopy AndAlso fr.DirectCopyExistingFile IsNot Nothing Then
+                                    fr.ParentDirectory.RemoveFile(fr.DirectCopyExistingFile)
+                                    fr.DirectCopyExistingFile = Nothing
+                                End If
                                 'Commit several completed files together.  The
                                 'lazy schema store can then update one mutation
                                 'and propagate one aggregate count per parent.
@@ -8685,15 +8854,29 @@ Public Class LTFSWriter
                             wBufferPtr = IntPtr.Zero
                         End Try
                     End If
-                    Try
-                        If fastProvider IsNot Nothing Then
+                    If fastProvider IsNot Nothing Then
+                        Try
                             If ReferenceEquals(_activeFastReaderProvider, fastProvider) Then _activeFastReaderProvider = Nothing
                             fastProvider.Dispose()
+                        Catch cleanupEx As Exception
+                            Log.Error(cleanupEx, "Fast reader cleanup failed.")
+                        Finally
                             fastProvider = Nothing
-                        End If
-                    Catch cleanupEx As Exception
-                        Log.Error(cleanupEx, "Fast reader cleanup failed.")
-                    End Try
+                            diskFastProvider = Nothing
+                        End Try
+                    End If
+                    If isDirectCopy Then
+                        Try
+                            If directSession IsNot Nothing Then directSession.Dispose()
+                        Catch cleanupEx As Exception
+                            Log.Error(cleanupEx, "Direct-copy control session cleanup failed.")
+                        Finally
+                            If ReferenceEquals(_directCopyTargetSession, directSession) Then
+                                _directCopyTargetSession = Nothing
+                                _directCopyManifest = Nothing
+                            End If
+                        End Try
+                    End If
                     ResetFastReaderBufferWait()
                     Try
                         If provider IsNot Nothing Then
@@ -12715,6 +12898,455 @@ Public Class LTFSWriter
         TapeUtils.SetEncryption(driveHandle, EncryptionKey)
     End Sub
 
+    Private Sub InstallDirectTapeCopyMenus()
+        If _directCopyMenuItem IsNot Nothing Then Return
+        _directCopyMenuItem = New ToolStripMenuItem("复制到另一磁带") With {
+            .ShortcutKeyDisplayString = "Ctrl+C"}
+        AddHandler _directCopyMenuItem.Click, AddressOf CopySelectedToAnotherTape
+        ContextMenuStrip1.Items.Add(_directCopyMenuItem)
+
+        Dim treeCopyItem As New ToolStripMenuItem("复制到另一磁带") With {
+            .ShortcutKeyDisplayString = "Ctrl+C"}
+        AddHandler treeCopyItem.Click, AddressOf CopySelectedToAnotherTape
+        ContextMenuStrip3.Items.Add(treeCopyItem)
+    End Sub
+
+    Private Sub CopySelectedToAnotherTape(sender As Object, e As EventArgs)
+        Try
+            If OfflineMode OrElse TapeUtils.DriverTypeSetting <> TapeUtils.DriverType.LTO Then
+                Throw New NotSupportedException("直接磁带复制目前只支持物理 LTO 驱动器。")
+            End If
+            If schema Is Nothing OrElse plabel Is Nothing OrElse plabel.blocksize <= 0 Then Throw New InvalidOperationException("请先读取源磁带 LTFS 索引。")
+            If IsWriting Then Throw New InvalidOperationException("源窗口正在执行其他写带任务。")
+
+            Dim manifest = BuildDirectTapeCopyManifest()
+            If manifest.Files.Count = 0 AndAlso manifest.Directories.Count = 0 Then Throw New InvalidOperationException("没有选中可复制的已写入文件或目录。")
+            If _directCopySourceOffer IsNot Nothing Then _directCopySourceOffer.Dispose()
+            Dim sourceVolume = manifest.VolumeUuid
+            Dim sourceGeneration = manifest.GenerationNumber
+            _directCopySourceOffer = New DirectTapeCopySourceOffer(
+                manifest,
+                Function() schema IsNot Nothing AndAlso schema.volumeuuid = sourceVolume AndAlso schema.generationnumber = sourceGeneration,
+                Sub(request, cancellationToken) StreamDirectTapeCopySource(manifest, request, cancellationToken))
+
+            Dim descriptorText = JsonConvert.SerializeObject(_directCopySourceOffer.Descriptor, Formatting.None)
+            Dim data As New DataObject()
+            data.SetData(DirectTapeCopyProtocol.ClipboardFormat, False, descriptorText)
+            Clipboard.SetDataObject(data, True)
+            Dim totalBytes = manifest.Files.Aggregate(0L, Function(total, file) AddDirectCopyTotal(total, Math.Max(0L, file.Length)))
+            PrintMsg($"已复制跨磁带任务：{manifest.Files.Count} 个文件，{manifest.Directories.Count} 个目录，{IOManager.FormatSize(totalBytes)}。请在目标磁带目录按 Ctrl+V。",
+                     LogOnly:=False,
+                     ForceLog:=True)
+        Catch ex As Exception
+            MessageBox.Show(New Form With {.TopMost = True}, ex.Message, My.Resources.ResText_Warning, MessageBoxButtons.OK, MessageBoxIcon.Warning)
+        End Try
+    End Sub
+
+    Private Function BuildDirectTapeCopyManifest() As DirectTapeCopyManifest
+        Dim manifest As New DirectTapeCopyManifest With {
+            .VolumeUuid = schema.volumeuuid,
+            .GenerationNumber = schema.generationnumber,
+            .SourceBlockSize = plabel.blocksize}
+        Dim seenPaths As New HashSet(Of String)(StringComparer.Ordinal)
+        Dim selectedItems = GetSelectedListViewItems()
+        If CurrentFocus Is ListView1 AndAlso selectedItems.Count > 0 Then
+            Dim parent = TryCast(ListView1.Tag, ltfsindex.directory)
+            For Each item In selectedItems
+                Dim file = TryCast(item.Tag, ltfsindex.file)
+                If file Is Nothing Then Continue For
+                If parent IsNot Nothing AndAlso parent.UnwrittenFiles IsNot Nothing AndAlso parent.UnwrittenFiles.Contains(file) Then Continue For
+                AddDirectManifestFile(manifest, file, file.name, seenPaths)
+            Next
+        Else
+            Dim selected = SelectedNodes
+            Dim selectedSet As New HashSet(Of TreeNode)(selected)
+            For Each node In selected
+                If node Is Nothing OrElse Not TypeOf node.Tag Is ltfsindex.directory Then Continue For
+                Dim ancestor = node.Parent
+                Dim nested As Boolean = False
+                While ancestor IsNot Nothing
+                    If selectedSet.Contains(ancestor) Then
+                        nested = True
+                        Exit While
+                    End If
+                    ancestor = ancestor.Parent
+                End While
+                If nested Then Continue For
+                Dim directory = DirectCast(node.Tag, ltfsindex.directory)
+                If String.IsNullOrEmpty(directory.name) Then
+                    For Each file In directory.EnumerateLazyFiles()
+                        AddDirectManifestFile(manifest, file, file.name, seenPaths)
+                    Next
+                    For Each child In directory.EnumerateLazyDirectories()
+                        AddDirectManifestDirectory(manifest, child, child.name, seenPaths)
+                    Next
+                Else
+                    AddDirectManifestDirectory(manifest, directory, directory.name, seenPaths)
+                End If
+            Next
+        End If
+        Return manifest
+    End Function
+
+    Private Sub AddDirectManifestDirectory(manifest As DirectTapeCopyManifest,
+                                           directory As ltfsindex.directory,
+                                           relativePath As String,
+                                           seenPaths As HashSet(Of String))
+        If directory Is Nothing OrElse Not DirectTapeCopyProtocol.IsSafeRelativePath(relativePath) Then Throw New IO.InvalidDataException($"无效的 LTFS 目录路径：{relativePath}")
+        If Not seenPaths.Add(relativePath) Then Throw New IO.InvalidDataException($"重复的 LTFS 路径：{relativePath}")
+        manifest.Directories.Add(New DirectTapeCopyDirectory With {
+            .RelativePath = relativePath,
+            .ReadOnly = directory.readonly,
+            .CreationTime = directory.creationtime,
+            .ChangeTime = directory.changetime,
+            .ModifyTime = directory.modifytime,
+            .AccessTime = directory.accesstime,
+            .BackupTime = directory.backuptime})
+        For Each file In directory.EnumerateLazyFiles()
+            AddDirectManifestFile(manifest, file, CombineDirectPath(relativePath, file.name), seenPaths)
+        Next
+        For Each child In directory.EnumerateLazyDirectories()
+            AddDirectManifestDirectory(manifest, child, CombineDirectPath(relativePath, child.name), seenPaths)
+        Next
+    End Sub
+
+    Private Sub AddDirectManifestFile(manifest As DirectTapeCopyManifest,
+                                      file As ltfsindex.file,
+                                      relativePath As String,
+                                      seenPaths As HashSet(Of String))
+        If file Is Nothing OrElse Not DirectTapeCopyProtocol.IsSafeRelativePath(relativePath) Then Throw New IO.InvalidDataException($"无效的 LTFS 文件路径：{relativePath}")
+        If Not seenPaths.Add(relativePath) Then Throw New IO.InvalidDataException($"重复的 LTFS 路径：{relativePath}")
+        If file.openforwrite Then Throw New IO.InvalidDataException($"源文件尚未关闭写入，不能复制：{relativePath}")
+        ValidateDirectSourceExtents(file, manifest.SourceBlockSize, relativePath)
+        Dim result As New DirectTapeCopyFile With {
+            .Ordinal = manifest.Files.Count,
+            .RelativePath = relativePath,
+            .Length = file.length,
+            .ReadOnly = file.readonly,
+            .OpenForWrite = False,
+            .CreationTime = file.creationtime,
+            .ChangeTime = file.changetime,
+            .ModifyTime = file.modifytime,
+            .AccessTime = file.accesstime,
+            .BackupTime = file.backuptime,
+            .Symlink = file.symlink}
+        If file.extendedattributes IsNot Nothing Then
+            For Each value In file.extendedattributes
+                If value Is Nothing OrElse
+                   String.Equals(value.key, ltfsindex.file.xattr.ApplicationSpecific.CapacityRemain, StringComparison.OrdinalIgnoreCase) OrElse
+                   String.Equals(value.key, ltfsindex.file.xattr.ApplicationSpecific.Fragment, StringComparison.OrdinalIgnoreCase) Then Continue For
+                result.Xattrs.Add(New DirectTapeCopyXattr With {.Key = value.key, .Value = value.value})
+            Next
+        End If
+        If file.extentinfo IsNot Nothing Then
+            For Each extent In file.extentinfo.OrderBy(Function(value) value.fileoffset)
+                result.Extents.Add(New DirectTapeCopyExtent With {
+                    .FileOffset = extent.fileoffset,
+                    .ByteCount = extent.bytecount,
+                    .StartBlock = extent.startblock,
+                    .ByteOffset = extent.byteoffset,
+                    .Partition = GetPartitionNumber(CType(extent.partition, ltfslabel.PartitionLabel))})
+            Next
+        End If
+        manifest.Files.Add(result)
+    End Sub
+
+    Private Shared Sub ValidateDirectSourceExtents(file As ltfsindex.file, sourceBlockSize As Integer, relativePath As String)
+        If file.length < 0 Then Throw New IO.InvalidDataException($"源文件长度无效：{relativePath}")
+        If Not String.IsNullOrEmpty(file.symlink) Then Return
+        If file.length = 0 Then Return
+        If file.extentinfo Is Nothing OrElse file.extentinfo.Count = 0 Then Throw New IO.InvalidDataException($"源文件没有 extent：{relativePath}")
+        Dim expectedOffset As Long = 0
+        For Each extent In file.extentinfo.OrderBy(Function(value) value.fileoffset)
+            If extent.fileoffset <> expectedOffset OrElse extent.bytecount <= 0 OrElse extent.startblock < 0 OrElse
+               extent.byteoffset < 0 OrElse extent.byteoffset >= sourceBlockSize Then
+                Throw New IO.InvalidDataException($"源文件 extent 逻辑覆盖不连续：{relativePath}")
+            End If
+            If extent.bytecount > Long.MaxValue - expectedOffset Then Throw New IO.InvalidDataException($"源文件 extent 长度溢出：{relativePath}")
+            expectedOffset += extent.bytecount
+        Next
+        If expectedOffset <> file.length Then Throw New IO.InvalidDataException($"源文件 extent 总长度不匹配：{relativePath}")
+    End Sub
+
+    Private Shared Function CombineDirectPath(parent As String, name As String) As String
+        If String.IsNullOrEmpty(parent) Then Return name
+        Return parent.TrimEnd("\"c) & "\" & name
+    End Function
+
+    Private Sub StreamDirectTapeCopySource(manifest As DirectTapeCopyManifest,
+                                           request As DirectTapeCopyStartRequest,
+                                           cancellationToken As CancellationToken)
+        If TapeUtils.DriverTypeSetting <> TapeUtils.DriverType.LTO Then Throw New NotSupportedException("Source is not a physical LTO device")
+        Dim lookup = manifest.Files.ToDictionary(Function(file) file.Ordinal)
+        Dim requested = request.MaterialOrdinals.Distinct().ToList()
+        If Not requested.SequenceEqual(requested.OrderBy(Function(value) value)) Then Throw New IO.InvalidDataException("Target requested source files out of index order")
+        For Each ordinal In requested
+            If Not lookup.ContainsKey(ordinal) Then Throw New IO.InvalidDataException($"Target requested unknown source ordinal {ordinal}")
+        Next
+
+        Using producer As New DirectTapeCopyBridgeProducer(request.BridgeName)
+            Using cancellationToken.Register(Sub() producer.Cancel())
+                Dim reserved As Boolean = False
+                Dim prevented As Boolean = False
+                SyncLock TapeUtils.GetSCSIOperationLock(driveHandle)
+                    Try
+                        TapeUtils.ReserveUnit(driveHandle)
+                        reserved = True
+                        TapeUtils.PreventMediaRemoval(driveHandle)
+                        prevented = True
+                        TapeUtils.SetBlockSize(driveHandle, manifest.SourceBlockSize)
+                        For Each ordinal In requested
+                            cancellationToken.ThrowIfCancellationRequested()
+                            If schema Is Nothing OrElse schema.volumeuuid <> manifest.VolumeUuid OrElse schema.generationnumber <> manifest.GenerationNumber Then
+                                Throw New IO.IOException("源 LTFS 磁带或索引在复制过程中发生变化。")
+                            End If
+                            Dim file = lookup(ordinal)
+                            PrintMsg($"direct tape read: {file.RelativePath} ({IOManager.FormatSize(file.Length)})", LogOnly:=True, ForceLog:=True)
+                            producer.StreamFile(
+                                driveHandle,
+                                file,
+                                manifest.SourceBlockSize,
+                                Function(message)
+                                    Dim retry As Boolean = False
+                                    Invoke(Sub()
+                                               retry = MessageBox.Show(New Form With {.TopMost = True},
+                                                                       message & vbCrLf & vbCrLf & "只能重试或中止，不能忽略损坏数据。",
+                                                                       My.Resources.ResText_Warning,
+                                                                       MessageBoxButtons.RetryCancel,
+                                                                       MessageBoxIcon.Error) = DialogResult.Retry
+                                           End Sub)
+                                    Return retry
+                                End Function,
+                                cancellationToken)
+                        Next
+                        producer.Complete()
+                    Finally
+                        If prevented Then
+                            Try
+                                TapeUtils.AllowMediumRemoval(driveHandle)
+                            Catch
+                            End Try
+                        End If
+                        If reserved Then
+                            Try
+                                TapeUtils.ReleaseUnit(driveHandle)
+                            Catch
+                            End Try
+                        End If
+                    End Try
+                End SyncLock
+            End Using
+        End Using
+    End Sub
+
+    Private Function TryBeginDirectTapePaste() As Boolean
+        Dim data = Clipboard.GetDataObject()
+        If data Is Nothing OrElse Not data.GetDataPresent(DirectTapeCopyProtocol.ClipboardFormat, False) Then Return False
+        If Interlocked.CompareExchange(_directCopyPasteConnecting, 1, 0) <> 0 Then Return True
+        Try
+            If OfflineMode OrElse TapeUtils.DriverTypeSetting <> TapeUtils.DriverType.LTO Then Throw New NotSupportedException("直接磁带复制目前只支持物理 LTO 驱动器。")
+            If IsWriting OrElse _directCopyTargetSession IsNot Nothing Then Throw New InvalidOperationException("目标窗口已有复制或写带任务。")
+            If UnwrittenCount > 0 Then Throw New InvalidOperationException("直接磁带复制要求目标待写队列为空。")
+            If schema Is Nothing OrElse plabel Is Nothing Then Throw New InvalidOperationException("请先读取目标磁带 LTFS 索引。")
+            Dim targetRoot = TryCast(ListView1.Tag, ltfsindex.directory)
+            If targetRoot Is Nothing Then Throw New InvalidOperationException("请选择目标 LTFS 目录。")
+            Dim descriptorText = TryCast(data.GetData(DirectTapeCopyProtocol.ClipboardFormat, False), String)
+            Dim descriptor = JsonConvert.DeserializeObject(Of DirectTapeCopyClipboardDescriptor)(descriptorText)
+            Dim worker As New Thread(
+                Sub()
+                    Dim session As DirectTapeCopyTargetSession = Nothing
+                    Try
+                        session = DirectTapeCopyTargetSession.Connect(descriptor, 10000)
+                        ValidateDirectManifest(session.Manifest)
+                        If session.Manifest.VolumeUuid = schema.volumeuuid Then Throw New InvalidOperationException("源和目标 LTFS volume UUID 相同，已拒绝自复制。")
+                        Dim totalBytes = session.Manifest.Files.Aggregate(0L, Function(total, file) AddDirectCopyTotal(total, Math.Max(0L, file.Length)))
+                        Dim accepted As Boolean = False
+                        Invoke(Sub()
+                                   Dim summary = $"将 {session.Manifest.Files.Count} 个文件、{session.Manifest.Directories.Count} 个目录（{IOManager.FormatSize(totalBytes)}）复制到：{TextBoxSelectedPath.Text}{vbCrLf}{vbCrLf}不创建应用临时文件；缓存使用当前设置 {IOManager.FormatSize(My.Settings.LTFSWriter_PreLoadBytes)}。Windows 仍可能把共享内存分页。"
+                                   accepted = MessageBox.Show(New Form With {.TopMost = True}, summary, "直接磁带复制", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) = DialogResult.OK
+                               End Sub)
+                        If Not accepted Then Return
+                        Invoke(Sub()
+                                   StageDirectTapeCopy(session, targetRoot)
+                                   session = Nothing
+                               End Sub)
+                    Catch ex As Exception
+                        Try
+                            Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, ex.ToString(), My.Resources.ResText_Warning, MessageBoxButtons.OK, MessageBoxIcon.Error))
+                        Catch
+                        End Try
+                    Finally
+                        If session IsNot Nothing Then session.Dispose()
+                        Interlocked.Exchange(_directCopyPasteConnecting, 0)
+                    End Try
+                End Sub) With {.IsBackground = True, .Name = "LTFS direct-copy target connect"}
+            worker.Start()
+            Return True
+        Catch
+            Interlocked.Exchange(_directCopyPasteConnecting, 0)
+            Throw
+        End Try
+    End Function
+
+    Private Shared Sub ValidateDirectManifest(manifest As DirectTapeCopyManifest)
+        If manifest Is Nothing OrElse manifest.Version <> DirectTapeCopyProtocol.ProtocolVersion OrElse manifest.SourceBlockSize <= 0 Then Throw New IO.InvalidDataException("Direct-copy manifest is invalid")
+        Dim expectedOrdinal As Long = 0
+        Dim paths As New HashSet(Of String)(StringComparer.Ordinal)
+        For Each directory In manifest.Directories
+            If directory Is Nothing OrElse Not DirectTapeCopyProtocol.IsSafeRelativePath(directory.RelativePath) OrElse Not paths.Add(directory.RelativePath) Then Throw New IO.InvalidDataException("Direct-copy manifest contains an invalid directory path")
+        Next
+        For Each file In manifest.Files
+            If file Is Nothing OrElse file.Ordinal <> expectedOrdinal OrElse Not DirectTapeCopyProtocol.IsSafeRelativePath(file.RelativePath) OrElse Not paths.Add(file.RelativePath) Then Throw New IO.InvalidDataException("Direct-copy manifest contains an invalid file entry")
+            ValidateDirectManifestExtents(file, manifest.SourceBlockSize)
+            expectedOrdinal += 1
+        Next
+    End Sub
+
+    Private Shared Sub ValidateDirectManifestExtents(file As DirectTapeCopyFile, sourceBlockSize As Integer)
+        If file.Length < 0 Then Throw New IO.InvalidDataException($"Invalid direct-copy length: {file.RelativePath}")
+        If Not String.IsNullOrEmpty(file.Symlink) OrElse file.Length = 0 Then Return
+        If file.Extents Is Nothing OrElse file.Extents.Count = 0 Then Throw New IO.InvalidDataException($"Direct-copy file has no extents: {file.RelativePath}")
+        Dim expected As Long = 0
+        For Each extent In file.Extents.OrderBy(Function(value) value.FileOffset)
+            If extent.FileOffset <> expected OrElse extent.ByteCount <= 0 OrElse extent.StartBlock < 0 OrElse extent.ByteOffset < 0 OrElse extent.ByteOffset >= sourceBlockSize OrElse extent.Partition < 0 OrElse extent.Partition > Byte.MaxValue Then Throw New IO.InvalidDataException($"Invalid direct-copy extent: {file.RelativePath}")
+            If extent.ByteCount > Long.MaxValue - expected Then Throw New IO.InvalidDataException($"Direct-copy extent overflow: {file.RelativePath}")
+            expected += extent.ByteCount
+        Next
+        If expected <> file.Length Then Throw New IO.InvalidDataException($"Direct-copy extent coverage mismatch: {file.RelativePath}")
+    End Sub
+
+    Private Sub StageDirectTapeCopy(session As DirectTapeCopyTargetSession, targetRoot As ltfsindex.directory)
+        Dim manifest = session.Manifest
+        Dim directoryMap As New Dictionary(Of String, ltfsindex.directory)(StringComparer.Ordinal) From {{String.Empty, targetRoot}}
+        For Each entry In manifest.Directories
+            Dim directory = EnsureDirectTargetDirectory(targetRoot, entry.RelativePath, directoryMap)
+            directory.readonly = entry.ReadOnly
+            directory.creationtime = entry.CreationTime
+            directory.changetime = entry.ChangeTime
+            directory.modifytime = entry.ModifyTime
+            directory.accesstime = entry.AccessTime
+            directory.backuptime = entry.BackupTime
+        Next
+
+        Dim staged As New List(Of FileRecord)
+        Dim overwrite = 覆盖已有文件ToolStripMenuItem.Checked
+        For Each entry In manifest.Files
+            Dim separator = entry.RelativePath.LastIndexOf("\"c)
+            Dim parentPath = If(separator < 0, String.Empty, entry.RelativePath.Substring(0, separator))
+            Dim name = If(separator < 0, entry.RelativePath, entry.RelativePath.Substring(separator + 1))
+            Dim parent = EnsureDirectTargetDirectory(targetRoot, parentPath, directoryMap)
+            Dim existing = parent.FindFilesByName(name).FirstOrDefault(Function(value) String.Equals(value.name, name, StringComparison.Ordinal))
+            If existing IsNot Nothing AndAlso Not overwrite Then Continue For
+            Dim targetFile As New ltfsindex.file With {
+                .name = name,
+                .fileuid = -1,
+                .length = If(String.IsNullOrEmpty(entry.Symlink), entry.Length, 0L),
+                .readonly = entry.ReadOnly,
+                .openforwrite = False,
+                .creationtime = entry.CreationTime,
+                .changetime = entry.ChangeTime,
+                .modifytime = entry.ModifyTime,
+                .accesstime = entry.AccessTime,
+                .backuptime = entry.BackupTime,
+                .symlink = entry.Symlink,
+                .extentinfo = New List(Of ltfsindex.file.extent),
+                .extendedattributes = New List(Of ltfsindex.file.xattr)}
+            Dim trustedHashes As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+            If entry.Xattrs IsNot Nothing Then
+                For Each value In entry.Xattrs
+                    If value Is Nothing OrElse String.IsNullOrEmpty(value.Key) OrElse
+                       String.Equals(value.Key, ltfsindex.file.xattr.ApplicationSpecific.CapacityRemain, StringComparison.OrdinalIgnoreCase) OrElse
+                       String.Equals(value.Key, ltfsindex.file.xattr.ApplicationSpecific.Fragment, StringComparison.OrdinalIgnoreCase) Then Continue For
+                    targetFile.extendedattributes.Add(New ltfsindex.file.xattr With {.key = value.Key, .value = value.Value})
+                    Dim hashName = DirectHashName(value.Key)
+                    If hashName IsNot Nothing AndAlso Not String.IsNullOrEmpty(value.Value) Then trustedHashes(hashName) = value.Value
+                Next
+            End If
+            Dim record As New FileRecord With {
+                .ParentDirectory = parent,
+                .File = targetFile,
+                .FileOffset = 0,
+                .SegmentLength = targetFile.length,
+                .DirectCopyOrdinal = entry.Ordinal,
+                .DirectCopyTrustedHashes = trustedHashes,
+                .DirectCopyExistingFile = existing,
+                .IsOpened = True}
+            SyncLock parent.UnwrittenFiles
+                parent.UnwrittenFiles.Add(targetFile)
+            End SyncLock
+            AddPendingRecord(record)
+            staged.Add(record)
+        Next
+        If staged.Count = 0 Then
+            TotalBytesUnindexed = Math.Max(1, TotalBytesUnindexed)
+            Modified = True
+            session.Dispose()
+            RefreshDisplay()
+            Return
+        End If
+        _directCopyTargetSession = session
+        _directCopyManifest = manifest
+        RefreshDisplay()
+        写入数据ToolStripMenuItem_Click(Me, EventArgs.Empty)
+    End Sub
+
+    Private Function EnsureDirectTargetDirectory(root As ltfsindex.directory,
+                                                 relativePath As String,
+                                                 directoryMap As Dictionary(Of String, ltfsindex.directory)) As ltfsindex.directory
+        If String.IsNullOrEmpty(relativePath) Then Return root
+        Dim existingMapped As ltfsindex.directory = Nothing
+        If directoryMap.TryGetValue(relativePath, existingMapped) Then Return existingMapped
+        Dim current = root
+        Dim currentPath = String.Empty
+        For Each directoryName As String In relativePath.Split(New Char() {"\"c}, StringSplitOptions.RemoveEmptyEntries)
+            currentPath = CombineDirectPath(currentPath, directoryName)
+            If directoryMap.TryGetValue(currentPath, existingMapped) Then
+                current = existingMapped
+                Continue For
+            End If
+            Dim child = current.FindDirectoryByName(directoryName)
+            If child Is Nothing Then
+                child = New ltfsindex.directory With {
+                    .name = directoryName,
+                    .fileuid = -1,
+                    .creationtime = Now.ToUniversalTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z"),
+                    .changetime = Now.ToUniversalTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z"),
+                    .modifytime = Now.ToUniversalTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z"),
+                    .accesstime = Now.ToUniversalTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z"),
+                    .backuptime = Now.ToUniversalTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z")}
+                current.AddDirectory(child)
+            End If
+            directoryMap(currentPath) = child
+            current = child
+        Next
+        Return current
+    End Function
+
+    Private Shared Function DirectHashName(xattrKey As String) As String
+        Select Case xattrKey
+            Case ltfsindex.file.xattr.HashType.SHA1 : Return "SHA1"
+            Case ltfsindex.file.xattr.HashType.SHA256 : Return "SHA256"
+            Case ltfsindex.file.xattr.HashType.SHA512 : Return "SHA512"
+            Case ltfsindex.file.xattr.HashType.MD5 : Return "MD5"
+            Case ltfsindex.file.xattr.HashType.CRC32 : Return "CRC32"
+            Case ltfsindex.file.xattr.HashType.BLAKE3 : Return "BLAKE3"
+            Case ltfsindex.file.xattr.HashType.XxHash3 : Return "XxHash3"
+            Case ltfsindex.file.xattr.HashType.XxHash128 : Return "XxHash128"
+        End Select
+        Return Nothing
+    End Function
+
+    Private Sub LTFSWriter_DirectCopyClosed(sender As Object, e As FormClosedEventArgs) Handles MyBase.FormClosed
+        If _directCopySourceOffer IsNot Nothing Then
+            _directCopySourceOffer.Dispose()
+            _directCopySourceOffer = Nothing
+        End If
+        If _directCopyTargetSession IsNot Nothing Then
+            _directCopyTargetSession.Dispose()
+            _directCopyTargetSession = Nothing
+        End If
+    End Sub
+
     Private Sub 剪切文件ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 剪切文件ToolStripMenuItem.Click
         Dim selectedItems As List(Of ListViewItem) = GetSelectedListViewItems()
         If selectedItems.Count > 0 Then
@@ -12754,6 +13386,12 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 粘贴选中ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 粘贴选中ToolStripMenuItem.Click
+        Try
+            If TryBeginDirectTapePaste() Then Return
+        Catch ex As Exception
+            MessageBox.Show(New Form With {.TopMost = True}, ex.Message, My.Resources.ResText_Warning, MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            Return
+        End Try
         If TreeView1.SelectedNode IsNot Nothing Then
             Dim droot As ltfsindex.directory = DirectCast(TreeView1.SelectedNode.Tag, ltfsindex.directory)
             Dim filesToPaste As New List(Of ltfsindex.file)
@@ -14100,6 +14738,16 @@ Public Class LTFSWriter
                 If Not AllowOperation Then Exit Sub
                 If ListView1.Tag Is Nothing Then Exit Sub
                 If e.Control Then
+                    Try
+                        If TryBeginDirectTapePaste() Then
+                            e.Handled = True
+                            e.SuppressKeyPress = True
+                            Exit Select
+                        End If
+                    Catch ex As Exception
+                        MessageBox.Show(New Form With {.TopMost = True}, ex.Message, My.Resources.ResText_Warning, MessageBoxButtons.OK, MessageBoxIcon.Warning)
+                        Exit Select
+                    End Try
                     Dim Paths As String() = Nothing
                     If Clipboard.ContainsText Then
                         Paths = Clipboard.GetText().Split({vbCr, vbLf}, StringSplitOptions.RemoveEmptyEntries)
@@ -14121,6 +14769,12 @@ Public Class LTFSWriter
                         End If
                     End If
                     粘贴选中ToolStripMenuItem_Click(sender, e)
+                End If
+            Case Keys.C
+                If e.Control AndAlso Not e.Alt AndAlso Not e.Shift Then
+                    CopySelectedToAnotherTape(sender, e)
+                    e.Handled = True
+                    e.SuppressKeyPress = True
                 End If
             Case Keys.X
                 If e.Control Then
