@@ -28,6 +28,25 @@
     }
 
     #[test]
+    fn bridge_validation_accepts_multi_gigabyte_capacity() {
+        let capacity = 30u64 * 1024 * 1024 * 1024;
+        let config = LfrBridgeConfig {
+            struct_size: std::mem::size_of::<LfrBridgeConfig>() as u32,
+            abi_version: LFR_BRIDGE_ABI_VERSION,
+            slot_size: 512 * 1024,
+            reserved: 0,
+            capacity_bytes: capacity,
+            hash_mask: 0,
+            reserved2: 0,
+        };
+        let (slot_count, slot_stride, mapping_size) = bridge_validate_config(&config).unwrap();
+        assert_eq!(slot_count, 61440);
+        assert!(slot_stride >= config.slot_size as usize);
+        assert!(mapping_size as u64 >= capacity);
+        assert!(mapping_size as u64 <= BRIDGE_MAX_MAPPING_BYTES);
+    }
+
+    #[test]
     fn bridge_ring_round_trip_preserves_order_and_hashes() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1390,4 +1409,3 @@
         }
         Ok(())
     }
-

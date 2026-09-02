@@ -137,8 +137,8 @@ const BRIDGE_MAGIC: u64 = 0x3145_4744_4952_424C; // "LBRIDGE1"
 const BRIDGE_ERROR_CAPACITY: usize = 1024;
 const BRIDGE_HASH_CAPACITY: usize = 768;
 const BRIDGE_WAIT_SLICE_MS: u32 = 100;
-const BRIDGE_MAX_SLOT_COUNT: usize = 4096;
-const BRIDGE_MAX_MAPPING_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const BRIDGE_MAX_SLOT_COUNT: u64 = i32::MAX as u64;
+const BRIDGE_MAX_MAPPING_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 #[repr(C)]
 pub struct LfrBridgeConfig {
@@ -386,5 +386,4 @@ pub struct LfrContext {
     worker: Mutex<Option<JoinHandle<()>>>,
     worker_watchdog: Mutex<Option<JoinHandle<()>>>,
 }
-
 

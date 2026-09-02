@@ -252,10 +252,13 @@ fn bridge_validate_config(config: &LfrBridgeConfig) -> Result<(usize, usize, usi
     {
         return Err(LFR_INVALID);
     }
-    let slot_count = (config.capacity_bytes / config.slot_size as u64) as usize;
-    if !(2..=BRIDGE_MAX_SLOT_COUNT).contains(&slot_count) {
+    let slot_count = config.capacity_bytes / config.slot_size as u64;
+    if !(2..=BRIDGE_MAX_SLOT_COUNT).contains(&slot_count)
+        || slot_count > usize::MAX as u64
+    {
         return Err(LFR_INVALID);
     }
+    let slot_count = slot_count as usize;
     let (slot_stride, mapping_size) =
         bridge_layout(config.slot_size as usize, slot_count).ok_or(LFR_INVALID)?;
     if mapping_size as u64 > BRIDGE_MAX_MAPPING_BYTES {
@@ -409,7 +412,7 @@ pub unsafe extern "system" fn lfr_bridge_open_producer(
         || header.header_size as usize
             != bridge_align_up(std::mem::size_of::<BridgeHeader>(), 64).unwrap()
         || header.slot_count < 2
-        || header.slot_count as usize > BRIDGE_MAX_SLOT_COUNT
+        || header.slot_count as u64 > BRIDGE_MAX_SLOT_COUNT
     {
         unsafe {
             UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
@@ -1246,4 +1249,3 @@ pub unsafe extern "system" fn lfr_bridge_destroy(context: *mut LfrBridgeContext)
     }
     drop(context);
 }
-
