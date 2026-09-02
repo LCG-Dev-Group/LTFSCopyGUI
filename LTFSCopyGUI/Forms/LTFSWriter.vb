@@ -5680,8 +5680,29 @@ Public Class LTFSWriter
         Dim plan As List(Of ExtractionExtentWork) = BuildExtractionPlan(requests, fileWorks)
         PrintMsg($"Extraction schedule: files={If(requests Is Nothing, 0, requests.Count)}, physical extents={plan.Count}", LogOnly:=True)
         If StopFlag Then Return
+        Dim extractionFileTotal As Long = If(requests Is Nothing, 0L, requests.Count)
+        Dim nextExtractionFileNumber As Long = Math.Max(0L, CurrentFilesProcessed)
+        Dim extractionFileNumbers As New Dictionary(Of ExtractionFileWork, Long)
+        Dim currentExtractionFile As ExtractionFileWork = Nothing
         For Each extentWork As ExtractionExtentWork In plan
             If StopFlag Then Exit For
+            Dim extractionFileNumber As Long = 0
+            If Not extractionFileNumbers.TryGetValue(extentWork.FileWork, extractionFileNumber) Then
+                nextExtractionFileNumber += 1
+                extractionFileNumber = nextExtractionFileNumber
+                extractionFileNumbers.Add(extentWork.FileWork, extractionFileNumber)
+            End If
+            If currentExtractionFile IsNot extentWork.FileWork Then
+                Dim request As ExtractionFileRequest = extentWork.FileWork.Request
+                Dim fileName As String = If(request Is Nothing OrElse request.FileIndex Is Nothing,
+                                            String.Empty,
+                                            If(request.FileIndex.name, String.Empty))
+                Dim filePath As String = If(request Is Nothing, fileName, request.FileName)
+                PrintMsg($"{My.Resources.ResText_Restoring} [{extractionFileNumber}/{extractionFileTotal}] {fileName}",
+                         False,
+                         $"{My.Resources.ResText_Restoring} [{extractionFileNumber}/{extractionFileTotal}] {filePath}")
+                currentExtractionFile = extentWork.FileWork
+            End If
             RestoreExtractionExtent(extentWork, GetValidationBlockSize())
         Next
         If StopFlag Then Return
@@ -6338,7 +6359,6 @@ Public Class LTFSWriter
                         UnwrittenCountOverrideValue = CULng(Math.Max(0, totalFiles))
                         StartTime = Now
                         PrintMsg(My.Resources.ResText_RestFile)
-                        Dim c As Long = 0
                         TapeUtils.ReserveUnit(driveHandle)
                         TapeUtils.PreventMediaRemoval(driveHandle)
                         RestorePosition = New TapeUtils.PositionData(driveHandle)
@@ -6357,8 +6377,6 @@ Public Class LTFSWriter
                             TraverseRestoreFiles(selectedDir, outputDirectory,
                                 Sub(fr As FileRecord)
                                     If StopFlag Then Return
-                                    c += 1
-                                    PrintMsg($"{My.Resources.ResText_Restoring} [{c}/{totalFiles}] {fr.File.name}", False, $"{My.Resources.ResText_Restoring} [{c}/{totalFiles}] {fr.SourcePath}")
                                     requests.Add(New ExtractionFileRequest With {
                                                      .FileName = fr.SourcePath,
                                                      .FileIndex = fr.File})
@@ -6371,6 +6389,12 @@ Public Class LTFSWriter
                                 False)
                         Next
                         If Not StopFlag Then
+                            UnwrittenSizeOverrideValue = 0
+                            For Each request As ExtractionFileRequest In requests
+                                If request IsNot Nothing AndAlso request.FileIndex IsNot Nothing Then
+                                    UnwrittenSizeOverrideValue = CULng(UnwrittenSizeOverrideValue + Math.Max(0L, request.FileIndex.length))
+                                End If
+                            Next
                             RestoreFilesInTapeOrder(requests,
                                                     selectedPath,
                                                     directoryRequests)
@@ -13162,7 +13186,7 @@ Public Class LTFSWriter
                         Dim totalBytes = session.Manifest.Files.Aggregate(0L, Function(total, file) AddDirectCopyTotal(total, Math.Max(0L, file.Length)))
                         Dim accepted As Boolean = False
                         Invoke(Sub()
-                                   Dim summary = $"将 {session.Manifest.Files.Count} 个文件、{session.Manifest.Directories.Count} 个目录（{IOManager.FormatSize(totalBytes)}）复制到：{TextBoxSelectedPath.Text}{vbCrLf}{vbCrLf}不创建应用临时文件；缓存使用当前设置 {IOManager.FormatSize(My.Settings.LTFSWriter_PreLoadBytes)}。Windows 仍可能把共享内存分页。"
+                                   Dim summary = $"将 {session.Manifest.Files.Count} 个文件、{session.Manifest.Directories.Count} 个目录（{IOManager.FormatSize(totalBytes)}）复制到：{TextBoxSelectedPath.Text}{vbCrLf}{vbCrLf}缓存 {IOManager.FormatSize(My.Settings.LTFSWriter_PreLoadBytes)}。"
                                    accepted = MessageBox.Show(New Form With {.TopMost = True}, summary, "直接磁带复制", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) = DialogResult.OK
                                End Sub)
                         If Not accepted Then Return
