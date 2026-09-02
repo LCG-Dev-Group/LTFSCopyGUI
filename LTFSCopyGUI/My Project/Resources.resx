@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <root>
   <!-- 
     Microsoft ResX Schema 
@@ -1031,5 +1031,20 @@ P0Size和P1Size如果都不为65535，则两者总和不得超过磁带容量</v
   <data name="PropertyDescription_LTFSWriter_ClearBeforeOverwrite" xml:space="preserve">
     <value>覆盖前清空待覆盖文件
 如需提取文件碎片，请禁用</value>
+  </data>
+  <data name="ResText_DirectCopyCopied" xml:space="preserve">
+    <value>已复制跨磁带任务：</value>
+  </data>
+  <data name="ResText_DirectCopyCopied_files" xml:space="preserve">
+    <value>个文件</value>
+  </data>
+  <data name="ResText_DirectCopyCopied_directories" xml:space="preserve">
+    <value>个目录</value>
+  </data>
+  <data name="ResText_DirectCopyCopied_retry" xml:space="preserve">
+    <value>只能重试或中止，不能忽略损坏数据。</value>
+  </data>
+  <data name="ResText_DirectCopy_Title" xml:space="preserve">
+    <value>直接磁带复制</value>
   </data>
 </root>

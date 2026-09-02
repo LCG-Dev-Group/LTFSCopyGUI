@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <root>
   <!-- 
     Microsoft ResX Schema 
@@ -990,5 +990,20 @@ Enable only when memory usage is abnormally high</value>
   <data name="PropertyDescription_LTFSWriter_ClearBeforeOverwrite" xml:space="preserve">
     <value>Clear file before overwrite
 Disable when file fragment is intended to restore</value>
+  </data>
+  <data name="ResText_DirectCopyCopied" xml:space="preserve">
+    <value>Copied direct copy task:</value>
+  </data>
+  <data name="ResText_DirectCopyCopied_files" xml:space="preserve">
+    <value>files</value>
+  </data>
+  <data name="ResText_DirectCopyCopied_directories" xml:space="preserve">
+    <value>directories</value>
+  </data>
+  <data name="ResText_DirectCopyCopied_retry" xml:space="preserve">
+    <value>Can only retry or stop.</value>
+  </data>
+  <data name="ResText_DirectCopy_Title" xml:space="preserve">
+    <value>Direct Tape Copy</value>
   </data>
 </root>

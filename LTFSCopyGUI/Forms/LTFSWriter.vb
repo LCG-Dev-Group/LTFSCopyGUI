@@ -1829,7 +1829,6 @@ Public Class LTFSWriter
         End If
         FileDroper = New FileDropHandler(ListView1)
         Load_Settings()
-        InstallDirectTapeCopyMenus()
         If OfflineMode Then
             LoadComplete = True
             Exit Sub
@@ -12965,29 +12964,16 @@ Public Class LTFSWriter
         TapeUtils.SetEncryption(driveHandle, EncryptionKey)
     End Sub
 
-    Private Sub InstallDirectTapeCopyMenus()
-        If _directCopyMenuItem IsNot Nothing Then Return
-        _directCopyMenuItem = New ToolStripMenuItem("复制到另一磁带") With {
-            .ShortcutKeyDisplayString = "Ctrl+C"}
-        AddHandler _directCopyMenuItem.Click, AddressOf CopySelectedToAnotherTape
-        ContextMenuStrip1.Items.Add(_directCopyMenuItem)
-
-        Dim treeCopyItem As New ToolStripMenuItem("复制到另一磁带") With {
-            .ShortcutKeyDisplayString = "Ctrl+C"}
-        AddHandler treeCopyItem.Click, AddressOf CopySelectedToAnotherTape
-        ContextMenuStrip3.Items.Add(treeCopyItem)
-    End Sub
-
-    Private Sub CopySelectedToAnotherTape(sender As Object, e As EventArgs)
+    Private Sub CopySelectedToAnotherTape(sender As Object, e As EventArgs) Handles 复制到另一磁带ToolStripMenuItem1.Click, 复制到另一磁带ToolStripMenuItem.Click
         Try
             If OfflineMode OrElse TapeUtils.DriverTypeSetting <> TapeUtils.DriverType.LTO Then
-                Throw New NotSupportedException("直接磁带复制目前只支持物理 LTO 驱动器。")
+                Throw New NotSupportedException("Direct tape copy now only support LTO drive.")
             End If
-            If schema Is Nothing OrElse plabel Is Nothing OrElse plabel.blocksize <= 0 Then Throw New InvalidOperationException("请先读取源磁带 LTFS 索引。")
-            If IsWriting Then Throw New InvalidOperationException("源窗口正在执行其他写带任务。")
+            If schema Is Nothing OrElse plabel Is Nothing OrElse plabel.blocksize <= 0 Then Throw New InvalidOperationException("Please read index first.")
+            If IsWriting Then Throw New InvalidOperationException("Source writer have active tasks.")
 
             Dim manifest = BuildDirectTapeCopyManifest()
-            If manifest.Files.Count = 0 AndAlso manifest.Directories.Count = 0 Then Throw New InvalidOperationException("没有选中可复制的已写入文件或目录。")
+            If manifest.Files.Count = 0 AndAlso manifest.Directories.Count = 0 Then Throw New InvalidOperationException("No files or directories can write.")
             If _directCopySourceOffer IsNot Nothing Then _directCopySourceOffer.Dispose()
             Dim sourceVolume = manifest.VolumeUuid
             Dim sourceGeneration = manifest.GenerationNumber
@@ -13001,7 +12987,7 @@ Public Class LTFSWriter
             data.SetData(DirectTapeCopyProtocol.ClipboardFormat, False, descriptorText)
             Clipboard.SetDataObject(data, True)
             Dim totalBytes = manifest.Files.Aggregate(0L, Function(total, file) AddDirectCopyTotal(total, Math.Max(0L, file.Length)))
-            PrintMsg($"已复制跨磁带任务：{manifest.Files.Count} 个文件，{manifest.Directories.Count} 个目录，{IOManager.FormatSize(totalBytes)}。请在目标磁带目录按 Ctrl+V。",
+            PrintMsg($"{My.Resources.ResText_DirectCopyCopied}: {manifest.Files.Count} {My.Resources.ResText_DirectCopyCopied_files}, {manifest.Directories.Count} {My.Resources.ResText_DirectCopyCopied_directories}, {IOManager.FormatSize(totalBytes)}",
                      LogOnly:=False,
                      ForceLog:=True)
         Catch ex As Exception
@@ -13059,8 +13045,8 @@ Public Class LTFSWriter
                                            directory As ltfsindex.directory,
                                            relativePath As String,
                                            seenPaths As HashSet(Of String))
-        If directory Is Nothing OrElse Not DirectTapeCopyProtocol.IsSafeRelativePath(relativePath) Then Throw New IO.InvalidDataException($"无效的 LTFS 目录路径：{relativePath}")
-        If Not seenPaths.Add(relativePath) Then Throw New IO.InvalidDataException($"重复的 LTFS 路径：{relativePath}")
+        If directory Is Nothing OrElse Not DirectTapeCopyProtocol.IsSafeRelativePath(relativePath) Then Throw New IO.InvalidDataException($"Invalid LTFS path: {relativePath}")
+        If Not seenPaths.Add(relativePath) Then Throw New IO.InvalidDataException($"Duplicated LTFS path: {relativePath}")
         manifest.Directories.Add(New DirectTapeCopyDirectory With {
             .RelativePath = relativePath,
             .ReadOnly = directory.readonly,
@@ -13081,9 +13067,9 @@ Public Class LTFSWriter
                                       file As ltfsindex.file,
                                       relativePath As String,
                                       seenPaths As HashSet(Of String))
-        If file Is Nothing OrElse Not DirectTapeCopyProtocol.IsSafeRelativePath(relativePath) Then Throw New IO.InvalidDataException($"无效的 LTFS 文件路径：{relativePath}")
-        If Not seenPaths.Add(relativePath) Then Throw New IO.InvalidDataException($"重复的 LTFS 路径：{relativePath}")
-        If file.openforwrite Then Throw New IO.InvalidDataException($"源文件尚未关闭写入，不能复制：{relativePath}")
+        If file Is Nothing OrElse Not DirectTapeCopyProtocol.IsSafeRelativePath(relativePath) Then Throw New IO.InvalidDataException($"Invalid LTFS path: {relativePath}")
+        If Not seenPaths.Add(relativePath) Then Throw New IO.InvalidDataException($"Duplicated LTFS path:{relativePath}")
+        If file.openforwrite Then Throw New IO.InvalidDataException($"Cannot copy a unwritten file: {relativePath}")
         ValidateDirectSourceExtents(file, manifest.SourceBlockSize, relativePath)
         Dim result As New DirectTapeCopyFile With {
             .Ordinal = manifest.Files.Count,
@@ -13119,20 +13105,20 @@ Public Class LTFSWriter
     End Sub
 
     Private Shared Sub ValidateDirectSourceExtents(file As ltfsindex.file, sourceBlockSize As Integer, relativePath As String)
-        If file.length < 0 Then Throw New IO.InvalidDataException($"源文件长度无效：{relativePath}")
+        If file.length < 0 Then Throw New IO.InvalidDataException($"Source file length invalid: {relativePath}")
         If Not String.IsNullOrEmpty(file.symlink) Then Return
         If file.length = 0 Then Return
-        If file.extentinfo Is Nothing OrElse file.extentinfo.Count = 0 Then Throw New IO.InvalidDataException($"源文件没有 extent：{relativePath}")
+        If file.extentinfo Is Nothing OrElse file.extentinfo.Count = 0 Then Throw New IO.InvalidDataException($"Source file doesn't have extent: {relativePath}")
         Dim expectedOffset As Long = 0
         For Each extent In file.extentinfo.OrderBy(Function(value) value.fileoffset)
             If extent.fileoffset <> expectedOffset OrElse extent.bytecount <= 0 OrElse extent.startblock < 0 OrElse
                extent.byteoffset < 0 OrElse extent.byteoffset >= sourceBlockSize Then
-                Throw New IO.InvalidDataException($"源文件 extent 逻辑覆盖不连续：{relativePath}")
+                Throw New IO.InvalidDataException($"Source file extent not trivial: {relativePath}")
             End If
-            If extent.bytecount > Long.MaxValue - expectedOffset Then Throw New IO.InvalidDataException($"源文件 extent 长度溢出：{relativePath}")
+            If extent.bytecount > Long.MaxValue - expectedOffset Then Throw New IO.InvalidDataException($"Source file extent overflowed: {relativePath}")
             expectedOffset += extent.bytecount
         Next
-        If expectedOffset <> file.length Then Throw New IO.InvalidDataException($"源文件 extent 总长度不匹配：{relativePath}")
+        If expectedOffset <> file.length Then Throw New IO.InvalidDataException($"Source file extent length mismatch: {relativePath}")
     End Sub
 
     Private Shared Function CombineDirectPath(parent As String, name As String) As String
@@ -13165,7 +13151,7 @@ Public Class LTFSWriter
                         For Each ordinal In requested
                             cancellationToken.ThrowIfCancellationRequested()
                             If schema Is Nothing OrElse schema.volumeuuid <> manifest.VolumeUuid OrElse schema.generationnumber <> manifest.GenerationNumber Then
-                                Throw New IO.IOException("源 LTFS 磁带或索引在复制过程中发生变化。")
+                                Throw New IO.IOException("Source tape changed when copy.")
                             End If
                             Dim file = lookup(ordinal)
                             PrintMsg($"direct tape read: {file.RelativePath} ({IOManager.FormatSize(file.Length)})", LogOnly:=True, ForceLog:=True)
@@ -13177,7 +13163,7 @@ Public Class LTFSWriter
                                     Dim retry As Boolean = False
                                     Invoke(Sub()
                                                retry = MessageBox.Show(New Form With {.TopMost = True},
-                                                                       message & vbCrLf & vbCrLf & "只能重试或中止，不能忽略损坏数据。",
+                                                                       message & vbCrLf & vbCrLf & My.Resources.ResText_DirectCopyCopied_retry,
                                                                        My.Resources.ResText_Warning,
                                                                        MessageBoxButtons.RetryCancel,
                                                                        MessageBoxIcon.Error) = DialogResult.Retry
@@ -13211,12 +13197,12 @@ Public Class LTFSWriter
         If data Is Nothing OrElse Not data.GetDataPresent(DirectTapeCopyProtocol.ClipboardFormat, False) Then Return False
         If Interlocked.CompareExchange(_directCopyPasteConnecting, 1, 0) <> 0 Then Return True
         Try
-            If OfflineMode OrElse TapeUtils.DriverTypeSetting <> TapeUtils.DriverType.LTO Then Throw New NotSupportedException("直接磁带复制目前只支持物理 LTO 驱动器。")
-            If IsWriting OrElse _directCopyTargetSession IsNot Nothing Then Throw New InvalidOperationException("目标窗口已有复制或写带任务。")
-            If UnwrittenCount > 0 Then Throw New InvalidOperationException("直接磁带复制要求目标待写队列为空。")
-            If schema Is Nothing OrElse plabel Is Nothing Then Throw New InvalidOperationException("请先读取目标磁带 LTFS 索引。")
+            If OfflineMode OrElse TapeUtils.DriverTypeSetting <> TapeUtils.DriverType.LTO Then Throw New NotSupportedException("Direct tape copy now only support LTO drive.")
+            If IsWriting OrElse _directCopyTargetSession IsNot Nothing Then Throw New InvalidOperationException("Target writer have active tasks.")
+            If UnwrittenCount > 0 Then Throw New InvalidOperationException("Direct tape copy requires target tape haven't unwritten changes.")
+            If schema Is Nothing OrElse plabel Is Nothing Then Throw New InvalidOperationException("Please read target tape index first.")
             Dim targetRoot = TryCast(ListView1.Tag, ltfsindex.directory)
-            If targetRoot Is Nothing Then Throw New InvalidOperationException("请选择目标 LTFS 目录。")
+            If targetRoot Is Nothing Then Throw New InvalidOperationException("Please select a LTFS directory.")
             Dim descriptorText = TryCast(data.GetData(DirectTapeCopyProtocol.ClipboardFormat, False), String)
             Dim descriptor = JsonConvert.DeserializeObject(Of DirectTapeCopyClipboardDescriptor)(descriptorText)
             Dim worker As New Thread(
@@ -13225,12 +13211,12 @@ Public Class LTFSWriter
                     Try
                         session = DirectTapeCopyTargetSession.Connect(descriptor, 10000)
                         ValidateDirectManifest(session.Manifest)
-                        If session.Manifest.VolumeUuid = schema.volumeuuid Then Throw New InvalidOperationException("源和目标 LTFS volume UUID 相同，已拒绝自复制。")
+                        If session.Manifest.VolumeUuid = schema.volumeuuid Then Throw New InvalidOperationException("Cannot copy to a same tape. UUIDs are equal.")
                         Dim totalBytes = session.Manifest.Files.Aggregate(0L, Function(total, file) AddDirectCopyTotal(total, Math.Max(0L, file.Length)))
                         Dim accepted As Boolean = False
                         Invoke(Sub()
-                                   Dim summary = $"将 {session.Manifest.Files.Count} 个文件、{session.Manifest.Directories.Count} 个目录（{IOManager.FormatSize(totalBytes)}）复制到：{TextBoxSelectedPath.Text}{vbCrLf}{vbCrLf}缓存 {IOManager.FormatSize(My.Settings.LTFSWriter_PreLoadBytes)}。"
-                                   accepted = MessageBox.Show(New Form With {.TopMost = True}, summary, "直接磁带复制", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) = DialogResult.OK
+                                   Dim summary = $"{session.Manifest.Files.Count} {My.Resources.ResText_DirectCopyCopied_files}, {session.Manifest.Directories.Count} {My.Resources.ResText_DirectCopyCopied_directories} ({IOManager.FormatSize(totalBytes)}){vbCrLf} -> {TextBoxSelectedPath.Text}"
+                                   accepted = MessageBox.Show(New Form With {.TopMost = True}, summary, My.Resources.ResText_DirectCopy_Title, MessageBoxButtons.OKCancel, MessageBoxIcon.Question) = DialogResult.OK
                                End Sub)
                         If Not accepted Then Return
                         Invoke(Sub()

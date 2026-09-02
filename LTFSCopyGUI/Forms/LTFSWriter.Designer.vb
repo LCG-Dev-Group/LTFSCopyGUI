@@ -40,6 +40,7 @@ Partial Class LTFSWriter
         Me.详情ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
         Me.压缩索引ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
         Me.解压索引ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
+        Me.复制到另一磁带ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
         Me.ImageList1 = New System.Windows.Forms.ImageList(Me.components)
         Me.SplitContainer2 = New System.Windows.Forms.SplitContainer()
         Me.ListView1 = New LTFSCopyGUI.DpiAwareListView()
@@ -93,6 +94,7 @@ Partial Class LTFSWriter
         Me.子目录列表ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
         Me.文件详情ToolStripMenuItem1 = New System.Windows.Forms.ToolStripMenuItem()
         Me.XAttrToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
+        Me.复制到另一磁带ToolStripMenuItem1 = New System.Windows.Forms.ToolStripMenuItem()
         Me.Chart1 = New LTFSCopyGUI.Direct2DChartControl()
         Me.ContextMenuStrip2 = New System.Windows.Forms.ContextMenuStrip(Me.components)
         Me.S60ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
@@ -258,12 +260,13 @@ Partial Class LTFSWriter
         '
         Me.TreeView1.ContextMenuStrip = Me.ContextMenuStrip3
         resources.ApplyResources(Me.TreeView1, "TreeView1")
+        Me.TreeView1.HideSelection = false
         Me.TreeView1.ImageList = Me.ImageList1
         Me.TreeView1.Name = "TreeView1"
         '
         'ContextMenuStrip3
         '
-        Me.ContextMenuStrip3.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.提取ToolStripMenuItem1, Me.校验ToolStripMenuItem1, Me.剪切目录ToolStripMenuItem, Me.粘贴选中ToolStripMenuItem, Me.重命名ToolStripMenuItem, Me.删除ToolStripMenuItem, Me.统计ToolStripMenuItem, Me.详情ToolStripMenuItem, Me.压缩索引ToolStripMenuItem, Me.解压索引ToolStripMenuItem})
+        Me.ContextMenuStrip3.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.提取ToolStripMenuItem1, Me.校验ToolStripMenuItem1, Me.剪切目录ToolStripMenuItem, Me.粘贴选中ToolStripMenuItem, Me.重命名ToolStripMenuItem, Me.删除ToolStripMenuItem, Me.统计ToolStripMenuItem, Me.详情ToolStripMenuItem, Me.压缩索引ToolStripMenuItem, Me.解压索引ToolStripMenuItem, Me.复制到另一磁带ToolStripMenuItem})
         Me.ContextMenuStrip3.Name = "ContextMenuStrip3"
         resources.ApplyResources(Me.ContextMenuStrip3, "ContextMenuStrip3")
         '
@@ -333,9 +336,14 @@ Partial Class LTFSWriter
         Me.解压索引ToolStripMenuItem.Name = "解压索引ToolStripMenuItem"
         resources.ApplyResources(Me.解压索引ToolStripMenuItem, "解压索引ToolStripMenuItem")
         '
+        '复制到另一磁带ToolStripMenuItem
+        '
+        Me.复制到另一磁带ToolStripMenuItem.Name = "复制到另一磁带ToolStripMenuItem"
+        resources.ApplyResources(Me.复制到另一磁带ToolStripMenuItem, "复制到另一磁带ToolStripMenuItem")
+        '
         'ImageList1
         '
-        Me.ImageList1.ImageStream = CType(resources.GetObject("ImageList1.ImageStream"), System.Windows.Forms.ImageListStreamer)
+        Me.ImageList1.ImageStream = CType(resources.GetObject("ImageList1.ImageStream"),System.Windows.Forms.ImageListStreamer)
         Me.ImageList1.TransparentColor = System.Drawing.Color.Transparent
         Me.ImageList1.Images.SetKeyName(0, "DirRoot.png")
         Me.ImageList1.Images.SetKeyName(1, "Dir.png")
@@ -357,17 +365,18 @@ Partial Class LTFSWriter
         '
         'ListView1
         '
-        Me.ListView1.AllowColumnReorder = True
+        Me.ListView1.AllowColumnReorder = true
         Me.ListView1.Columns.AddRange(New System.Windows.Forms.ColumnHeader() {Me.Column_name, Me.Column_length, Me.Column_creationtime, Me.Column_fileuid, Me.Column_openforwrite, Me.Column_readonly, Me.Column_changetime, Me.Column_modifytime, Me.Column_accesstime, Me.Column_backuptime, Me.Column_tag, Me.Column_StartBlock, Me.Column_Partition, Me.Column_FriendlyLen, Me.Column_writtenBytes})
         Me.ListView1.ContextMenuStrip = Me.ContextMenuStrip1
         resources.ApplyResources(Me.ListView1, "ListView1")
-        Me.ListView1.HideSelection = False
+        Me.ListView1.HideSelection = false
         Me.ListView1.Name = "ListView1"
-        Me.ListView1.ShowGroups = False
-        Me.ListView1.ShowItemToolTips = True
+        Me.ListView1.ShowGroups = false
+        Me.ListView1.ShowItemToolTips = true
         Me.ListView1.SmallImageList = Me.ImageList1
-        Me.ListView1.UseCompatibleStateImageBehavior = False
+        Me.ListView1.UseCompatibleStateImageBehavior = false
         Me.ListView1.View = System.Windows.Forms.View.Details
+        Me.ListView1.VirtualMode = true
         '
         'Column_name
         '
@@ -446,7 +455,7 @@ Partial Class LTFSWriter
         '
         'ContextMenuStrip1
         '
-        Me.ContextMenuStrip1.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.提取ToolStripMenuItem, Me.校验ToolStripMenuItem, Me.移动到索引区ToolStripMenuItem, Me.定位到起始块ToolStripMenuItem, Me.ToolStripSeparator2, Me.剪切文件ToolStripMenuItem, Me.粘贴选中ToolStripMenuItem1, Me.重命名文件ToolStripMenuItem, Me.重命名目录ToolStripMenuItem, Me.合并文件ToolStripMenuItem, Me.ToolStripSeparator3, Me.导入文件ToolStripMenuItem, Me.添加文件ToolStripMenuItem, Me.添加目录ToolStripMenuItem, Me.新建目录ToolStripMenuItem, Me.新建压缩文件ToolStripMenuItem, Me.选项ToolStripMenuItem, Me.ToolStripSeparator4, Me.删除文件ToolStripMenuItem, Me.删除目录ToolStripMenuItem, Me.ToolStripSeparator8, Me.生成标签ToolStripMenuItem, Me.设置标签ToolStripMenuItem, Me.文件详情ToolStripMenuItem, Me.复制信息到剪贴板ToolStripMenuItem})
+        Me.ContextMenuStrip1.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.提取ToolStripMenuItem, Me.校验ToolStripMenuItem, Me.移动到索引区ToolStripMenuItem, Me.定位到起始块ToolStripMenuItem, Me.ToolStripSeparator2, Me.剪切文件ToolStripMenuItem, Me.粘贴选中ToolStripMenuItem1, Me.重命名文件ToolStripMenuItem, Me.重命名目录ToolStripMenuItem, Me.合并文件ToolStripMenuItem, Me.ToolStripSeparator3, Me.导入文件ToolStripMenuItem, Me.添加文件ToolStripMenuItem, Me.添加目录ToolStripMenuItem, Me.新建目录ToolStripMenuItem, Me.新建压缩文件ToolStripMenuItem, Me.选项ToolStripMenuItem, Me.ToolStripSeparator4, Me.删除文件ToolStripMenuItem, Me.删除目录ToolStripMenuItem, Me.ToolStripSeparator8, Me.生成标签ToolStripMenuItem, Me.设置标签ToolStripMenuItem, Me.文件详情ToolStripMenuItem, Me.复制信息到剪贴板ToolStripMenuItem, Me.复制到另一磁带ToolStripMenuItem1})
         Me.ContextMenuStrip1.Name = "ContextMenuStrip1"
         resources.ApplyResources(Me.ContextMenuStrip1, "ContextMenuStrip1")
         '
@@ -554,14 +563,14 @@ Partial Class LTFSWriter
         '
         '覆盖已有文件ToolStripMenuItem
         '
-        Me.覆盖已有文件ToolStripMenuItem.CheckOnClick = True
+        Me.覆盖已有文件ToolStripMenuItem.CheckOnClick = true
         Me.覆盖已有文件ToolStripMenuItem.Name = "覆盖已有文件ToolStripMenuItem"
         resources.ApplyResources(Me.覆盖已有文件ToolStripMenuItem, "覆盖已有文件ToolStripMenuItem")
         '
         '跳过符号链接ToolStripMenuItem
         '
-        Me.跳过符号链接ToolStripMenuItem.Checked = True
-        Me.跳过符号链接ToolStripMenuItem.CheckOnClick = True
+        Me.跳过符号链接ToolStripMenuItem.Checked = true
+        Me.跳过符号链接ToolStripMenuItem.CheckOnClick = true
         Me.跳过符号链接ToolStripMenuItem.CheckState = System.Windows.Forms.CheckState.Checked
         Me.跳过符号链接ToolStripMenuItem.Name = "跳过符号链接ToolStripMenuItem"
         resources.ApplyResources(Me.跳过符号链接ToolStripMenuItem, "跳过符号链接ToolStripMenuItem")
@@ -627,19 +636,24 @@ Partial Class LTFSWriter
         Me.XAttrToolStripMenuItem.Name = "XAttrToolStripMenuItem"
         resources.ApplyResources(Me.XAttrToolStripMenuItem, "XAttrToolStripMenuItem")
         '
+        '复制到另一磁带ToolStripMenuItem1
+        '
+        Me.复制到另一磁带ToolStripMenuItem1.Name = "复制到另一磁带ToolStripMenuItem1"
+        resources.ApplyResources(Me.复制到另一磁带ToolStripMenuItem1, "复制到另一磁带ToolStripMenuItem1")
+        '
         'Chart1
         '
         resources.ApplyResources(Me.Chart1, "Chart1")
-        Me.Chart1.AxisColor = System.Drawing.Color.FromArgb(CType(CType(110, Byte), Integer), CType(CType(110, Byte), Integer), CType(CType(130, Byte), Integer))
+        Me.Chart1.AxisColor = System.Drawing.Color.FromArgb(CType(CType(110,Byte),Integer), CType(CType(110,Byte),Integer), CType(CType(130,Byte),Integer))
         Me.Chart1.BackColor = System.Drawing.SystemColors.Window
         Me.Chart1.ChartTitle = ""
         Me.Chart1.ContextMenuStrip = Me.ContextMenuStrip2
         Me.Chart1.ForeColor = System.Drawing.SystemColors.ControlText
-        Me.Chart1.GridColor = System.Drawing.Color.FromArgb(CType(CType(205, Byte), Integer), CType(CType(205, Byte), Integer), CType(CType(225, Byte), Integer))
+        Me.Chart1.GridColor = System.Drawing.Color.FromArgb(CType(CType(205,Byte),Integer), CType(CType(205,Byte),Integer), CType(CType(225,Byte),Integer))
         Me.Chart1.Name = "Chart1"
-        Me.Chart1.PrimaryColor = System.Drawing.Color.FromArgb(CType(CType(128, Byte), Integer), CType(CType(128, Byte), Integer), CType(CType(255, Byte), Integer))
-        Me.Chart1.SecondaryColor = System.Drawing.Color.FromArgb(CType(CType(255, Byte), Integer), CType(CType(128, Byte), Integer), CType(CType(0, Byte), Integer))
-        Me.Chart1.TabStop = False
+        Me.Chart1.PrimaryColor = System.Drawing.Color.FromArgb(CType(CType(128,Byte),Integer), CType(CType(128,Byte),Integer), CType(CType(255,Byte),Integer))
+        Me.Chart1.SecondaryColor = System.Drawing.Color.FromArgb(CType(CType(255,Byte),Integer), CType(CType(128,Byte),Integer), CType(CType(0,Byte),Integer))
+        Me.Chart1.TabStop = false
         Me.Chart1.ThirdColor = System.Drawing.Color.Red
         Me.Chart1.XAxisTitle = "10分钟"
         '
@@ -691,13 +705,13 @@ Partial Class LTFSWriter
         '
         'LinearToolStripMenuItem
         '
-        Me.LinearToolStripMenuItem.CheckOnClick = True
+        Me.LinearToolStripMenuItem.CheckOnClick = true
         Me.LinearToolStripMenuItem.Name = "LinearToolStripMenuItem"
         resources.ApplyResources(Me.LinearToolStripMenuItem, "LinearToolStripMenuItem")
         '
         'LogarithmicToolStripMenuItem
         '
-        Me.LogarithmicToolStripMenuItem.CheckOnClick = True
+        Me.LogarithmicToolStripMenuItem.CheckOnClick = true
         Me.LogarithmicToolStripMenuItem.Name = "LogarithmicToolStripMenuItem"
         resources.ApplyResources(Me.LogarithmicToolStripMenuItem, "LogarithmicToolStripMenuItem")
         '
@@ -778,27 +792,27 @@ Partial Class LTFSWriter
         '
         'WA0ToolStripMenuItem
         '
-        Me.WA0ToolStripMenuItem.CheckOnClick = True
+        Me.WA0ToolStripMenuItem.CheckOnClick = true
         resources.ApplyResources(Me.WA0ToolStripMenuItem, "WA0ToolStripMenuItem")
         Me.WA0ToolStripMenuItem.Name = "WA0ToolStripMenuItem"
         '
         'WA1ToolStripMenuItem
         '
-        Me.WA1ToolStripMenuItem.Checked = True
-        Me.WA1ToolStripMenuItem.CheckOnClick = True
+        Me.WA1ToolStripMenuItem.Checked = true
+        Me.WA1ToolStripMenuItem.CheckOnClick = true
         Me.WA1ToolStripMenuItem.CheckState = System.Windows.Forms.CheckState.Checked
         Me.WA1ToolStripMenuItem.Name = "WA1ToolStripMenuItem"
         resources.ApplyResources(Me.WA1ToolStripMenuItem, "WA1ToolStripMenuItem")
         '
         'WA2ToolStripMenuItem
         '
-        Me.WA2ToolStripMenuItem.CheckOnClick = True
+        Me.WA2ToolStripMenuItem.CheckOnClick = true
         Me.WA2ToolStripMenuItem.Name = "WA2ToolStripMenuItem"
         resources.ApplyResources(Me.WA2ToolStripMenuItem, "WA2ToolStripMenuItem")
         '
         'WA3ToolStripMenuItem
         '
-        Me.WA3ToolStripMenuItem.CheckOnClick = True
+        Me.WA3ToolStripMenuItem.CheckOnClick = true
         Me.WA3ToolStripMenuItem.Name = "WA3ToolStripMenuItem"
         resources.ApplyResources(Me.WA3ToolStripMenuItem, "WA3ToolStripMenuItem")
         '
@@ -840,13 +854,13 @@ Partial Class LTFSWriter
         '
         '计算校验ToolStripMenuItem
         '
-        Me.计算校验ToolStripMenuItem.CheckOnClick = True
+        Me.计算校验ToolStripMenuItem.CheckOnClick = true
         Me.计算校验ToolStripMenuItem.Name = "计算校验ToolStripMenuItem"
         resources.ApplyResources(Me.计算校验ToolStripMenuItem, "计算校验ToolStripMenuItem")
         '
         '异步校验CPU占用高ToolStripMenuItem
         '
-        Me.异步校验CPU占用高ToolStripMenuItem.CheckOnClick = True
+        Me.异步校验CPU占用高ToolStripMenuItem.CheckOnClick = true
         Me.异步校验CPU占用高ToolStripMenuItem.Name = "异步校验CPU占用高ToolStripMenuItem"
         resources.ApplyResources(Me.异步校验CPU占用高ToolStripMenuItem, "异步校验CPU占用高ToolStripMenuItem")
         '
@@ -867,7 +881,7 @@ Partial Class LTFSWriter
         '
         '右下角显示容量损失ToolStripMenuItem
         '
-        Me.右下角显示容量损失ToolStripMenuItem.CheckOnClick = True
+        Me.右下角显示容量损失ToolStripMenuItem.CheckOnClick = true
         Me.右下角显示容量损失ToolStripMenuItem.Name = "右下角显示容量损失ToolStripMenuItem"
         resources.ApplyResources(Me.右下角显示容量损失ToolStripMenuItem, "右下角显示容量损失ToolStripMenuItem")
         '
@@ -888,7 +902,7 @@ Partial Class LTFSWriter
         '
         'APToolStripMenuItem
         '
-        Me.APToolStripMenuItem.CheckOnClick = True
+        Me.APToolStripMenuItem.CheckOnClick = true
         Me.APToolStripMenuItem.Name = "APToolStripMenuItem"
         resources.ApplyResources(Me.APToolStripMenuItem, "APToolStripMenuItem")
         '
@@ -961,31 +975,31 @@ Partial Class LTFSWriter
         '
         '启用日志记录ToolStripMenuItem
         '
-        Me.启用日志记录ToolStripMenuItem.CheckOnClick = True
+        Me.启用日志记录ToolStripMenuItem.CheckOnClick = true
         Me.启用日志记录ToolStripMenuItem.Name = "启用日志记录ToolStripMenuItem"
         resources.ApplyResources(Me.启用日志记录ToolStripMenuItem, "启用日志记录ToolStripMenuItem")
         '
         '总是更新数据区索引ToolStripMenuItem
         '
-        Me.总是更新数据区索引ToolStripMenuItem.CheckOnClick = True
+        Me.总是更新数据区索引ToolStripMenuItem.CheckOnClick = true
         Me.总是更新数据区索引ToolStripMenuItem.Name = "总是更新数据区索引ToolStripMenuItem"
         resources.ApplyResources(Me.总是更新数据区索引ToolStripMenuItem, "总是更新数据区索引ToolStripMenuItem")
         '
         '禁用分区ToolStripMenuItem
         '
-        Me.禁用分区ToolStripMenuItem.CheckOnClick = True
+        Me.禁用分区ToolStripMenuItem.CheckOnClick = true
         Me.禁用分区ToolStripMenuItem.Name = "禁用分区ToolStripMenuItem"
         resources.ApplyResources(Me.禁用分区ToolStripMenuItem, "禁用分区ToolStripMenuItem")
         '
         '显示文件数ToolStripMenuItem
         '
-        Me.显示文件数ToolStripMenuItem.CheckOnClick = True
+        Me.显示文件数ToolStripMenuItem.CheckOnClick = true
         Me.显示文件数ToolStripMenuItem.Name = "显示文件数ToolStripMenuItem"
         resources.ApplyResources(Me.显示文件数ToolStripMenuItem, "显示文件数ToolStripMenuItem")
         '
         '增强Tar元数据ToolStripMenuItem
         '
-        Me.增强Tar元数据ToolStripMenuItem.CheckOnClick = True
+        Me.增强Tar元数据ToolStripMenuItem.CheckOnClick = true
         Me.增强Tar元数据ToolStripMenuItem.Name = "增强Tar元数据ToolStripMenuItem"
         resources.ApplyResources(Me.增强Tar元数据ToolStripMenuItem, "增强Tar元数据ToolStripMenuItem")
         '
@@ -1094,8 +1108,8 @@ Partial Class LTFSWriter
         Me.StatusStrip1.ImageScalingSize = New System.Drawing.Size(24, 24)
         Me.StatusStrip1.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.ToolStripDropDownButton1, Me.ToolStripDropDownButton2, Me.ToolStripDropDownButton3, Me.ToolStripStatusLabel1, Me.ToolStripStatusLabel4, Me.ToolStripProgressBar1, Me.ToolStripStatusLabel5, Me.ToolStripStatusLabel2})
         Me.StatusStrip1.Name = "StatusStrip1"
-        Me.StatusStrip1.ShowItemToolTips = True
-        Me.StatusStrip1.SizingGrip = False
+        Me.StatusStrip1.ShowItemToolTips = true
+        Me.StatusStrip1.SizingGrip = false
         '
         'ToolStripDropDownButton1
         '
@@ -1103,7 +1117,7 @@ Partial Class LTFSWriter
         Me.ToolStripDropDownButton1.ForeColor = System.Drawing.Color.Red
         resources.ApplyResources(Me.ToolStripDropDownButton1, "ToolStripDropDownButton1")
         Me.ToolStripDropDownButton1.Name = "ToolStripDropDownButton1"
-        Me.ToolStripDropDownButton1.ShowDropDownArrow = False
+        Me.ToolStripDropDownButton1.ShowDropDownArrow = false
         '
         'ToolStripDropDownButton2
         '
@@ -1111,15 +1125,15 @@ Partial Class LTFSWriter
         Me.ToolStripDropDownButton2.ForeColor = System.Drawing.Color.Blue
         resources.ApplyResources(Me.ToolStripDropDownButton2, "ToolStripDropDownButton2")
         Me.ToolStripDropDownButton2.Name = "ToolStripDropDownButton2"
-        Me.ToolStripDropDownButton2.ShowDropDownArrow = False
+        Me.ToolStripDropDownButton2.ShowDropDownArrow = false
         '
         'ToolStripDropDownButton3
         '
         Me.ToolStripDropDownButton3.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Text
-        Me.ToolStripDropDownButton3.ForeColor = System.Drawing.Color.FromArgb(CType(CType(255, Byte), Integer), CType(CType(128, Byte), Integer), CType(CType(0, Byte), Integer))
+        Me.ToolStripDropDownButton3.ForeColor = System.Drawing.Color.FromArgb(CType(CType(255,Byte),Integer), CType(CType(128,Byte),Integer), CType(CType(0,Byte),Integer))
         resources.ApplyResources(Me.ToolStripDropDownButton3, "ToolStripDropDownButton3")
         Me.ToolStripDropDownButton3.Name = "ToolStripDropDownButton3"
-        Me.ToolStripDropDownButton3.ShowDropDownArrow = False
+        Me.ToolStripDropDownButton3.ShowDropDownArrow = false
         '
         'ToolStripStatusLabel1
         '
@@ -1132,7 +1146,7 @@ Partial Class LTFSWriter
         Me.ToolStripStatusLabel4.BorderSides = System.Windows.Forms.ToolStripStatusLabelBorderSides.Left
         Me.ToolStripStatusLabel4.Name = "ToolStripStatusLabel4"
         resources.ApplyResources(Me.ToolStripStatusLabel4, "ToolStripStatusLabel4")
-        Me.ToolStripStatusLabel4.Spring = True
+        Me.ToolStripStatusLabel4.Spring = true
         '
         'ToolStripProgressBar1
         '
@@ -1153,12 +1167,12 @@ Partial Class LTFSWriter
         '
         'Timer1
         '
-        Me.Timer1.Enabled = True
+        Me.Timer1.Enabled = true
         Me.Timer1.Interval = 1000
         '
         'OpenFileDialog1
         '
-        Me.OpenFileDialog1.Multiselect = True
+        Me.OpenFileDialog1.Multiselect = true
         '
         'CommandBar
         '
@@ -1179,7 +1193,7 @@ Partial Class LTFSWriter
         Me.ImportFilesButton.CommandIcon = LTFSCopyGUI.ModernCommandIcon.ImportFiles
         resources.ApplyResources(Me.ImportFilesButton, "ImportFilesButton")
         Me.ImportFilesButton.Name = "ImportFilesButton"
-        Me.ImportFilesButton.UseVisualStyleBackColor = False
+        Me.ImportFilesButton.UseVisualStyleBackColor = false
         '
         'WriteTapeButton
         '
@@ -1187,7 +1201,7 @@ Partial Class LTFSWriter
         Me.WriteTapeButton.CommandIcon = LTFSCopyGUI.ModernCommandIcon.WriteTape
         resources.ApplyResources(Me.WriteTapeButton, "WriteTapeButton")
         Me.WriteTapeButton.Name = "WriteTapeButton"
-        Me.WriteTapeButton.UseVisualStyleBackColor = False
+        Me.WriteTapeButton.UseVisualStyleBackColor = false
         '
         'BackupIndexButton
         '
@@ -1195,7 +1209,7 @@ Partial Class LTFSWriter
         Me.BackupIndexButton.CommandIcon = LTFSCopyGUI.ModernCommandIcon.BackupIndex
         resources.ApplyResources(Me.BackupIndexButton, "BackupIndexButton")
         Me.BackupIndexButton.Name = "BackupIndexButton"
-        Me.BackupIndexButton.UseVisualStyleBackColor = False
+        Me.BackupIndexButton.UseVisualStyleBackColor = false
         '
         'MergeHashButton
         '
@@ -1203,7 +1217,7 @@ Partial Class LTFSWriter
         Me.MergeHashButton.CommandIcon = LTFSCopyGUI.ModernCommandIcon.MergeHash
         resources.ApplyResources(Me.MergeHashButton, "MergeHashButton")
         Me.MergeHashButton.Name = "MergeHashButton"
-        Me.MergeHashButton.UseVisualStyleBackColor = False
+        Me.MergeHashButton.UseVisualStyleBackColor = false
         '
         'VerifySourceButton
         '
@@ -1211,7 +1225,7 @@ Partial Class LTFSWriter
         Me.VerifySourceButton.CommandIcon = LTFSCopyGUI.ModernCommandIcon.VerifySource
         resources.ApplyResources(Me.VerifySourceButton, "VerifySourceButton")
         Me.VerifySourceButton.Name = "VerifySourceButton"
-        Me.VerifySourceButton.UseVisualStyleBackColor = False
+        Me.VerifySourceButton.UseVisualStyleBackColor = false
         '
         'SafeEjectButton
         '
@@ -1219,7 +1233,7 @@ Partial Class LTFSWriter
         Me.SafeEjectButton.CommandIcon = LTFSCopyGUI.ModernCommandIcon.SafeEject
         resources.ApplyResources(Me.SafeEjectButton, "SafeEjectButton")
         Me.SafeEjectButton.Name = "SafeEjectButton"
-        Me.SafeEjectButton.UseVisualStyleBackColor = False
+        Me.SafeEjectButton.UseVisualStyleBackColor = false
         '
         'ForceEjectButton
         '
@@ -1227,11 +1241,11 @@ Partial Class LTFSWriter
         Me.ForceEjectButton.CommandIcon = LTFSCopyGUI.ModernCommandIcon.ForceEject
         resources.ApplyResources(Me.ForceEjectButton, "ForceEjectButton")
         Me.ForceEjectButton.Name = "ForceEjectButton"
-        Me.ForceEjectButton.UseVisualStyleBackColor = False
+        Me.ForceEjectButton.UseVisualStyleBackColor = false
         '
         'Timer2
         '
-        Me.Timer2.Enabled = True
+        Me.Timer2.Enabled = true
         Me.Timer2.Interval = 200
         '
         'StatusStrip2
@@ -1240,8 +1254,8 @@ Partial Class LTFSWriter
         Me.StatusStrip2.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.ToolStripStatusLabel6, Me.ToolStripStatusLabel3, Me.ToolStripStatusLabelS1, Me.ToolStripStatusLabelS2, Me.ToolStripStatusLabelS3, Me.ToolStripStatusLabelS4, Me.ToolStripStatusLabelS5, Me.ToolStripStatusLabelS6, Me.ToolStripStatusLabelErrLog})
         resources.ApplyResources(Me.StatusStrip2, "StatusStrip2")
         Me.StatusStrip2.Name = "StatusStrip2"
-        Me.StatusStrip2.ShowItemToolTips = True
-        Me.StatusStrip2.SizingGrip = False
+        Me.StatusStrip2.ShowItemToolTips = true
+        Me.StatusStrip2.SizingGrip = false
         '
         'ToolStripStatusLabel6
         '
@@ -1253,7 +1267,7 @@ Partial Class LTFSWriter
         Me.ToolStripStatusLabel3.BorderSides = System.Windows.Forms.ToolStripStatusLabelBorderSides.Right
         Me.ToolStripStatusLabel3.Name = "ToolStripStatusLabel3"
         resources.ApplyResources(Me.ToolStripStatusLabel3, "ToolStripStatusLabel3")
-        Me.ToolStripStatusLabel3.Spring = True
+        Me.ToolStripStatusLabel3.Spring = true
         '
         'ToolStripStatusLabelS1
         '
@@ -1380,9 +1394,9 @@ Partial Class LTFSWriter
         Me.ToolTipChanErrLog.AutoPopDelay = 3600000
         Me.ToolTipChanErrLog.InitialDelay = 500
         Me.ToolTipChanErrLog.ReshowDelay = 100
-        Me.ToolTipChanErrLog.ShowAlways = True
-        Me.ToolTipChanErrLog.UseAnimation = False
-        Me.ToolTipChanErrLog.UseFading = False
+        Me.ToolTipChanErrLog.ShowAlways = true
+        Me.ToolTipChanErrLog.UseAnimation = false
+        Me.ToolTipChanErrLog.UseFading = false
         '
         'LTFSWriter
         '
@@ -1394,30 +1408,30 @@ Partial Class LTFSWriter
         Me.Controls.Add(Me.StatusStrip1)
         Me.Controls.Add(Me.SplitContainer1)
         Me.Controls.Add(Me.MenuStrip1)
-        Me.DoubleBuffered = True
-        Me.KeyPreview = True
+        Me.DoubleBuffered = true
+        Me.KeyPreview = true
         Me.MainMenuStrip = Me.MenuStrip1
         Me.Name = "LTFSWriter"
-        Me.SplitContainer1.Panel1.ResumeLayout(False)
-        Me.SplitContainer1.Panel2.ResumeLayout(False)
-        CType(Me.SplitContainer1, System.ComponentModel.ISupportInitialize).EndInit()
-        Me.SplitContainer1.ResumeLayout(False)
-        Me.ContextMenuStrip3.ResumeLayout(False)
-        Me.SplitContainer2.Panel1.ResumeLayout(False)
-        Me.SplitContainer2.Panel2.ResumeLayout(False)
-        CType(Me.SplitContainer2, System.ComponentModel.ISupportInitialize).EndInit()
-        Me.SplitContainer2.ResumeLayout(False)
-        Me.ContextMenuStrip1.ResumeLayout(False)
-        Me.ContextMenuStrip2.ResumeLayout(False)
-        Me.MenuStrip1.ResumeLayout(False)
-        Me.MenuStrip1.PerformLayout()
-        Me.StatusStrip1.ResumeLayout(False)
-        Me.StatusStrip1.PerformLayout()
-        Me.CommandBar.ResumeLayout(False)
-        Me.StatusStrip2.ResumeLayout(False)
-        Me.StatusStrip2.PerformLayout()
-        Me.ContextMenuStrip4.ResumeLayout(False)
-        Me.ResumeLayout(False)
+        Me.SplitContainer1.Panel1.ResumeLayout(false)
+        Me.SplitContainer1.Panel2.ResumeLayout(false)
+        CType(Me.SplitContainer1,System.ComponentModel.ISupportInitialize).EndInit
+        Me.SplitContainer1.ResumeLayout(false)
+        Me.ContextMenuStrip3.ResumeLayout(false)
+        Me.SplitContainer2.Panel1.ResumeLayout(false)
+        Me.SplitContainer2.Panel2.ResumeLayout(false)
+        CType(Me.SplitContainer2,System.ComponentModel.ISupportInitialize).EndInit
+        Me.SplitContainer2.ResumeLayout(false)
+        Me.ContextMenuStrip1.ResumeLayout(false)
+        Me.ContextMenuStrip2.ResumeLayout(false)
+        Me.MenuStrip1.ResumeLayout(false)
+        Me.MenuStrip1.PerformLayout
+        Me.StatusStrip1.ResumeLayout(false)
+        Me.StatusStrip1.PerformLayout
+        Me.CommandBar.ResumeLayout(false)
+        Me.StatusStrip2.ResumeLayout(false)
+        Me.StatusStrip2.PerformLayout
+        Me.ContextMenuStrip4.ResumeLayout(false)
+        Me.ResumeLayout(false)
         Me.PerformLayout
 
 End Sub
@@ -1629,4 +1643,6 @@ End Sub
     Friend WithEvents ForceEjectButton As ModernCommandButton
     Friend WithEvents 创建磁盘镜像ToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents 清除指定大小范围的待写文件ToolStripMenuItem As ToolStripMenuItem
+    Friend WithEvents 复制到另一磁带ToolStripMenuItem As ToolStripMenuItem
+    Friend WithEvents 复制到另一磁带ToolStripMenuItem1 As ToolStripMenuItem
 End Class
