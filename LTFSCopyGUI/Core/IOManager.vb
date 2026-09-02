@@ -1540,20 +1540,43 @@ Public Class IOManager
         End Function
     End Class
 
+    Public Shared Function TryGetDirectoryCaseSensitive(path As String,
+                                                         ByRef caseSensitive As Boolean) As Boolean
+        caseSensitive = False
+        If String.IsNullOrEmpty(path) Then Return False
+        Try
+            Dim result As NativeDirectoryCaseSensitiveResult = NativeMethods.QueryDirectoryCaseSensitive(path)
+            If result Is Nothing Then Return False
+            caseSensitive = result.CaseSensitive
+            Return result.Succeeded
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Public Shared Function TrySetSparseFile(stream As FileStream) As Boolean
+        If stream Is Nothing Then Return False
+        Try
+            Dim nativeResult As NativeCallResult = NativeMethods.DeviceIoControl(
+                stream.SafeFileHandle.DangerousGetHandle(),
+                NativeMethods.FsctlSetSparse,
+                IntPtr.Zero,
+                0,
+                IntPtr.Zero,
+                0)
+            Return nativeResult IsNot Nothing AndAlso nativeResult.Succeeded
+        Catch
+            Return False
+        End Try
+    End Function
+
     Public Shared Function CreateSparceFile(path As String, size As Long) As Boolean
         Dim result As Boolean = False
         Try
             Using fs As New FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None)
 
                 ' 标记为稀疏文件
-                Dim nativeResult As NativeCallResult = NativeMethods.DeviceIoControl(
-                    fs.SafeFileHandle.DangerousGetHandle(),
-                    NativeMethods.FsctlSetSparse,
-                    IntPtr.Zero,
-                    0,
-                    IntPtr.Zero,
-                    0)
-                result = nativeResult.Succeeded
+                result = TrySetSparseFile(fs)
                 If Not result Then Return False
 
                 ' 设置大小

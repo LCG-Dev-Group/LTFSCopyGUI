@@ -55,6 +55,22 @@ namespace Native
         }
     };
 
+    public ref class NativeDirectoryCaseSensitiveResult : NativeCallResult
+    {
+    private:
+        bool _caseSensitive;
+
+    public:
+        NativeDirectoryCaseSensitiveResult(bool succeeded,
+                                            bool caseSensitive,
+                                            Int32 win32Error);
+
+        property bool CaseSensitive
+        {
+            bool get();
+        }
+    };
+
     public ref class NativeScsiResult : NativeCallResult
     {
     private:
@@ -215,6 +231,8 @@ namespace Native
                                              UInt32 shareMode,
                                              UInt32 creationDisposition,
                                              UInt32 flagsAndAttributes);
+
+        static NativeDirectoryCaseSensitiveResult^ QueryDirectoryCaseSensitive(String^ path);
 
         static NativeCallResult^ CloseHandle(IntPtr handle);
 

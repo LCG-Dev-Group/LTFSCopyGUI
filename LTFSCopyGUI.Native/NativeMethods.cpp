@@ -39,6 +39,15 @@ namespace
 		UCHAR Sense[SenseBufferLength];
 	};
 
+	struct LTFSCopyGUI_FILE_CASE_SENSITIVE_INFORMATION
+	{
+		ULONG Flags;
+	};
+
+	constexpr ULONG FileCaseSensitiveDirectoryFlag = 0x00000001;
+	constexpr FILE_INFO_BY_HANDLE_CLASS FileCaseSensitiveInformationClass =
+		static_cast<FILE_INFO_BY_HANDLE_CLASS>(23);
+
 	String^ ReadDeviceStringProperty(HDEVINFO deviceInfoSet,
 		SP_DEVINFO_DATA& deviceInfoData,
 		DWORD property)
@@ -156,6 +165,19 @@ namespace LTFSCopyGUI
 		IntPtr NativeHandleResult::Handle::get()
 		{
 			return _handle;
+		}
+
+		NativeDirectoryCaseSensitiveResult::NativeDirectoryCaseSensitiveResult(
+			bool succeeded,
+			bool caseSensitive,
+			Int32 win32Error)
+			: NativeCallResult(succeeded, win32Error, 0),
+			_caseSensitive(caseSensitive)
+		{}
+
+		bool NativeDirectoryCaseSensitiveResult::CaseSensitive::get()
+		{
+			return _caseSensitive;
 		}
 
 		NativeScsiResult::NativeScsiResult(bool succeeded,
@@ -313,6 +335,41 @@ namespace LTFSCopyGUI
 			return gcnew NativeHandleResult(true,
 				IntPtr(handle),
 				ERROR_SUCCESS);
+		}
+
+		NativeDirectoryCaseSensitiveResult^ NativeMethods::QueryDirectoryCaseSensitive(String^ path)
+		{
+			if (String::IsNullOrWhiteSpace(path))
+			{
+				return gcnew NativeDirectoryCaseSensitiveResult(false,
+					false,
+					ERROR_INVALID_PARAMETER);
+			}
+
+			NativeHandleResult^ openResult = OpenFile(path,
+				FILE_READ_ATTRIBUTES,
+				FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+				OPEN_EXISTING,
+				FILE_FLAG_BACKUP_SEMANTICS);
+			if (!openResult->Succeeded)
+			{
+				return gcnew NativeDirectoryCaseSensitiveResult(false,
+					false,
+					openResult->Win32Error);
+			}
+
+			LTFSCopyGUI_FILE_CASE_SENSITIVE_INFORMATION information{};
+			BOOL succeeded = ::GetFileInformationByHandleEx(
+				reinterpret_cast<HANDLE>(openResult->Handle.ToPointer()),
+				FileCaseSensitiveInformationClass,
+				&information,
+				sizeof(information));
+			DWORD error = CaptureFailure(succeeded);
+			::CloseHandle(reinterpret_cast<HANDLE>(openResult->Handle.ToPointer()));
+			return gcnew NativeDirectoryCaseSensitiveResult(
+				succeeded,
+				(information.Flags & FileCaseSensitiveDirectoryFlag) != 0,
+				static_cast<Int32>(error));
 		}
 
 		NativeCallResult^ NativeMethods::CloseHandle(IntPtr handle)

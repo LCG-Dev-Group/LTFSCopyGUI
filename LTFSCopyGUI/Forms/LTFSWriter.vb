@@ -4893,6 +4893,796 @@ Public Class LTFSWriter
     End Sub
     <Category("LTFSWriter")>
     Public Property RestorePosition As TapeUtils.PositionData
+
+    Private Class ExtractionFileRequest
+        Public Property FileName As String
+        Public Property FileIndex As ltfsindex.file
+    End Class
+
+    Private Class ExtractionDirectoryRequest
+        Public Property DirectoryPath As String
+        Public Property Directory As ltfsindex.directory
+    End Class
+
+    Private Class ExtractionPathEntry
+        Public Property FullPath As String
+        Public Property IsDirectory As Boolean
+        Public Property IsTemporary As Boolean
+        Public Property OwnerKey As String
+        Public Property IsOutputRoot As Boolean
+    End Class
+
+    Private Class ExtractionFileWork
+        Public Property Request As ExtractionFileRequest
+        Public Property TempPath As String
+        Public Property AlreadyComplete As Boolean
+    End Class
+
+    Private Class ExtractionExtentWork
+        Public Property FileWork As ExtractionFileWork
+        Public Property Extent As ltfsindex.file.extent
+        Public Property ExtentIndex As Integer
+        Public Property PhysicalPartition As Byte
+    End Class
+
+    Private Function NormalizeExtractionPath(path As String) As String
+        If String.IsNullOrEmpty(path) OrElse path.StartsWith("\\", StringComparison.Ordinal) Then Return path
+        Return $"\\?\{path}"
+    End Function
+
+    Private Function GetExtractionPathKey(path As String) As String
+        Dim normalizedPath As String = NormalizeExtractionPath(path)
+        If String.IsNullOrEmpty(normalizedPath) Then Return String.Empty
+        Return normalizedPath.TrimEnd("\"c)
+    End Function
+
+    Private Function IsExtractionPathUnderRoot(path As String, root As String) As Boolean
+        Dim pathKey As String = GetExtractionPathKey(path)
+        Dim rootKey As String = GetExtractionPathKey(root)
+        If String.IsNullOrEmpty(pathKey) OrElse String.IsNullOrEmpty(rootKey) Then Return False
+        If String.Equals(pathKey, rootKey, StringComparison.OrdinalIgnoreCase) Then Return True
+        Return pathKey.StartsWith(rootKey & "\", StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Function GetExtractionRelativeParts(path As String, root As String) As String()
+        If String.IsNullOrEmpty(root) Then Return Nothing
+        Dim pathKey As String = GetExtractionPathKey(path)
+        Dim rootKey As String = GetExtractionPathKey(root)
+        If String.Equals(pathKey, rootKey, StringComparison.OrdinalIgnoreCase) Then Return New String() {}
+        Dim prefix As String = rootKey & "\"
+        If Not pathKey.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) Then Return Nothing
+        Dim relativePath As String = pathKey.Substring(prefix.Length)
+        Return relativePath.Split(New Char() {"\"c}, StringSplitOptions.RemoveEmptyEntries)
+    End Function
+
+    Private Function GetExtractionCaseCollisionParent(first As ExtractionPathEntry,
+                                                      second As ExtractionPathEntry,
+                                                      root As String) As String
+        If first Is Nothing OrElse second Is Nothing Then Return Nothing
+        Dim firstParts() As String = GetExtractionRelativeParts(first.FullPath, root)
+        Dim secondParts() As String = GetExtractionRelativeParts(second.FullPath, root)
+        If firstParts IsNot Nothing AndAlso secondParts IsNot Nothing Then
+            Dim current As String = NormalizeExtractionPath(root)
+            Dim commonCount As Integer = Math.Min(firstParts.Length, secondParts.Length)
+            For i As Integer = 0 To commonCount - 1
+                If Not String.Equals(firstParts(i), secondParts(i), StringComparison.Ordinal) Then Return current
+                If String.IsNullOrEmpty(current) Then Exit For
+                current = IO.Path.Combine(current, firstParts(i))
+            Next
+        End If
+        Try
+            Return IO.Path.GetDirectoryName(NormalizeExtractionPath(first.FullPath))
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    Private Function GetExtractionOwnerKey(fileIndex As ltfsindex.file) As String
+        If fileIndex Is Nothing Then Return String.Empty
+        If fileIndex.fileuid <> 0 Then Return $"file:{fileIndex.fileuid}"
+        Return $"file:{fileIndex.name}|{fileIndex.length}|{fileIndex.creationtime}|{fileIndex.modifytime}"
+    End Function
+
+    Private Sub AddExtractionPathEntry(entries As Dictionary(Of String, List(Of ExtractionPathEntry)),
+                                        fullPath As String,
+                                        isDirectory As Boolean,
+                                        Optional isTemporary As Boolean = False,
+                                        Optional ownerKey As String = "",
+                                        Optional isOutputRoot As Boolean = False)
+        If String.IsNullOrEmpty(fullPath) Then Return
+        Dim normalizedPath As String = NormalizeExtractionPath(fullPath)
+        Dim key As String = GetExtractionPathKey(normalizedPath)
+        If String.IsNullOrEmpty(key) Then Return
+        Dim group As List(Of ExtractionPathEntry) = Nothing
+        If Not entries.TryGetValue(key, group) Then
+            group = New List(Of ExtractionPathEntry)
+            entries.Add(key, group)
+        End If
+        group.Add(New ExtractionPathEntry With {
+                      .FullPath = normalizedPath,
+                      .IsDirectory = isDirectory,
+                      .IsTemporary = isTemporary,
+                      .OwnerKey = If(ownerKey, String.Empty),
+                      .IsOutputRoot = isOutputRoot})
+    End Sub
+
+    Private Function TryGetEffectiveExtractionCaseSensitive(path As String,
+                                                             ByRef caseSensitive As Boolean) As Boolean
+        caseSensitive = False
+        Dim current As String = NormalizeExtractionPath(path)
+        While Not String.IsNullOrEmpty(current)
+            If IO.Directory.Exists(current) AndAlso IOManager.TryGetDirectoryCaseSensitive(current, caseSensitive) Then Return True
+            Dim parent As String = Nothing
+            Try
+                parent = IO.Path.GetDirectoryName(current)
+            Catch
+                Return False
+            End Try
+            If String.IsNullOrEmpty(parent) OrElse String.Equals(parent, current, StringComparison.OrdinalIgnoreCase) Then Return False
+            current = parent
+        End While
+        Return False
+    End Function
+
+    Private Sub AddExtractionConflict(conflicts As List(Of String), message As String)
+        If String.IsNullOrEmpty(message) Then Return
+        For Each existing As String In conflicts
+            If String.Equals(existing, message, StringComparison.Ordinal) Then Return
+        Next
+        conflicts.Add(message)
+    End Sub
+
+    Private Sub AddExtractionCaseConflict(conflicts As List(Of String),
+                                           parentPath As String,
+                                           message As String)
+        Dim caseSensitive As Boolean = False
+        If Not String.IsNullOrEmpty(parentPath) AndAlso
+           TryGetEffectiveExtractionCaseSensitive(parentPath, caseSensitive) AndAlso caseSensitive Then Return
+        AddExtractionConflict(conflicts, message)
+    End Sub
+
+    Private Sub ValidateExtractionPaths(requests As List(Of ExtractionFileRequest),
+                                        outputRoot As String,
+                                        directoryRequests As List(Of ExtractionDirectoryRequest))
+        Dim entries As New Dictionary(Of String, List(Of ExtractionPathEntry))(StringComparer.OrdinalIgnoreCase)
+        Dim conflicts As New List(Of String)
+        Dim normalizedRoot As String = NormalizeExtractionPath(outputRoot)
+        If String.IsNullOrEmpty(normalizedRoot) Then
+            AddExtractionConflict(conflicts, "输出目录路径为空")
+        Else
+            AddExtractionPathEntry(entries, normalizedRoot, True, False, String.Empty, True)
+        End If
+
+        If directoryRequests IsNot Nothing Then
+            For Each directoryRequest As ExtractionDirectoryRequest In directoryRequests
+                If directoryRequest Is Nothing OrElse String.IsNullOrEmpty(directoryRequest.DirectoryPath) Then
+                    AddExtractionConflict(conflicts, "提取目录路径为空")
+                    Continue For
+                End If
+                Dim directoryPath As String = NormalizeExtractionPath(directoryRequest.DirectoryPath)
+                If String.IsNullOrEmpty(normalizedRoot) OrElse Not IsExtractionPathUnderRoot(directoryPath, normalizedRoot) Then
+                    AddExtractionConflict(conflicts, $"提取目录超出输出根目录：{directoryPath}")
+                    Continue For
+                End If
+                AddExtractionPathEntry(entries, directoryPath, True)
+            Next
+        End If
+
+        If requests IsNot Nothing Then
+            For Each request As ExtractionFileRequest In requests
+                If request Is Nothing OrElse request.FileIndex Is Nothing OrElse String.IsNullOrEmpty(request.FileName) Then
+                    AddExtractionConflict(conflicts, "提取文件路径或索引为空")
+                    Continue For
+                End If
+                Dim targetPath As String = NormalizeExtractionPath(request.FileName)
+                If String.IsNullOrEmpty(normalizedRoot) OrElse Not IsExtractionPathUnderRoot(targetPath, normalizedRoot) Then
+                    AddExtractionConflict(conflicts, $"提取文件超出输出根目录：{targetPath}")
+                    Continue For
+                End If
+                Dim ownerKey As String = GetExtractionOwnerKey(request.FileIndex)
+                AddExtractionPathEntry(entries, targetPath, False, False, ownerKey)
+                AddExtractionPathEntry(entries, targetPath & ".tmp", False, True, ownerKey)
+            Next
+        End If
+
+        For Each group As List(Of ExtractionPathEntry) In entries.Values
+            For i As Integer = 0 To group.Count - 1
+                For j As Integer = i + 1 To group.Count - 1
+                    Dim first As ExtractionPathEntry = group(i)
+                    Dim second As ExtractionPathEntry = group(j)
+                    If first.IsDirectory <> second.IsDirectory Then
+                        AddExtractionConflict(conflicts, $"文件/目录类型冲突：{first.FullPath} 与 {second.FullPath}")
+                    ElseIf Not String.Equals(first.FullPath, second.FullPath, StringComparison.Ordinal) Then
+                        Dim parentPath As String = GetExtractionCaseCollisionParent(first, second, normalizedRoot)
+                        AddExtractionCaseConflict(conflicts,
+                                                  parentPath,
+                                                  $"磁带路径大小写冲突：{first.FullPath} 与 {second.FullPath}（父目录未启用大小写敏感）")
+                    ElseIf Not String.IsNullOrEmpty(first.OwnerKey) AndAlso
+                           Not String.IsNullOrEmpty(second.OwnerKey) AndAlso
+                           Not String.Equals(first.OwnerKey, second.OwnerKey, StringComparison.Ordinal) Then
+                        AddExtractionConflict(conflicts, $"多个磁带对象映射到同一输出路径：{first.FullPath}")
+                    ElseIf first.IsTemporary <> second.IsTemporary Then
+                        AddExtractionConflict(conflicts, $"临时文件与输出文件冲突：{first.FullPath}")
+                    End If
+                Next
+            Next
+        Next
+
+        Dim parents As New Dictionary(Of String, List(Of ExtractionPathEntry))(StringComparer.Ordinal)
+        For Each group As List(Of ExtractionPathEntry) In entries.Values
+            For Each entry As ExtractionPathEntry In group
+                Dim targetExistsAsFile As Boolean = IO.File.Exists(entry.FullPath)
+                Dim targetExistsAsDirectory As Boolean = IO.Directory.Exists(entry.FullPath)
+                If entry.IsDirectory AndAlso targetExistsAsFile Then
+                    AddExtractionConflict(conflicts, $"目标路径类型冲突，磁带目录无法覆盖文件：{entry.FullPath}")
+                ElseIf Not entry.IsDirectory AndAlso targetExistsAsDirectory Then
+                    AddExtractionConflict(conflicts, $"目标路径类型冲突，磁带文件无法覆盖目录：{entry.FullPath}")
+                End If
+
+                Dim parentPath As String = Nothing
+                Try
+                    parentPath = IO.Path.GetDirectoryName(entry.FullPath)
+                Catch
+                End Try
+                If String.IsNullOrEmpty(parentPath) OrElse Not IO.Directory.Exists(parentPath) Then Continue For
+                Dim parentKey As String = GetExtractionPathKey(parentPath)
+                Dim parentEntries As List(Of ExtractionPathEntry) = Nothing
+                If Not parents.TryGetValue(parentKey, parentEntries) Then
+                    parentEntries = New List(Of ExtractionPathEntry)
+                    parents.Add(parentKey, parentEntries)
+                End If
+                parentEntries.Add(entry)
+            Next
+        Next
+
+        For Each parentEntries As List(Of ExtractionPathEntry) In parents.Values
+            If parentEntries.Count = 0 Then Continue For
+            Dim parentPath As String = IO.Path.GetDirectoryName(parentEntries(0).FullPath)
+            If String.IsNullOrEmpty(parentPath) Then Continue For
+            Try
+                Dim existingByName As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+                For Each existingPath As String In IO.Directory.GetFileSystemEntries(parentPath)
+                    Dim existingName As String = IO.Path.GetFileName(existingPath)
+                    If Not String.IsNullOrEmpty(existingName) AndAlso Not existingByName.ContainsKey(existingName) Then
+                        existingByName.Add(existingName, existingPath)
+                    End If
+                Next
+                For Each entry As ExtractionPathEntry In parentEntries
+                    If entry.IsOutputRoot Then Continue For
+                    Dim expectedName As String = IO.Path.GetFileName(entry.FullPath)
+                    If String.IsNullOrEmpty(expectedName) Then Continue For
+                    Dim existingPath As String = Nothing
+                    If existingByName.TryGetValue(expectedName, existingPath) Then
+                        Dim existingName As String = IO.Path.GetFileName(existingPath)
+                        If Not String.Equals(existingName, expectedName, StringComparison.Ordinal) Then
+                            AddExtractionCaseConflict(conflicts,
+                                                      parentPath,
+                                                      $"目标路径大小写冲突：{entry.FullPath} 与 {existingPath}（父目录未启用大小写敏感）")
+                        End If
+                    End If
+                Next
+            Catch ex As Exception
+                AddExtractionConflict(conflicts, $"无法检查目标目录中的路径冲突：{parentPath} ({ex.Message})")
+            End Try
+        Next
+
+        If conflicts.Count > 0 Then
+            Dim shown As New List(Of String)
+            For i As Integer = 0 To Math.Min(conflicts.Count, 20) - 1
+                shown.Add(conflicts(i))
+            Next
+            Throw New IO.InvalidDataException("输出目录存在大小写或类型冲突，已停止提取：" &
+                                              Environment.NewLine &
+                                              String.Join(Environment.NewLine, shown))
+        End If
+    End Sub
+
+    Private Function IsExtractionTargetComplete(fileName As String, fileIndex As ltfsindex.file) As Boolean
+        If fileIndex Is Nothing OrElse String.IsNullOrEmpty(fileName) OrElse Not IO.File.Exists(fileName) Then Return False
+        Try
+            Dim info As New IO.FileInfo(fileName)
+            If info.Length <> fileIndex.length Then Return False
+            If info.CreationTimeUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z") <> fileIndex.creationtime Then Return False
+            If info.LastWriteTimeUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffffff00Z") <> fileIndex.modifytime Then Return False
+            Return Not String.Equals(fileIndex.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.Fragment, True),
+                                     "true",
+                                     StringComparison.OrdinalIgnoreCase)
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Function CloneExtractionExtent(source As ltfsindex.file.extent) As ltfsindex.file.extent
+        If source Is Nothing Then Return Nothing
+        Return New ltfsindex.file.extent With {
+            .fileoffset = source.fileoffset,
+            .partition = source.partition,
+            .startblock = source.startblock,
+            .byteoffset = source.byteoffset,
+            .bytecount = source.bytecount}
+    End Function
+
+    Private Function GetExtractionExtents(fileIndex As ltfsindex.file) As List(Of ltfsindex.file.extent)
+        Dim result As New List(Of ltfsindex.file.extent)
+        If fileIndex Is Nothing OrElse fileIndex.extentinfo Is Nothing Then Return result
+
+        For Each source As ltfsindex.file.extent In fileIndex.extentinfo
+            If source Is Nothing Then Throw New IO.InvalidDataException($"{fileIndex.name}: null extent")
+            result.Add(CloneExtractionExtent(source))
+        Next
+
+        ' LTFS 1.0 indexes omitted fileoffset.  Keep the recorded extent order
+        ' for that legacy form, while modern indexes use the stored offsets.
+        Dim legacyOffsets As Boolean = result.Count > 1
+        For Each extent As ltfsindex.file.extent In result
+            If extent.fileoffset <> 0 Then
+                legacyOffsets = False
+                Exit For
+            End If
+        Next
+        If legacyOffsets Then
+            Dim fileOffset As Long = 0
+            For Each extent As ltfsindex.file.extent In result
+                extent.fileoffset = fileOffset
+                If extent.bytecount < 0 OrElse fileOffset > Long.MaxValue - extent.bytecount Then
+                    Throw New IO.InvalidDataException($"{fileIndex.name}: extent offset overflow")
+                End If
+                fileOffset += extent.bytecount
+            Next
+        End If
+        Return result
+    End Function
+
+    Private Sub ValidateExtractionExtent(fileIndex As ltfsindex.file.extent,
+                                         file As ltfsindex.file,
+                                         blockSize As Long)
+        If fileIndex Is Nothing OrElse file Is Nothing Then Throw New IO.InvalidDataException("Invalid extraction extent")
+        If fileIndex.startblock < 0 OrElse fileIndex.fileoffset < 0 OrElse
+           fileIndex.byteoffset < 0 OrElse fileIndex.bytecount < 0 Then
+            Throw New IO.InvalidDataException($"{file.name}: negative extent value")
+        End If
+        If fileIndex.byteoffset >= blockSize AndAlso fileIndex.bytecount > 0 Then
+            Throw New IO.InvalidDataException($"{file.name}: extent byte offset is outside a tape block")
+        End If
+        If fileIndex.bytecount > Long.MaxValue - fileIndex.byteoffset Then
+            Throw New IO.InvalidDataException($"{file.name}: extent size overflow")
+        End If
+        If fileIndex.fileoffset > file.length OrElse fileIndex.bytecount > file.length - fileIndex.fileoffset Then
+            Throw New IO.InvalidDataException($"{file.name}: extent is outside the file")
+        End If
+    End Sub
+
+    Private Sub ValidateExtractionCoverage(file As ltfsindex.file,
+                                           extents As List(Of ltfsindex.file.extent))
+        If file Is Nothing OrElse file.length <= 0 Then Return
+        Dim byFileOffset As New List(Of ltfsindex.file.extent)(extents)
+        byFileOffset.Sort(New Comparison(Of ltfsindex.file.extent)(
+            Function(a As ltfsindex.file.extent, b As ltfsindex.file.extent) As Integer
+                Dim comparison As Integer = a.fileoffset.CompareTo(b.fileoffset)
+                If comparison <> 0 Then Return comparison
+                Return a.bytecount.CompareTo(b.bytecount)
+            End Function))
+
+        Dim coveredUntil As Long = 0
+        For Each extent As ltfsindex.file.extent In byFileOffset
+            If extent.bytecount <= 0 Then Continue For
+            If extent.fileoffset > coveredUntil Then
+                Throw New IO.InvalidDataException($"{file.name}: extent map contains a logical gap")
+            End If
+            Dim extentEnd As Long = extent.fileoffset + extent.bytecount
+            If extentEnd > coveredUntil Then coveredUntil = extentEnd
+            If coveredUntil >= file.length Then Exit For
+        Next
+        If coveredUntil < file.length Then
+            Throw New IO.InvalidDataException($"{file.name}: extent map does not cover the complete file")
+        End If
+    End Sub
+
+    Private Function PrepareExtractionFile(request As ExtractionFileRequest) As ExtractionFileWork
+        If request Is Nothing OrElse request.FileIndex Is Nothing Then Throw New IO.InvalidDataException("Invalid extraction file")
+        If request.FileIndex.length < 0 Then Throw New IO.InvalidDataException($"{request.FileIndex.name}: negative file length")
+
+        Dim targetPath As String = NormalizeExtractionPath(request.FileName)
+        If String.IsNullOrEmpty(targetPath) Then Throw New IO.InvalidDataException("Extraction target path is empty")
+        Dim result As New ExtractionFileWork With {
+            .Request = request,
+            .TempPath = targetPath & ".tmp"}
+
+        If IsExtractionTargetComplete(targetPath, request.FileIndex) Then
+            result.AlreadyComplete = True
+            ApplyExtractionAttributes(targetPath, request.FileIndex)
+            Threading.Interlocked.Increment(CurrentFilesProcessed)
+            Threading.Interlocked.Increment(TotalFilesProcessed)
+            Return result
+        End If
+
+        Dim parentPath As String = IO.Path.GetDirectoryName(targetPath)
+        If Not String.IsNullOrEmpty(parentPath) Then IO.Directory.CreateDirectory(parentPath)
+        If IO.File.Exists(result.TempPath) Then
+            Try
+                Dim tempInfo As New IO.FileInfo(result.TempPath)
+                If (tempInfo.Attributes And IO.FileAttributes.ReadOnly) <> 0 Then
+                    tempInfo.Attributes = tempInfo.Attributes And Not IO.FileAttributes.ReadOnly
+                End If
+            Catch
+            End Try
+        End If
+
+        Dim tempExists As Boolean = IO.File.Exists(result.TempPath)
+        Dim resetTemp As Boolean = Not tempExists
+        Using tempStream As New IO.FileStream(result.TempPath,
+                                              IO.FileMode.OpenOrCreate,
+                                              IO.FileAccess.ReadWrite,
+                                              IO.FileShare.Read,
+                                              1048576,
+                                              IO.FileOptions.RandomAccess)
+            If tempStream.Length <> request.FileIndex.length Then resetTemp = True
+            If Not resetTemp Then
+                Try
+                    If (IO.File.GetAttributes(result.TempPath) And IO.FileAttributes.SparseFile) = 0 Then
+                        ' Keep the temporary output sparse so an interrupted
+                        ' extraction does not consume the complete logical size.
+                        resetTemp = True
+                    End If
+                Catch
+                    resetTemp = True
+                End Try
+            End If
+            If resetTemp Then tempStream.SetLength(0)
+            Dim markedSparse As Boolean = IOManager.TrySetSparseFile(tempStream)
+            If resetTemp Then tempStream.SetLength(request.FileIndex.length)
+            If Not markedSparse Then
+                PrintMsg($"{request.FileIndex.name}: cannot mark temporary file sparse; extraction will reread its extents", Warning:=True, LogOnly:=True)
+            End If
+        End Using
+
+        Return result
+    End Function
+
+    Private Function AskExtractionRetry(message As String,
+                                        Optional caption As String = Nothing) As DialogResult
+        Dim result As DialogResult = DialogResult.Abort
+        Try
+            Invoke(Sub()
+                       result = MessageBox.Show(New Form With {.TopMost = True},
+                                                message,
+                                                If(String.IsNullOrEmpty(caption), My.Resources.ResText_Warning, caption),
+                                                MessageBoxButtons.AbortRetryIgnore)
+                   End Sub)
+        Catch
+        End Try
+        Return result
+    End Function
+
+    Private Function ReadExtractionBlock(blockLength As UInteger,
+                                         ByRef shortReadIgnored As Boolean) As Byte()
+        shortReadIgnored = False
+        While Not StopFlag
+            Dim data As Byte() = Nothing
+            Dim sense() As Byte = {}
+            Try
+                data = TapeUtils.ReadBlock(driveHandle, sense, blockLength, True)
+            Catch ex As Exception
+                Select Case AskExtractionRetry($"{My.Resources.ResText_RErrSCSI}{vbCrLf}{ex}")
+                    Case DialogResult.Abort
+                        StopFlag = True
+                        Throw
+                    Case DialogResult.Retry
+                        Continue While
+                    Case DialogResult.Ignore
+                        shortReadIgnored = True
+                        Return {}
+                End Select
+            End Try
+
+            If data Is Nothing Then data = {}
+            If sense IsNot Nothing AndAlso sense.Length > 2 Then
+                Dim senseValue As Integer = sense(2)
+                Dim senseKey As Integer = senseValue And &HF
+                If ((senseValue >> 6) And 1) = 1 Then
+                    If senseKey <> 13 Then
+                        PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                        Throw New IO.EndOfStreamException("The tape reported end of media while reading an extent")
+                    End If
+                ElseIf senseKey <> 0 Then
+                    PrintMsg($"sense err {TapeUtils.Byte2Hex(sense, True)}", Warning:=True, LogOnly:=True)
+                    Dim autoIgnore As Boolean = False
+                    If My.Settings.LTFSWriter_IgnoreILI AndAlso sense.Length > 17 Then
+                        Dim driveCode As UShort = CUShort(CUShort(sense(16)) << 8 Or sense(17))
+                        If driveCode = &H2C72 OrElse driveCode = &H2C73 Then
+                            autoIgnore = True
+                        ElseIf driveCode = &H3021 Then
+                            Throw New IO.EndOfStreamException("A filemark was encountered inside an extent")
+                        End If
+                    End If
+                    If Not autoIgnore Then
+                        Select Case AskExtractionRetry($"{My.Resources.ResText_RestoreErr}{vbCrLf}{TapeUtils.ParseSenseData(sense)}{vbCrLf}{vbCrLf}sense{vbCrLf}{TapeUtils.Byte2Hex(sense, True)}")
+                            Case DialogResult.Abort
+                                StopFlag = True
+                                Throw New IO.IOException(TapeUtils.ParseSenseData(sense))
+                            Case DialogResult.Retry
+                                Continue While
+                            Case DialogResult.Ignore
+                                shortReadIgnored = True
+                        End Select
+                    End If
+                End If
+            End If
+
+            If data.Length = 0 Then Throw New IO.EndOfStreamException("The tape returned an empty block while reading an extent")
+            If data.Length < blockLength Then
+                Dim message As String = $"Error reading tape block: read {data.Length} bytes, expected {blockLength}"
+                PrintMsg(message, LogOnly:=True, ForceLog:=True)
+                If Not My.Settings.LTFSWriter_IgnoreILI AndAlso Not shortReadIgnored Then
+                    Select Case AskExtractionRetry(message)
+                        Case DialogResult.Abort
+                            StopFlag = True
+                            Throw New IO.EndOfStreamException(message)
+                        Case DialogResult.Retry
+                            Continue While
+                        Case DialogResult.Ignore
+                            shortReadIgnored = True
+                    End Select
+                Else
+                    shortReadIgnored = True
+                End If
+            End If
+            Return data
+        End While
+        Return Nothing
+    End Function
+
+    Private Sub EnsureExtractionPosition(extent As ltfsindex.file.extent)
+        Dim partition As Byte = GetPartitionNumber(CType(extent.partition, ltfslabel.PartitionLabel))
+        Dim blockAddress As ULong = CULng(extent.startblock)
+        If RestorePosition Is Nothing OrElse RestorePosition.PartitionNumber <> partition OrElse
+           RestorePosition.BlockNumber <> blockAddress Then
+            PrintMsg($"LOCATE to P{partition} B{blockAddress}", LogOnly:=True)
+            TapeUtils.Locate(driveHandle, blockAddress, partition, TapeUtils.LocateDestType.Block)
+            RestorePosition = New TapeUtils.PositionData(driveHandle)
+        End If
+    End Sub
+
+    Private Sub AdvanceExtractionPosition()
+        If RestorePosition Is Nothing Then Return
+        SyncLock RestorePosition
+            If RestorePosition.BlockNumber < UInt64.MaxValue Then
+                RestorePosition.BlockNumber = RestorePosition.BlockNumber + CULng(1)
+            End If
+        End SyncLock
+    End Sub
+
+    Private Sub WaitForExtractionPause()
+        While Pause AndAlso Not StopFlag
+            Threading.Thread.Sleep(10)
+        End While
+    End Sub
+
+    Private Sub RestoreExtractionExtent(work As ExtractionExtentWork,
+                                       blockSize As Long)
+        If work Is Nothing OrElse work.FileWork Is Nothing OrElse work.Extent Is Nothing Then Return
+        Dim extent As ltfsindex.file.extent = work.Extent
+        If extent.bytecount <= 0 Then Return
+
+        EnsureExtractionPosition(extent)
+        PrintMsg($"Extent {work.ExtentIndex}: P={work.PhysicalPartition} B={extent.startblock} BO={extent.byteoffset} BC={extent.bytecount} FO={extent.fileoffset}", LogOnly:=True)
+        Dim remaining As Long = extent.bytecount
+        Dim byteOffset As Long = extent.byteoffset
+        Dim written As Long = 0
+        Using output As New IO.FileStream(work.FileWork.TempPath,
+                                          IO.FileMode.Open,
+                                          IO.FileAccess.ReadWrite,
+                                          IO.FileShare.Read,
+                                          1048576,
+                                          IO.FileOptions.RandomAccess)
+            If output.Length <> work.FileWork.Request.FileIndex.length Then
+                Throw New IO.IOException($"Temporary file length changed: {work.FileWork.TempPath}")
+            End If
+            While remaining > 0 AndAlso Not StopFlag
+                Dim requested As Long = Math.Min(blockSize, remaining + byteOffset)
+                If requested <= 0 OrElse requested > UInteger.MaxValue Then
+                    Throw New IO.InvalidDataException("Invalid tape block request length")
+                End If
+                Dim ignoredShortRead As Boolean = False
+                Dim data As Byte() = ReadExtractionBlock(CUInt(requested), ignoredShortRead)
+                If StopFlag OrElse data Is Nothing Then Exit While
+                AdvanceExtractionPosition()
+                If data.Length <= byteOffset Then
+                    Throw New IO.EndOfStreamException("The tape block does not contain the requested extent offset")
+                End If
+                Dim available As Long = data.Length - byteOffset
+                Dim writeLength As Long = Math.Min(remaining, available)
+                If writeLength <= 0 OrElse writeLength > Integer.MaxValue Then
+                    Throw New IO.EndOfStreamException("The tape block does not contain extent data")
+                End If
+                output.Seek(extent.fileoffset + written, IO.SeekOrigin.Begin)
+                output.Write(data, CInt(byteOffset), CInt(writeLength))
+                written += writeLength
+                remaining -= writeLength
+                Threading.Interlocked.Add(TotalBytesProcessed, writeLength)
+                Threading.Interlocked.Add(CurrentBytesProcessed, writeLength)
+                byteOffset = 0
+                WaitForExtractionPause()
+            End While
+            output.Flush()
+        End Using
+        If StopFlag Then Return
+        If remaining <> 0 Then Throw New IO.EndOfStreamException("The tape extent was not completely read")
+    End Sub
+
+    Private Sub ApplyExtractionAttributes(fileName As String,
+                                          fileIndex As ltfsindex.file)
+        Try
+            Dim info As New IO.FileInfo(fileName)
+            If (info.Attributes And IO.FileAttributes.ReadOnly) <> 0 Then
+                info.Attributes = info.Attributes And Not IO.FileAttributes.ReadOnly
+            End If
+            If Not String.IsNullOrEmpty(fileIndex.creationtime) Then
+                info.CreationTimeUtc = TapeUtils.ParseTimeStamp(fileIndex.creationtime)
+            End If
+            If Not String.IsNullOrEmpty(fileIndex.modifytime) Then
+                info.LastWriteTimeUtc = TapeUtils.ParseTimeStamp(fileIndex.modifytime)
+            End If
+            If Not String.IsNullOrEmpty(fileIndex.accesstime) Then
+                info.LastAccessTimeUtc = TapeUtils.ParseTimeStamp(fileIndex.accesstime)
+            End If
+            info.IsReadOnly = fileIndex.readonly
+        Catch ex As Exception
+            PrintMsg($"{fileIndex.name}: cannot apply file attributes: {ex.Message}", Warning:=True, LogOnly:=True)
+        End Try
+    End Sub
+
+    Private Sub CommitExtractionFile(work As ExtractionFileWork)
+        If work Is Nothing OrElse work.AlreadyComplete OrElse StopFlag Then Return
+        If Not IO.File.Exists(work.TempPath) Then Throw New IO.FileNotFoundException("Temporary extraction file is missing", work.TempPath)
+        Dim targetPath As String = work.Request.FileName
+        If Not targetPath.StartsWith("\\", StringComparison.Ordinal) Then targetPath = NormalizeExtractionPath(targetPath)
+        If IO.File.Exists(targetPath) Then
+            Dim targetInfo As New IO.FileInfo(targetPath)
+            If (targetInfo.Attributes And IO.FileAttributes.ReadOnly) <> 0 Then
+                targetInfo.Attributes = targetInfo.Attributes And Not IO.FileAttributes.ReadOnly
+            End If
+            Try
+                IO.File.Replace(work.TempPath, targetPath, Nothing, True)
+            Catch
+                IO.File.Delete(targetPath)
+                IO.File.Move(work.TempPath, targetPath)
+            End Try
+        Else
+            IO.File.Move(work.TempPath, targetPath)
+        End If
+        ApplyExtractionAttributes(targetPath, work.Request.FileIndex)
+        Threading.Interlocked.Increment(CurrentFilesProcessed)
+        Threading.Interlocked.Increment(TotalFilesProcessed)
+    End Sub
+
+    Private Sub PrepareExtractionDirectories(directoryRequests As List(Of ExtractionDirectoryRequest))
+        If directoryRequests Is Nothing Then Return
+        For Each directoryRequest As ExtractionDirectoryRequest In directoryRequests
+            If StopFlag Then Exit For
+            If directoryRequest Is Nothing OrElse String.IsNullOrEmpty(directoryRequest.DirectoryPath) Then
+                Throw New IO.InvalidDataException("Extraction directory path is empty")
+            End If
+            Dim directoryPath As String = NormalizeExtractionPath(directoryRequest.DirectoryPath)
+            If IO.File.Exists(directoryPath) Then
+                Throw New IO.IOException($"Extraction target is a file, not a directory: {directoryPath}")
+            End If
+            IO.Directory.CreateDirectory(directoryPath)
+        Next
+    End Sub
+
+    Private Sub ApplyExtractionDirectoryAttributes(directoryRequest As ExtractionDirectoryRequest)
+        If directoryRequest Is Nothing OrElse directoryRequest.Directory Is Nothing Then Return
+        Try
+            Dim info As New IO.DirectoryInfo(NormalizeExtractionPath(directoryRequest.DirectoryPath))
+            Dim attributes As IO.FileAttributes = info.Attributes
+            If (attributes And IO.FileAttributes.ReadOnly) <> 0 Then
+                attributes = attributes And Not IO.FileAttributes.ReadOnly
+                info.Attributes = attributes
+            End If
+            If Not String.IsNullOrEmpty(directoryRequest.Directory.creationtime) Then
+                info.CreationTimeUtc = TapeUtils.ParseTimeStamp(directoryRequest.Directory.creationtime)
+            End If
+            If Not String.IsNullOrEmpty(directoryRequest.Directory.modifytime) Then
+                info.LastWriteTimeUtc = TapeUtils.ParseTimeStamp(directoryRequest.Directory.modifytime)
+            End If
+            If Not String.IsNullOrEmpty(directoryRequest.Directory.accesstime) Then
+                info.LastAccessTimeUtc = TapeUtils.ParseTimeStamp(directoryRequest.Directory.accesstime)
+            End If
+            attributes = info.Attributes
+            If directoryRequest.Directory.readonly Then
+                info.Attributes = attributes Or IO.FileAttributes.ReadOnly
+            Else
+                info.Attributes = attributes And Not IO.FileAttributes.ReadOnly
+            End If
+        Catch ex As Exception
+            PrintMsg($"{directoryRequest.Directory.name}: cannot apply directory attributes: {ex.Message}",
+                     Warning:=True,
+                     LogOnly:=True)
+        End Try
+    End Sub
+
+    Private Sub FinalizeExtractionDirectories(directoryRequests As List(Of ExtractionDirectoryRequest))
+        If directoryRequests Is Nothing OrElse StopFlag Then Return
+        Dim ordered As New List(Of ExtractionDirectoryRequest)(directoryRequests)
+        ordered.Sort(New Comparison(Of ExtractionDirectoryRequest)(
+            Function(a As ExtractionDirectoryRequest, b As ExtractionDirectoryRequest) As Integer
+                Dim aPath As String = If(a Is Nothing, String.Empty, a.DirectoryPath)
+                Dim bPath As String = If(b Is Nothing, String.Empty, b.DirectoryPath)
+                Return bPath.Length.CompareTo(aPath.Length)
+            End Function))
+        For Each directoryRequest As ExtractionDirectoryRequest In ordered
+            If StopFlag Then Exit For
+            ApplyExtractionDirectoryAttributes(directoryRequest)
+        Next
+    End Sub
+
+    Private Function BuildExtractionPlan(requests As List(Of ExtractionFileRequest),
+                                         ByRef fileWorks As List(Of ExtractionFileWork)) As List(Of ExtractionExtentWork)
+        fileWorks = New List(Of ExtractionFileWork)
+        Dim plan As New List(Of ExtractionExtentWork)
+        If requests Is Nothing Then Return plan
+        Dim blockSize As Long = GetValidationBlockSize()
+        For Each request As ExtractionFileRequest In requests
+            If StopFlag Then Exit For
+            If request Is Nothing OrElse request.FileIndex Is Nothing Then Continue For
+            Dim fileWork As ExtractionFileWork = PrepareExtractionFile(request)
+            fileWorks.Add(fileWork)
+            If fileWork.AlreadyComplete OrElse request.FileIndex.length = 0 Then Continue For
+            Dim extents As List(Of ltfsindex.file.extent) = GetExtractionExtents(request.FileIndex)
+            If extents.Count = 0 Then Throw New IO.InvalidDataException($"{request.FileIndex.name}: file has no extents")
+            For i As Integer = 0 To extents.Count - 1
+                ValidateExtractionExtent(extents(i), request.FileIndex, blockSize)
+                plan.Add(New ExtractionExtentWork With {
+                    .FileWork = fileWork,
+                    .Extent = extents(i),
+                    .ExtentIndex = i,
+                    .PhysicalPartition = GetPartitionNumber(CType(extents(i).partition, ltfslabel.PartitionLabel))})
+            Next
+            ValidateExtractionCoverage(request.FileIndex, extents)
+        Next
+
+        plan.Sort(New Comparison(Of ExtractionExtentWork)(
+            Function(a As ExtractionExtentWork, b As ExtractionExtentWork) As Integer
+                Dim comparison As Integer = a.PhysicalPartition.CompareTo(b.PhysicalPartition)
+                If comparison <> 0 Then Return comparison
+                comparison = a.Extent.startblock.CompareTo(b.Extent.startblock)
+                If comparison <> 0 Then Return comparison
+                comparison = a.Extent.byteoffset.CompareTo(b.Extent.byteoffset)
+                If comparison <> 0 Then Return comparison
+                comparison = a.Extent.fileoffset.CompareTo(b.Extent.fileoffset)
+                If comparison <> 0 Then Return comparison
+                comparison = StringComparer.OrdinalIgnoreCase.Compare(a.FileWork.Request.FileName, b.FileWork.Request.FileName)
+                If comparison <> 0 Then Return comparison
+                Return a.ExtentIndex.CompareTo(b.ExtentIndex)
+            End Function))
+        Return plan
+    End Function
+
+    Private Sub RestoreFilesInTapeOrder(requests As List(Of ExtractionFileRequest),
+                                        outputRoot As String,
+                                        Optional directoryRequests As List(Of ExtractionDirectoryRequest) = Nothing)
+        If StopFlag Then Return
+        ValidateExtractionPaths(requests, outputRoot, directoryRequests)
+        If StopFlag Then Return
+        PrepareExtractionDirectories(directoryRequests)
+        Dim fileWorks As List(Of ExtractionFileWork) = Nothing
+        Dim plan As List(Of ExtractionExtentWork) = BuildExtractionPlan(requests, fileWorks)
+        PrintMsg($"Extraction schedule: files={If(requests Is Nothing, 0, requests.Count)}, physical extents={plan.Count}", LogOnly:=True)
+        If StopFlag Then Return
+        For Each extentWork As ExtractionExtentWork In plan
+            If StopFlag Then Exit For
+            RestoreExtractionExtent(extentWork, GetValidationBlockSize())
+        Next
+        If StopFlag Then Return
+        For Each fileWork As ExtractionFileWork In fileWorks
+            If StopFlag Then Exit For
+            CommitExtractionFile(fileWork)
+        Next
+        If StopFlag Then Return
+        FinalizeExtractionDirectories(directoryRequests)
+    End Sub
+
     Public Sub RestoreFile(FileName As String, FileIndex As ltfsindex.file)
         If Not FileName.StartsWith("\\") Then FileName = $"\\?\{FileName}"
         Dim FileExist As Boolean = True
@@ -5441,6 +6231,9 @@ Public Class LTFSWriter
 
         Dim th As New Threading.Thread(
                 Sub()
+                    Dim reserved As Boolean = False
+                    Dim succeeded As Boolean = False
+                    Dim cancelled As Boolean = False
                     Try
                         CurrentFilesProcessed = 0
                         CurrentBytesProcessed = 0
@@ -5448,38 +6241,58 @@ Public Class LTFSWriter
                         UnwrittenCountOverrideValue = CULng(flist.Count)
                         StartTime = Now
                         For Each FI As ltfsindex.file In flist
-                            UnwrittenSizeOverrideValue = CULng(UnwrittenSizeOverrideValue + FI.length)
+                            UnwrittenSizeOverrideValue = CULng(UnwrittenSizeOverrideValue + Math.Max(0L, FI.length))
                             FI.TempObj = Nothing
                         Next
                         SetStatusLight(LWStatus.Busy)
                         PrintMsg(My.Resources.ResText_Restoring)
                         StopFlag = False
                         TapeUtils.ReserveUnit(driveHandle)
+                        reserved = True
                         TapeUtils.PreventMediaRemoval(driveHandle)
                         RestorePosition = New TapeUtils.PositionData(driveHandle)
-                        For Each FileIndex As ltfsindex.file In flist
-                            Dim FileName As String = IO.Path.Combine(BasePath, FileIndex.name)
-                            RestoreFile(FileName, FileIndex)
-                            If StopFlag Then
-                                PrintMsg(My.Resources.ResText_OpCancelled)
-                                SetStatusLight(LWStatus.Idle)
-                                LockGUI(False)
-                                Exit Sub
-                            End If
+                        Dim requests As New List(Of ExtractionFileRequest)
+                        For Each fileIndex As ltfsindex.file In flist
+                            requests.Add(New ExtractionFileRequest With {
+                                             .FileName = IO.Path.Combine(BasePath, fileIndex.name),
+                                             .FileIndex = fileIndex})
                         Next
+                        RestoreFilesInTapeOrder(requests, BasePath)
+                        If StopFlag Then
+                            cancelled = True
+                            PrintMsg(My.Resources.ResText_OpCancelled)
+                            SetStatusLight(LWStatus.Idle)
+                        Else
+                            succeeded = True
+                            PrintMsg(My.Resources.ResText_RestFin)
+                            SetStatusLight(LWStatus.Succ)
+                        End If
                     Catch ex As Exception
                         PrintMsg($"{My.Resources.ResText_RestoreErr}{ex.ToString}", ForceLog:=True)
                         SetStatusLight(LWStatus.Err)
+                    Finally
+                        If reserved Then
+                            Try
+                                TapeUtils.AllowMediumRemoval(driveHandle)
+                            Catch
+                            End Try
+                            Try
+                                TapeUtils.ReleaseUnit(driveHandle)
+                            Catch
+                            End Try
+                        End If
+                        cancelled = cancelled OrElse StopFlag
+                        StopFlag = False
+                        UnwrittenSizeOverrideValue = 0
+                        UnwrittenCountOverrideValue = 0
+                        LockGUI(False)
                     End Try
-                    TapeUtils.AllowMediumRemoval(driveHandle)
-                    TapeUtils.ReleaseUnit(driveHandle)
-                    StopFlag = False
-                    UnwrittenSizeOverrideValue = 0
-                    UnwrittenCountOverrideValue = 0
-                    LockGUI(False)
-                    PrintMsg(My.Resources.ResText_RestFin)
-                    SetStatusLight(LWStatus.Succ)
-                    Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_RestFin))
+                    If succeeded AndAlso Not cancelled Then
+                        Try
+                            Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_RestFin))
+                        Catch
+                        End Try
+                    End If
                 End Sub)
         th.Start()
     End Sub
@@ -5519,22 +6332,39 @@ Public Class LTFSWriter
                         TapeUtils.ReserveUnit(driveHandle)
                         TapeUtils.PreventMediaRemoval(driveHandle)
                         RestorePosition = New TapeUtils.PositionData(driveHandle)
+                        Dim requests As New List(Of ExtractionFileRequest)
+                        Dim directoryRequests As New List(Of ExtractionDirectoryRequest)
                         For Each node As TreeNode In Nodes
                             If StopFlag Then Exit For
                             Dim selectedDir As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
                             If selectedDir Is Nothing Then Continue For
                             Dim outputPath As String = IO.Path.Combine(selectedPath, If(selectedDir.name, String.Empty))
                             If Not outputPath.StartsWith("\\") Then outputPath = $"\\?\{outputPath}"
-                            If Not IO.Directory.Exists(outputPath) Then IO.Directory.CreateDirectory(outputPath)
                             Dim outputDirectory As New IO.DirectoryInfo(outputPath)
+                            directoryRequests.Add(New ExtractionDirectoryRequest With {
+                                                       .DirectoryPath = outputPath,
+                                                       .Directory = selectedDir})
                             TraverseRestoreFiles(selectedDir, outputDirectory,
                                 Sub(fr As FileRecord)
                                     If StopFlag Then Return
                                     c += 1
                                     PrintMsg($"{My.Resources.ResText_Restoring} [{c}/{totalFiles}] {fr.File.name}", False, $"{My.Resources.ResText_Restoring} [{c}/{totalFiles}] {fr.SourcePath}")
-                                    RestoreFile(fr.SourcePath, fr.File)
-                                End Sub)
+                                    requests.Add(New ExtractionFileRequest With {
+                                                     .FileName = fr.SourcePath,
+                                                     .FileIndex = fr.File})
+                                End Sub,
+                                Sub(childPath As String, childDirectory As ltfsindex.directory)
+                                    directoryRequests.Add(New ExtractionDirectoryRequest With {
+                                                               .DirectoryPath = childPath,
+                                                               .Directory = childDirectory})
+                                End Sub,
+                                False)
                         Next
+                        If Not StopFlag Then
+                            RestoreFilesInTapeOrder(requests,
+                                                    selectedPath,
+                                                    directoryRequests)
+                        End If
                         If StopFlag Then
                             PrintMsg(My.Resources.ResText_OpCancelled)
                             SetStatusLight(LWStatus.Idle)
@@ -6048,7 +6878,9 @@ Public Class LTFSWriter
 
     Private Sub TraverseRestoreFiles(directory As ltfsindex.directory,
                                      outputDirectory As IO.DirectoryInfo,
-                                     onFile As Action(Of FileRecord))
+                                     onFile As Action(Of FileRecord),
+                                     Optional onDirectory As Action(Of String, ltfsindex.directory) = Nothing,
+                                     Optional createDirectories As Boolean = True)
         If directory Is Nothing OrElse outputDirectory Is Nothing OrElse onFile Is Nothing Then Return
         For Each file As ltfsindex.file In directory.EnumerateLazyFiles()
             If StopFlag Then Exit Sub
@@ -6060,10 +6892,11 @@ Public Class LTFSWriter
         For Each childDirectory As ltfsindex.directory In directory.EnumerateLazyDirectories()
             If StopFlag Then Exit Sub
             Dim childPath As String = IO.Path.Combine(outputDirectory.FullName, If(childDirectory.name, String.Empty))
-            Dim restoreTimeStamp As Boolean = Not IO.Directory.Exists(childPath)
-            If restoreTimeStamp Then IO.Directory.CreateDirectory(childPath)
+            If onDirectory IsNot Nothing Then onDirectory(childPath, childDirectory)
+            Dim restoreTimeStamp As Boolean = createDirectories AndAlso Not IO.Directory.Exists(childPath)
+            If createDirectories AndAlso Not IO.Directory.Exists(childPath) Then IO.Directory.CreateDirectory(childPath)
             Dim childOutput As New IO.DirectoryInfo(childPath)
-            TraverseRestoreFiles(childDirectory, childOutput, onFile)
+            TraverseRestoreFiles(childDirectory, childOutput, onFile, onDirectory, createDirectories)
             If restoreTimeStamp Then
                 Try
                     childOutput.CreationTimeUtc = TapeUtils.ParseTimeStamp(childDirectory.creationtime)
