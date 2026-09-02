@@ -995,11 +995,13 @@ Public Class LTFSWriter
             Dim USize As Long = CLng(UnwrittenSize)
             Dim UFile As Long = CLng(UnwrittenCount)
             Dim fastProviderSnapshot = _activeFastReaderProvider
-            If fastProviderSnapshot IsNot Nothing Then
+            If fastProviderSnapshot IsNot Nothing AndAlso Not StopFlag Then
                 Try
                     PipeBufferLength = fastProviderSnapshot.BufferedBytes
                 Catch
                 End Try
+            ElseIf StopFlag Then
+                PipeBufferLength = 0
             End If
             ToolStripStatusLabel4.Text = " "
             ToolStripStatusLabel4.Text &= $"{My.Resources.ResText_S0}{IOManager.FormatSize(ddelta)}/s"
@@ -6791,6 +6793,7 @@ Public Class LTFSWriter
                 Dim ufReadCountIncremented As Boolean = False
                 Try
                     ClearWriteCompletionState()
+                    PipeBufferLength = 0
                     SetStatusLight(LWStatus.Busy)
                     StartTime = Now
                     PipePause = False
@@ -6804,22 +6807,14 @@ Public Class LTFSWriter
                     mediumRemovalPrevented = True
                     Dim locateResult As Boolean = False
                     LTE = New AutoResetEvent(False)
-                    locateTask = Task.Run(Sub()
-                                              Try
-                                                  locateResult = LocateToWritePosition()
-                                              Finally
-                                                  Try
-                                                      LTE.Set()
-                                                  Catch
-                                                  End Try
-                                              End Try
-                                          End Sub)
                     IsWriting = True
                     My.Settings.LTFSWriter_PreLoadBytes = My.Settings.LTFSWriter_PreLoadBytes
                     RingBufferEnabled = My.Settings.LTFSWriter_RingBufferEnabled
                     UFReadCount.Inc()
                     ufReadCountIncremented = True
                     Dim useFastReader As Boolean = False
+                    Dim writePlan As List(Of PlannedWrite) = Nothing
+                    Dim dedupeReferenceUseCount As New Dictionary(Of Integer, Integer)
                     If UnwrittenCount > 0 Then
                         CurrentFilesProcessed = 0
                         CurrentBytesProcessed = 0
@@ -6878,8 +6873,30 @@ Public Class LTFSWriter
                             provider.Start()
                         End If
 
+                        If useFastReader Then
+                            ' The fast reader starts producing only after its ordered
+                            ' file list is configured.  Do this before tape positioning
+                            ' so its cache can fill while LocateToWritePosition runs.
+                            Dim existingFiles As IEnumerable(Of ltfsindex.file) = Enumerable.Empty(Of ltfsindex.file)()
+                            If My.Settings.LTFSWriter_DeDupe Then existingFiles = EnumerateSchemaFiles()
+                            writePlan = BuildWritePlan(WriteList, existingFiles, useFastReader, fastProvider)
+                            Dim orderedDataFiles = Enumerable.Range(0, writePlan.Count).
+                                Where(Function(index) writePlan(index).Kind = PlannedWriteKind.DataPartitionMaterial).
+                                Select(Function(index) CLng(index)).ToList()
+                            fastProvider.ConfigureOrderedFiles(orderedDataFiles)
+                        End If
                     End If
 
+                    locateTask = Task.Run(Sub()
+                                              Try
+                                                  locateResult = LocateToWritePosition()
+                                              Finally
+                                                  Try
+                                                      LTE.Set()
+                                                  Catch
+                                                  End Try
+                                              End Try
+                                          End Sub)
                     Dim lcounter As Integer = 0
                     While Not (locateTask.IsCompleted OrElse locateTask.IsCanceled OrElse locateTask.IsFaulted)
                         LTE.WaitOne(10)
@@ -6915,12 +6932,10 @@ Public Class LTFSWriter
                         Dim ExitForFlag As Boolean = False
                         Dim completedWriteRecords As New List(Of FileRecord)
                         'DeDupe
-
-                        Dim existingFiles As IEnumerable(Of ltfsindex.file) = Enumerable.Empty(Of ltfsindex.file)()
-                        If My.Settings.LTFSWriter_DeDupe Then existingFiles = EnumerateSchemaFiles()
-                        Dim writePlan = BuildWritePlan(WriteList, existingFiles, useFastReader, fastProvider)
-                        Dim dedupeReferenceUseCount As New Dictionary(Of Integer, Integer)
                         If Not useFastReader Then
+                            Dim existingFiles As IEnumerable(Of ltfsindex.file) = Enumerable.Empty(Of ltfsindex.file)()
+                            If My.Settings.LTFSWriter_DeDupe Then existingFiles = EnumerateSchemaFiles()
+                            writePlan = BuildWritePlan(WriteList, existingFiles, useFastReader, fastProvider)
                             For planIndex As Integer = 0 To writePlan.Count - 1
                                 Dim referenceIndex As Integer = writePlan(planIndex).NewReferenceIndex
                                 If referenceIndex >= 0 Then
@@ -6931,10 +6946,6 @@ Public Class LTFSWriter
                             Next
                         End If
                         If useFastReader Then
-                            Dim orderedDataFiles = Enumerable.Range(0, writePlan.Count).
-                                Where(Function(index) writePlan(index).Kind = PlannedWriteKind.DataPartitionMaterial).
-                                Select(Function(index) CLng(index)).ToList()
-                            fastProvider.ConfigureOrderedFiles(orderedDataFiles)
                             WaitForInitialFastReaderFill(fastProvider)
                         End If
                         IndexLastUpdateTime = Now
@@ -7853,7 +7864,6 @@ Public Class LTFSWriter
                     ResetFastReaderBufferWait()
                     Try
                         If provider IsNot Nothing Then
-                            PipeBufferLength = 0
                             provider.Cancel()
                             provider.CompleteAsync().GetAwaiter().GetResult()
                             provider = Nothing
@@ -7861,6 +7871,7 @@ Public Class LTFSWriter
                     Catch cleanupEx As Exception
                         Log.Error(cleanupEx, "Managed reader cleanup failed.")
                     End Try
+                    PipeBufferLength = 0
                     For Each record As FileRecord In WriteList
                         Try
                             If record IsNot Nothing Then record.Close()
