@@ -520,6 +520,25 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
+fn is_xml_whitespace(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| matches!(character, ' ' | '\t' | '\r' | '\n'))
+}
+
+fn is_file_record_formatting_element(name: &str) -> bool {
+    name == "file"
+        || name == "extendedattributes"
+        || name == "xattr"
+        || name == "extentinfo"
+        || name == "extent"
+}
+
+fn is_file_record_formatting_whitespace(elements: &[bool], value: &str) -> bool {
+    is_xml_whitespace(value) && elements.last().copied().unwrap_or(false)
+}
+
 fn parse_partition(value: &str) -> Option<u32> {
     match value.trim().to_ascii_lowercase().as_str() {
         "a" => Some(0),
@@ -1409,6 +1428,7 @@ impl StoreOutput {
                 .write_event(Event::Start(start))
                 .map_err(|error| error.to_string())?;
             let mut depth = 1i32;
+            let mut elements = vec![true];
             let mut buffer = Vec::new();
             while depth > 0 {
                 let event = reader
@@ -1418,6 +1438,9 @@ impl StoreOutput {
                 buffer.clear();
                 match event {
                     Event::Start(value) => {
+                        elements.push(is_file_record_formatting_element(
+                            value.local_name().as_ref(),
+                        ));
                         writer
                             .write_event(Event::Start(value))
                             .map_err(|error| error.to_string())?;
@@ -1430,11 +1453,18 @@ impl StoreOutput {
                         writer
                             .write_event(Event::End(value))
                             .map_err(|error| error.to_string())?;
+                        elements
+                            .pop()
+                            .ok_or_else(|| invalid("file record XML depth underflow"))?;
                         depth -= 1;
                     }
-                    Event::Text(value) => writer
-                        .write_event(Event::Text(value))
-                        .map_err(|error| error.to_string())?,
+                    Event::Text(value) => {
+                        if !is_file_record_formatting_whitespace(&elements, value.as_ref()) {
+                            writer
+                                .write_event(Event::Text(value))
+                                .map_err(|error| error.to_string())?;
+                        }
+                    }
                     Event::CData(value) => writer
                         .write_event(Event::CData(value))
                         .map_err(|error| error.to_string())?,
@@ -1477,6 +1507,7 @@ impl StoreOutput {
                 .map_err(|error| error.to_string())?;
 
             let mut depth = 1i32;
+            let mut elements = vec![true];
             let mut has_extended_attributes = false;
             let mut buffer = Vec::new();
             while depth > 0 {
@@ -1494,6 +1525,9 @@ impl StoreOutput {
                                 .map_err(|error| error.to_string())?;
                             copy_extended_attributes_with_barcode(reader, &mut writer, barcode)?;
                         } else {
+                            elements.push(is_file_record_formatting_element(
+                                value.local_name().as_ref(),
+                            ));
                             writer
                                 .write_event(Event::Start(value))
                                 .map_err(|error| error.to_string())?;
@@ -1525,10 +1559,17 @@ impl StoreOutput {
                         writer
                             .write_event(Event::End(value))
                             .map_err(|error| error.to_string())?;
+                        elements
+                            .pop()
+                            .ok_or_else(|| invalid("file record XML depth underflow"))?;
                     }
-                    Event::Text(value) => writer
-                        .write_event(Event::Text(value))
-                        .map_err(|error| error.to_string())?,
+                    Event::Text(value) => {
+                        if !is_file_record_formatting_whitespace(&elements, value.as_ref()) {
+                            writer
+                                .write_event(Event::Text(value))
+                                .map_err(|error| error.to_string())?;
+                        }
+                    }
                     Event::CData(value) => writer
                         .write_event(Event::CData(value))
                         .map_err(|error| error.to_string())?,
@@ -1609,6 +1650,7 @@ fn copy_extended_attributes_with_barcode<R: BufRead, W: Write>(
     barcode: &str,
 ) -> Result<(), String> {
     let mut depth = 1i32;
+    let mut elements = vec![true];
     let mut buffer = Vec::new();
     while depth > 0 {
         let event = reader
@@ -1618,6 +1660,9 @@ fn copy_extended_attributes_with_barcode<R: BufRead, W: Write>(
         buffer.clear();
         match event {
             Event::Start(value) => {
+                elements.push(is_file_record_formatting_element(
+                    value.local_name().as_ref(),
+                ));
                 writer
                     .write_event(Event::Start(value))
                     .map_err(|error| error.to_string())?;
@@ -1634,10 +1679,17 @@ fn copy_extended_attributes_with_barcode<R: BufRead, W: Write>(
                 writer
                     .write_event(Event::End(value))
                     .map_err(|error| error.to_string())?;
+                elements
+                    .pop()
+                    .ok_or_else(|| invalid("extended attribute XML depth underflow"))?;
             }
-            Event::Text(value) => writer
-                .write_event(Event::Text(value))
-                .map_err(|error| error.to_string())?,
+            Event::Text(value) => {
+                if !is_file_record_formatting_whitespace(&elements, value.as_ref()) {
+                    writer
+                        .write_event(Event::Text(value))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
             Event::CData(value) => writer
                 .write_event(Event::CData(value))
                 .map_err(|error| error.to_string())?,
@@ -7083,6 +7135,8 @@ mod tests {
         let xml = String::from_utf8(serialize_file(&value).expect("serialize file"))
             .expect("UTF-8 file XML");
         assert!(xml.contains("中文 &amp; &lt;name&gt;.txt"));
+        assert!(xml.contains("<readonly>false</readonly>"));
+        assert!(xml.contains("<openforwrite>true</openforwrite>"));
         let parsed = FileParser::new(Reader::from_reader(Cursor::new(xml.as_bytes())))
             .parse()
             .expect("parse file XML");
@@ -7106,6 +7160,47 @@ mod tests {
     }
 
     #[test]
+    fn imported_pretty_file_records_drop_formatting_whitespace() {
+        let root = std::env::temp_dir().join(format!(
+            "ltfscopy_schema_pretty_file_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create pretty file test directory");
+        let input = root.join("pretty.schema");
+        let paths = [
+            root.join("files.bin"),
+            root.join("directories.bin"),
+            root.join("file-index.bin"),
+            root.join("directory-index.bin"),
+            root.join("selection.bin"),
+        ];
+        let text = r#"<ltfsindex version="2.4.0">
+  <directory>
+    <name>root</name>
+    <contents>
+      <file>
+        <name> spaced.txt </name>
+        <length>1</length>
+      </file>
+    </contents>
+  </directory>
+</ltfsindex>"#;
+        std::fs::write(&input, text).expect("write pretty file schema");
+
+        let context = schema_context_from_file(input.to_string_lossy().into_owned(), paths.clone())
+            .expect("parse pretty file schema");
+        let record = std::fs::read(&paths[0]).expect("read compacted file record");
+        assert_eq!(
+            std::str::from_utf8(&record).expect("UTF-8 file record"),
+            "<file><name> spaced.txt </name><length>1</length></file>"
+        );
+
+        drop(context);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn merges_schema_roots_directly_into_one_lazy_store() {
         let root =
             std::env::temp_dir().join(format!("ltfscopy_schema_merge_test_{}", std::process::id()));
@@ -7120,7 +7215,26 @@ mod tests {
             root.join("directory-index.bin"),
             root.join("selection.bin"),
         ];
-        let first_text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><contents><file><name>a.txt</name><length>1</length></file><directory><name>sub</name><contents><file><name>b.txt</name><length>2</length></file></contents></directory></contents></directory></ltfsindex>"#;
+        let first_text = r#"<ltfsindex version="2.4.0">
+  <directory>
+    <name>root</name>
+    <contents>
+      <file>
+        <name>a.txt</name>
+        <length>1</length>
+      </file>
+      <directory>
+        <name>sub</name>
+        <contents>
+          <file>
+            <name>b.txt</name>
+            <length>2</length>
+          </file>
+        </contents>
+      </directory>
+    </contents>
+  </directory>
+</ltfsindex>"#;
         let second_text = r#"<ltfsindex version="2.4.0"><directory><name>root</name><contents><file><name>c.txt</name><length>3</length></file></contents></directory></ltfsindex>"#;
         std::fs::write(&first, first_text).expect("write first schema");
         std::fs::write(&second, second_text).expect("write second schema");
@@ -7160,6 +7274,8 @@ mod tests {
         .expect("read first merged file");
         let first_file = parse_file_bytes(&first_file_bytes).expect("parse first merged file");
         assert_eq!(first_file.name, "a.txt");
+        assert!(!first_file_bytes.contains(&b'\n'));
+        assert!(!first_file_bytes.contains(&b'\r'));
         assert_eq!(
             first_file
                 .xattrs

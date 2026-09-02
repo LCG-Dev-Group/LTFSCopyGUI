@@ -50,6 +50,10 @@ Friend Module NativeSchemaXml
     Friend Const SchemaStringVolumeUuid As UInteger = 2
     Friend Const SchemaStringUpdateTime As UInteger = 3
 
+    Friend Function BooleanText(value As Boolean) As String
+        Return If(value, "true", "false")
+    End Function
+
     <StructLayout(LayoutKind.Sequential, Pack:=8)>
     Friend Structure NativeUtf16Slice
         Public Pointer As IntPtr
@@ -1098,7 +1102,7 @@ Friend Module NativeSchemaXml
             writer.WriteElement("updatetime", index.updatetime)
             WriteEagerLocation(writer, "location", index.location)
             WriteEagerLocation(writer, "previousgenerationlocation", index.previousgenerationlocation)
-            writer.WriteElement("allowpolicyupdate", index.allowpolicyupdate.ToString())
+            writer.WriteElement("allowpolicyupdate", BooleanText(index.allowpolicyupdate))
             If index.dataplacementpolicy IsNot Nothing Then writer.EmptyElement("dataplacementpolicy")
             writer.WriteElement("volumelockstate", index.volumelockstate.ToString())
             writer.WriteElement("highestfileuid", index.highestfileuid.ToString(CultureInfo.InvariantCulture))
@@ -1128,7 +1132,7 @@ Friend Module NativeSchemaXml
         If directory Is Nothing Then Return
         writer.StartElement("directory")
         writer.WriteElement("name", directory.name)
-        writer.WriteElement("readonly", directory.readonly.ToString())
+        writer.WriteElement("readonly", BooleanText(directory.readonly))
         writer.WriteElement("creationtime", directory.creationtime)
         writer.WriteElement("changetime", directory.changetime)
         writer.WriteElement("modifytime", directory.modifytime)

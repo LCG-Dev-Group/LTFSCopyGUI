@@ -3376,7 +3376,7 @@ Friend NotInheritable Class LazySchemaStore
             writer.WriteElement("updatetime", index.updatetime)
             WriteNativeLocation(writer, "location", index.location)
             WriteNativeLocation(writer, "previousgenerationlocation", index.previousgenerationlocation)
-            writer.WriteElement("allowpolicyupdate", index.allowpolicyupdate.ToString())
+            writer.WriteElement("allowpolicyupdate", NativeSchemaXml.BooleanText(index.allowpolicyupdate))
             If index.dataplacementpolicy IsNot Nothing Then writer.EmptyElement("dataplacementpolicy")
             writer.WriteElement("volumelockstate", index.volumelockstate.ToString())
             writer.WriteElement("highestfileuid", index.highestfileuid.ToString(CultureInfo.InvariantCulture))
@@ -3492,7 +3492,7 @@ Friend NotInheritable Class LazySchemaStore
             writer.EndElement("contents")
         Else
             writer.WriteElement("name", directory.name)
-            writer.WriteElement("readonly", directory.readonly.ToString())
+            writer.WriteElement("readonly", NativeSchemaXml.BooleanText(directory.readonly))
             writer.WriteElement("creationtime", directory.creationtime)
             writer.WriteElement("changetime", directory.changetime)
             writer.WriteElement("modifytime", directory.modifytime)
@@ -3518,7 +3518,7 @@ Friend NotInheritable Class LazySchemaStore
 
     Private Shared Sub WriteNativeDirectoryScalars(writer As NativeSchemaWriter, values As LazyDirectoryScalarData)
         writer.WriteElement("name", values.Name)
-        writer.WriteElement("readonly", values.ReadOnly.ToString())
+        writer.WriteElement("readonly", NativeSchemaXml.BooleanText(values.ReadOnly))
         writer.WriteElement("creationtime", values.CreationTime)
         writer.WriteElement("changetime", values.ChangeTime)
         writer.WriteElement("modifytime", values.ModifyTime)
