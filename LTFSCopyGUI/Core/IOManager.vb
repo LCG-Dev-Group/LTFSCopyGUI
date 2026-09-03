@@ -1553,6 +1553,19 @@ Public Class IOManager
             Return False
         End Try
     End Function
+    Public Shared Function TryGetSparseSupport(directoryPath As String) As Boolean
+        Try
+            Dim tmpfname = IO.Path.Combine(directoryPath, $"LCG_{Now.ToString("yyyyMMdd_HHmmss.fffffff")}.tmp")
+            Dim result As Boolean
+            Using tmpf As New IO.FileStream(tmpfname, IO.FileMode.Create)
+                result = TrySetSparseFile(tmpf)
+            End Using
+            IO.File.Delete(tmpfname)
+            Return result
+        Catch
+            Return False
+        End Try
+    End Function
 
     Public Shared Function TrySetSparseFile(stream As FileStream) As Boolean
         If stream Is Nothing Then Return False

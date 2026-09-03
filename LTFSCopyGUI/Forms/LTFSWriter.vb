@@ -212,9 +212,10 @@ Public Class LTFSWriter
             Threading.Interlocked.Exchange(_allowOperationValue, If(value, 1, 0))
         End Set
     End Property
+    Public Property IsDevLicense As Boolean = False
     Private ReadOnly Property TapeEjectedReadOnly As Boolean
         Get
-            Return Threading.Volatile.Read(_tapeEjectedValue) <> 0
+            Return (Threading.Volatile.Read(_tapeEjectedValue) <> 0) AndAlso (Not IsDevLicense)
         End Get
     End Property
     Private Function CanOperateTape() As Boolean
@@ -445,7 +446,8 @@ Public Class LTFSWriter
         IndexWriteInterval = IndexWriteInterval
         CapacityRefreshInterval = CapacityRefreshInterval
         SpeedLimit = SpeedLimit
-        If My.Settings.Application_License.ToLower().Contains("dev") Then TestToolStripMenuItem.Visible = True
+        IsDevLicense = My.Settings.Application_License.ToLower().Contains("dev")
+        If IsDevLicense Then TestToolStripMenuItem.Visible = True
     End Sub
     Public Sub Save_Settings()
         SaveListViewColumnOrder()
@@ -7162,15 +7164,27 @@ Public Class LTFSWriter
                                      outputDirectory As IO.DirectoryInfo,
                                      onFile As Action(Of FileRecord),
                                      Optional onDirectory As Action(Of String, ltfsindex.directory) = Nothing,
-                                     Optional createDirectories As Boolean = True)
+                                     Optional createDirectories As Boolean = True,
+                                     Optional parallelRestore As Boolean = False)
         If directory Is Nothing OrElse outputDirectory Is Nothing OrElse onFile Is Nothing Then Return
-        For Each file As ltfsindex.file In directory.EnumerateLazyFiles()
-            If StopFlag Then Exit Sub
-            file.TempObj = New ltfsindex.file.refFile() With {.FileName = ""}
-            onFile(New FileRecord With {
+        If Not parallelRestore Then
+            For Each file As ltfsindex.file In directory.EnumerateLazyFiles()
+                If StopFlag Then Exit Sub
+                file.TempObj = New ltfsindex.file.refFile() With {.FileName = ""}
+                onFile(New FileRecord With {
                        .File = file,
                        .SourcePath = IO.Path.Combine(outputDirectory.FullName, If(file.name, String.Empty))})
-        Next
+            Next
+        Else
+            Parallel.ForEach(directory.EnumerateLazyFiles(), Sub(file As ltfsindex.file)
+                                                                 If StopFlag Then Exit Sub
+                                                                 file.TempObj = New ltfsindex.file.refFile() With {.FileName = ""}
+                                                                 onFile(New FileRecord With {
+                                                                        .File = file,
+                                                                        .SourcePath = IO.Path.Combine(outputDirectory.FullName, If(file.name, String.Empty))})
+                                                             End Sub)
+            If StopFlag Then Exit Sub
+        End If
         For Each childDirectory As ltfsindex.directory In directory.EnumerateLazyDirectories()
             If StopFlag Then Exit Sub
             Dim childPath As String = IO.Path.Combine(outputDirectory.FullName, If(childDirectory.name, String.Empty))
@@ -7178,7 +7192,7 @@ Public Class LTFSWriter
             Dim restoreTimeStamp As Boolean = createDirectories AndAlso Not IO.Directory.Exists(childPath)
             If createDirectories AndAlso Not IO.Directory.Exists(childPath) Then IO.Directory.CreateDirectory(childPath)
             Dim childOutput As New IO.DirectoryInfo(childPath)
-            TraverseRestoreFiles(childDirectory, childOutput, onFile, onDirectory, createDirectories)
+            TraverseRestoreFiles(childDirectory, childOutput, onFile, onDirectory, createDirectories, parallelRestore)
             If restoreTimeStamp Then
                 Try
                     childOutput.CreationTimeUtc = TapeUtils.ParseTimeStamp(childDirectory.creationtime)
@@ -15943,6 +15957,7 @@ Public Class LTFSWriter
                         UnwrittenCountOverrideValue = CULng(Math.Max(0, totalFiles))
                         StartTime = Now
                         PrintMsg(My.Resources.ResText_RestFile)
+                        Dim parallelRestore = IOManager.TryGetSparseSupport(outputDirectory)
                         Dim c As Long = 0
                         TapeUtils.ReserveUnit(driveHandle)
                         TapeUtils.PreventMediaRemoval(driveHandle)
@@ -15952,16 +15967,17 @@ Public Class LTFSWriter
                             Dim selectedDir As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
                             If selectedDir Is Nothing Then Continue For
                             Dim outputPath As String = IO.Path.Combine(outputDirectory, If(selectedDir.name, String.Empty))
+
                             If Not outputPath.StartsWith("\\") Then outputPath = $"\\?\{outputPath}"
                             If Not IO.Directory.Exists(outputPath) Then IO.Directory.CreateDirectory(outputPath)
                             Dim output As New IO.DirectoryInfo(outputPath)
                             TraverseRestoreFiles(selectedDir, output,
                                 Sub(fr As FileRecord)
                                     If StopFlag Then Return
-                                    c += 1
-                                    PrintMsg($"{My.Resources.ResText_Restoring} [{c}/{totalFiles}] {fr.File.name}", False, $"{My.Resources.ResText_Restoring} [{c}/{totalFiles}] {fr.SourcePath}")
+                                    Dim c2 = Threading.Interlocked.Increment(c)
+                                    PrintMsg($"{My.Resources.ResText_Restoring} [{c2}/{totalFiles}] {fr.File.name}", False, $"{My.Resources.ResText_Restoring} [{c2}/{totalFiles}] {fr.SourcePath}")
                                     IOManager.CreateSparceFile(fr.SourcePath, fr.File.length)
-                                End Sub)
+                                End Sub, parallelRestore:=parallelRestore)
                         Next
                         If StopFlag Then
                             PrintMsg(My.Resources.ResText_OpCancelled)
@@ -16031,8 +16047,8 @@ Public Class LTFSWriter
                             TraverseRestoreFiles(selectedDir, New IO.DirectoryInfo(outputPath),
                                 Sub(fr As FileRecord)
                                     If StopFlag Then Return
-                                    c += 1
-                                    PrintMsg($"{My.Resources.ResText_Deleting} [{c}/{totalFiles}] {fr.File.name}", False, $"{My.Resources.ResText_Deleting} [{c}/{totalFiles}] {fr.SourcePath}")
+                                    Dim c2 = Threading.Interlocked.Increment(c)
+                                    PrintMsg($"{My.Resources.ResText_Deleting} [{c2}/{totalFiles}] {fr.File.name}", False, $"{My.Resources.ResText_Deleting} [{c2}/{totalFiles}] {fr.SourcePath}")
                                     Try
                                         If IO.File.Exists(fr.SourcePath) AndAlso
                                            (New IO.FileInfo(fr.SourcePath)).Length = fr.File.length Then
@@ -16041,7 +16057,7 @@ Public Class LTFSWriter
                                     Catch ex As Exception
                                         PrintMsg($"[ERROR]{fr.SourcePath}>{ex.ToString()}", LogOnly:=True, ForceLog:=True)
                                     End Try
-                                End Sub)
+                                End Sub, parallelRestore:=True)
                         Next
                         If StopFlag Then
                             PrintMsg(My.Resources.ResText_OpCancelled)
