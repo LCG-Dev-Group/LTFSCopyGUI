@@ -288,6 +288,7 @@ Public Class LTFSWriter
     Private _pendingSize As Long
     Private _activeAddFileLookup As Dictionary(Of ltfsindex.directory, Dictionary(Of String, List(Of ltfsindex.file)))
     Private _activeAddFileLookupCalls As Dictionary(Of ltfsindex.directory, Integer)
+    Private Shared ReadOnly EmptyExistingFilesForAdd As New List(Of ltfsindex.file)
     Private _lastMessage As String = String.Empty
     Private Const SearchProgressMaximum As Integer = 10000
     Private _searchProgressActive As Integer
@@ -1173,8 +1174,11 @@ Public Class LTFSWriter
             Dim resolvedPath As String = FileSystemPathResolver.ResolveExistingFilePath(finf.FullName)
             finf = New IO.FileInfo(resolvedPath)
             ParentDirectory = ParentDir
-            SourcePath = finf.FullName
-            If Not SourcePath.StartsWith("\\") Then SourcePath = $"\\?\{SourcePath}"
+            'The FileInfo was created from the resolved path above.  Assign the
+            'backing field directly so SourcePath does not resolve the same path
+            'a second time for every added file.
+            _sourcePath = finf.FullName
+            If Not _sourcePath.StartsWith("\\") Then _sourcePath = $"\\?\{_sourcePath}"
             File = New ltfsindex.file With {
                 .name = finf.Name,
                 .fileuid = -1,
@@ -1552,16 +1556,27 @@ Public Class LTFSWriter
         If directory Is Nothing OrElse fileName Is Nothing Then Return False
         SyncLock _pendingQueueLock
             directory = ResolvePendingDirectoryUnsafe(directory)
-            Dim byName As Dictionary(Of String, FileRecord) = GetPendingDirectoryIndexUnsafe(directory)
+            Dim byName As Dictionary(Of String, FileRecord) = Nothing
+            Dim hasIndexedDirectory As Boolean = _pendingByDirectory.TryGetValue(directory, byName)
+            If Not hasIndexedDirectory Then byName = GetPendingDirectoryIndexUnsafe(directory)
             Dim record As FileRecord = Nothing
             If byName.TryGetValue(fileName, record) AndAlso record IsNot Nothing AndAlso record.File IsNot Nothing AndAlso
                    String.Equals(record.File.name, fileName, StringComparison.Ordinal) Then
                 Return RemovePendingRecord(record)
             End If
 
-            ' Direct list edits are still supported by the old public model.  The
-            ' indexed path handles normal adds; this fallback keeps those edits
-            ' correct without making every add scan the whole global queue.
+            Dim indexedDirectoryIsConsistent As Boolean = hasIndexedDirectory
+            If hasIndexedDirectory Then
+                Dim directoryPendingCount As Integer = 0
+                If directory.UnwrittenFiles IsNot Nothing Then
+                    SyncLock directory.UnwrittenFiles
+                        directoryPendingCount = directory.UnwrittenFiles.Count
+                    End SyncLock
+                End If
+                indexedDirectoryIsConsistent = directoryPendingCount = byName.Count
+            End If
+            If indexedDirectoryIsConsistent Then Return False
+
             Dim removedFiles As New HashSet(Of ltfsindex.file)
             If directory.UnwrittenFiles IsNot Nothing Then
                 SyncLock directory.UnwrittenFiles
@@ -1644,7 +1659,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Function GetExistingFilesForAdd(directory As ltfsindex.directory, fileName As String) As List(Of ltfsindex.file)
-        If directory Is Nothing Then Return New List(Of ltfsindex.file)
+        If directory Is Nothing Then Return EmptyExistingFilesForAdd
         If _activeAddFileLookup Is Nothing Then Return directory.FindFilesByName(fileName)
 
         Dim byName As Dictionary(Of String, List(Of ltfsindex.file)) = Nothing
@@ -1675,7 +1690,7 @@ Public Class LTFSWriter
 
         Dim result As List(Of ltfsindex.file) = Nothing
         If byName.TryGetValue(If(fileName, String.Empty), result) Then Return New List(Of ltfsindex.file)(result)
-        Return New List(Of ltfsindex.file)
+        Return EmptyExistingFilesForAdd
     End Function
 
     Private Sub RemoveExistingFileFromAddLookup(directory As ltfsindex.directory, file As ltfsindex.file)
