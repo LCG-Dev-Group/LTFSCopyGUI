@@ -7926,7 +7926,7 @@ Public Class LTFSWriter
             End Using
             PrintMsg($"fastreader tape write: calls={writeCallCount} bytes={IOManager.FormatSize(writeByteCount)} elapsed={writeElapsedSeconds:F3}s average={averageWriteMiBs:F1}MiB/s slowest={slowestWrite:F1}MiB/s min_buffered={IOManager.FormatSize(minimumBuffer)}",
                      LogOnly:=True,
-                     IsWarn:=True)
+                     IsWarn:=False)
         Else
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSWriter))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")

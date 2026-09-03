@@ -61,11 +61,14 @@ Namespace My
         End Function
 
         Private Sub MyApplication_Startup(sender As Object, e As StartupEventArgs) Handles Me.Startup
+            Dim writerSessionId As String = Nothing
             If e.CommandLine.Count <> 0 Then
                 Dim param As String = e.CommandLine(0)
                 If param.StartsWith("/") Then param = "-" & param.TrimStart("/"c)
                 Select Case param
-                    Case "-s", "-open", "-writer-process", "-t", "-f", "-c", "-l", "-copy"
+                    Case "-open", "-writer-process", "-c", "-l", "-copy"
+                    Case "-s", "-t", "-f"
+                        writerSessionId = Now.Ticks.ToString()
                     Case "-rb", "-wb", "-raw", "-mkltfs"
                         If Not CheckUAC(e) Then Return
                         InitConsole()
@@ -83,7 +86,6 @@ Namespace My
                 End If
             Next
             Dim logDirectory As String = Path.Combine(Windows.Forms.Application.StartupPath, "log")
-            Dim writerSessionId As String = Nothing
             If writerProcessArgumentIndex >= 0 Then
                 logDirectory = Path.Combine(logDirectory, "writer")
                 If writerProcessArgumentIndex + 2 < e.CommandLine.Count Then
