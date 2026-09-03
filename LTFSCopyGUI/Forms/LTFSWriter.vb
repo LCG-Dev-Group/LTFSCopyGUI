@@ -598,10 +598,13 @@ Public Class LTFSWriter
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", logCategory)
                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
                     Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "WriterStatus")
-                        If Warning OrElse IsWarn Then
+                        If Warning Then
                             Log.Warning("Writer warning status update.")
+                        End If
+                        If IsWarn Then
+                            Log.Warning($"{s}")
                         Else
-                            Log.Information(If(LogOnly, "Writer diagnostic status update.", "Writer status update."))
+                            Log.Information(If(LogOnly, $"Bkglog:{s}", $"{s}"))
                         End If
                     End Using
                 End Using
@@ -2148,60 +2151,60 @@ Public Class LTFSWriter
                          End Try
                          Try
                              If Not TapeEjectedReadOnly Then Invoke(Sub()
-                                        Try
-                                            DeviceStatusLogPage = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_DeviceStatusLogPage, logdataDSLP)
-                                            DTDStatusLogPage = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_DataTransferDeviceStatusLogPage, logdataDTD)
-                                            Dim Page1 As TapeUtils.PageData.DataItem.DynamicParamPage = DeviceStatusLogPage.TryGetPage(&H1)
-                                            If Page1 Is Nothing Then Exit Sub
-                                            Dim DevStatusBits As TapeUtils.PageData = Page1.GetPage
-                                            Dim TapeFlag, DriveFlag, CleanFlag, EncryptionFlag As Boolean
-                                            If DevStatusBits IsNot Nothing Then
-                                                For Each item As TapeUtils.PageData.DataItem In DevStatusBits.Items
-                                                    Select Case item.Name.ToLower
-                                                        Case "cleaning required flag"
-                                                            CleanFlag = CleanFlag Or (item.RawData(0) <> 0)
-                                                        Case "cleaning requested flag"
-                                                            CleanFlag = CleanFlag Or (item.RawData(0) <> 0)
-                                                        Case "device status"
-                                                            DriveFlag = (item.RawData(0) > 1)
-                                                        Case "medium status"
-                                                            TapeFlag = (item.RawData(0) > 1)
-                                                    End Select
-                                                Next
-                                            End If
-                                            Dim VHFData As TapeUtils.PageData = DTDStatusLogPage.TryGetPage(0).GetPage
-                                            If VHFData IsNot Nothing Then
-                                                For Each item As TapeUtils.PageData.DataItem In VHFData.Items
-                                                    Select Case item.Name.ToLower
-                                                        Case "encryption parameters present"
-                                                            EncryptionFlag = (item.RawData(0) = 1)
-                                                    End Select
-                                                Next
-                                            End If
-                                            If EncryptionFlag Then
-                                                ToolStripStatusLabelS2.ForeColor = Color.Blue
-                                            Else
-                                                ToolStripStatusLabelS2.ForeColor = Color.Gray
-                                            End If
-                                            If CleanFlag Then
-                                                ToolStripStatusLabelS3.ForeColor = Color.Orange
-                                            Else
-                                                ToolStripStatusLabelS3.ForeColor = Color.Gray
-                                            End If
-                                            If TapeFlag Then
-                                                ToolStripStatusLabelS4.ForeColor = Color.Orange
-                                            Else
-                                                ToolStripStatusLabelS4.ForeColor = Color.Gray
-                                            End If
-                                            If DriveFlag Then
-                                                ToolStripStatusLabelS5.ForeColor = Color.Orange
-                                            Else
-                                                ToolStripStatusLabelS5.ForeColor = Color.Gray
-                                            End If
-                                        Catch ex As Exception
-                                            PrintMsg(ex.ToString(), LogOnly:=True)
-                                        End Try
-                                    End Sub)
+                                                                        Try
+                                                                            DeviceStatusLogPage = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_DeviceStatusLogPage, logdataDSLP)
+                                                                            DTDStatusLogPage = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_DataTransferDeviceStatusLogPage, logdataDTD)
+                                                                            Dim Page1 As TapeUtils.PageData.DataItem.DynamicParamPage = DeviceStatusLogPage.TryGetPage(&H1)
+                                                                            If Page1 Is Nothing Then Exit Sub
+                                                                            Dim DevStatusBits As TapeUtils.PageData = Page1.GetPage
+                                                                            Dim TapeFlag, DriveFlag, CleanFlag, EncryptionFlag As Boolean
+                                                                            If DevStatusBits IsNot Nothing Then
+                                                                                For Each item As TapeUtils.PageData.DataItem In DevStatusBits.Items
+                                                                                    Select Case item.Name.ToLower
+                                                                                        Case "cleaning required flag"
+                                                                                            CleanFlag = CleanFlag Or (item.RawData(0) <> 0)
+                                                                                        Case "cleaning requested flag"
+                                                                                            CleanFlag = CleanFlag Or (item.RawData(0) <> 0)
+                                                                                        Case "device status"
+                                                                                            DriveFlag = (item.RawData(0) > 1)
+                                                                                        Case "medium status"
+                                                                                            TapeFlag = (item.RawData(0) > 1)
+                                                                                    End Select
+                                                                                Next
+                                                                            End If
+                                                                            Dim VHFData As TapeUtils.PageData = DTDStatusLogPage.TryGetPage(0).GetPage
+                                                                            If VHFData IsNot Nothing Then
+                                                                                For Each item As TapeUtils.PageData.DataItem In VHFData.Items
+                                                                                    Select Case item.Name.ToLower
+                                                                                        Case "encryption parameters present"
+                                                                                            EncryptionFlag = (item.RawData(0) = 1)
+                                                                                    End Select
+                                                                                Next
+                                                                            End If
+                                                                            If EncryptionFlag Then
+                                                                                ToolStripStatusLabelS2.ForeColor = Color.Blue
+                                                                            Else
+                                                                                ToolStripStatusLabelS2.ForeColor = Color.Gray
+                                                                            End If
+                                                                            If CleanFlag Then
+                                                                                ToolStripStatusLabelS3.ForeColor = Color.Orange
+                                                                            Else
+                                                                                ToolStripStatusLabelS3.ForeColor = Color.Gray
+                                                                            End If
+                                                                            If TapeFlag Then
+                                                                                ToolStripStatusLabelS4.ForeColor = Color.Orange
+                                                                            Else
+                                                                                ToolStripStatusLabelS4.ForeColor = Color.Gray
+                                                                            End If
+                                                                            If DriveFlag Then
+                                                                                ToolStripStatusLabelS5.ForeColor = Color.Orange
+                                                                            Else
+                                                                                ToolStripStatusLabelS5.ForeColor = Color.Gray
+                                                                            End If
+                                                                        Catch ex As Exception
+                                                                            PrintMsg(ex.ToString(), LogOnly:=True)
+                                                                        End Try
+                                                                    End Sub)
                          Catch
                          End Try
 
@@ -2228,321 +2231,321 @@ Public Class LTFSWriter
             Dim logdataCap As Byte() = TapeUtils.LogSense(handleSnapshot, &H31, 0, PageControl:=1)
             Dim logdataVStat As Byte() = TapeUtils.LogSense(handleSnapshot, &H17, 0, PageControl:=1)
             Try
-            CapacityLogPage = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_TapeCapacityLogPage, logdataCap)
-            Dim Gen As Integer, WORM As Boolean, WP As Boolean, GenStr As String = ""
-            If logdataVStat Is Nothing OrElse logdataVStat.Length <= 4 Then
-                If CMOnce Is Nothing Then CMOnce = New TapeUtils.CMParser(driveHandle)
-                If CMOnce IsNot Nothing Then
-                    GenStr = CMOnce.CartridgeMfgData.CartridgeTypeAbbr
-                End If
-            Else
-                VolumeStatisticsLogPage = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_VolumeStatisticsLogPage, logdataVStat)
-                Dim GenPage As TapeUtils.PageData.DataItem.DynamicParamPage = VolumeStatisticsLogPage.TryGetPage(&H45)
-                If GenPage IsNot Nothing Then
-                    Dim GenStr0 As String = GenPage.GetString()
-                    Integer.TryParse(IOManager.ExtractNumericString(GenStr0), Gen)
-                    If Not GenStr0.ToUpper().Contains("T10K") Then
-                        GenStr = $"L{Gen}"
-                    Else
-                        Gen = Integer.Parse(GenStr0.Last)
-                        GenStr = $"T{Gen}"
+                CapacityLogPage = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_TapeCapacityLogPage, logdataCap)
+                Dim Gen As Integer, WORM As Boolean, WP As Boolean, GenStr As String = ""
+                If logdataVStat Is Nothing OrElse logdataVStat.Length <= 4 Then
+                    If CMOnce Is Nothing Then CMOnce = New TapeUtils.CMParser(driveHandle)
+                    If CMOnce IsNot Nothing Then
+                        GenStr = CMOnce.CartridgeMfgData.CartridgeTypeAbbr
                     End If
-                    If Gen = 7 OrElse Gen = 8 Then
+                Else
+                    VolumeStatisticsLogPage = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_VolumeStatisticsLogPage, logdataVStat)
+                    Dim GenPage As TapeUtils.PageData.DataItem.DynamicParamPage = VolumeStatisticsLogPage.TryGetPage(&H45)
+                    If GenPage IsNot Nothing Then
+                        Dim GenStr0 As String = GenPage.GetString()
+                        Integer.TryParse(IOManager.ExtractNumericString(GenStr0), Gen)
+                        If Not GenStr0.ToUpper().Contains("T10K") Then
+                            GenStr = $"L{Gen}"
+                        Else
+                            Gen = Integer.Parse(GenStr0.Last)
+                            GenStr = $"T{Gen}"
+                        End If
+                        If Gen = 7 OrElse Gen = 8 Then
+                            If CMOnce Is Nothing Then CMOnce = New TapeUtils.CMParser(driveHandle)
+                            If CMOnce IsNot Nothing Then
+                                GenStr = CMOnce.CartridgeMfgData.CartridgeTypeAbbr
+                            End If
+                        End If
+                    Else
                         If CMOnce Is Nothing Then CMOnce = New TapeUtils.CMParser(driveHandle)
                         If CMOnce IsNot Nothing Then
                             GenStr = CMOnce.CartridgeMfgData.CartridgeTypeAbbr
                         End If
                     End If
-                Else
-                    If CMOnce Is Nothing Then CMOnce = New TapeUtils.CMParser(driveHandle)
-                    If CMOnce IsNot Nothing Then
-                        GenStr = CMOnce.CartridgeMfgData.CartridgeTypeAbbr
-                    End If
+                    GenAbbr = GenStr
+                    Dim WORMPage As TapeUtils.PageData.DataItem.DynamicParamPage = VolumeStatisticsLogPage.TryGetPage(&H81)
+                    If WORMPage IsNot Nothing Then WORM = ((WORMPage.LastByte) <> 0)
+                    Dim WPPage As TapeUtils.PageData.DataItem.DynamicParamPage = VolumeStatisticsLogPage.TryGetPage(&H80)
+                    If WPPage IsNot Nothing Then WP = ((WPPage.LastByte) <> 0)
                 End If
-                GenAbbr = GenStr
-                Dim WORMPage As TapeUtils.PageData.DataItem.DynamicParamPage = VolumeStatisticsLogPage.TryGetPage(&H81)
-                If WORMPage IsNot Nothing Then WORM = ((WORMPage.LastByte) <> 0)
-                Dim WPPage As TapeUtils.PageData.DataItem.DynamicParamPage = VolumeStatisticsLogPage.TryGetPage(&H80)
-                If WPPage IsNot Nothing Then WP = ((WPPage.LastByte) <> 0)
-            End If
-            Dim errRate As Double = 0
-            If Gen > 0 Then errRate = ReadChanLRInfo()
-            PrintMsg($"[RefreshCapacity] ErrRateLogValue: {errRate}", LogOnly:=True)
-            RefreshDriveLEDIndicator()
+                Dim errRate As Double = 0
+                If Gen > 0 Then errRate = ReadChanLRInfo()
+                PrintMsg($"[RefreshCapacity] ErrRateLogValue: {errRate}", LogOnly:=True)
+                RefreshDriveLEDIndicator()
 
-            Dim MediaDescription As String = $"{GenStr}"
-            If WORM Then MediaDescription &= " WORM"
-            If WP Then MediaDescription &= " RO" Else MediaDescription &= " RW"
+                Dim MediaDescription As String = $"{GenStr}"
+                If WORM Then MediaDescription &= " WORM"
+                If WP Then MediaDescription &= " RO" Else MediaDescription &= " RW"
 
-            Dim cap0, cap1, max0, max1 As Long
-            Dim cp0 As TapeUtils.PageData.DataItem.DynamicParamPage = CapacityLogPage.TryGetPage(1)
-            Dim cp1 As TapeUtils.PageData.DataItem.DynamicParamPage = CapacityLogPage.TryGetPage(2)
-            Dim mp0 As TapeUtils.PageData.DataItem.DynamicParamPage = CapacityLogPage.TryGetPage(3)
-            Dim mp1 As TapeUtils.PageData.DataItem.DynamicParamPage = CapacityLogPage.TryGetPage(4)
-            If cp0 IsNot Nothing Then cap0 = cp0.GetLong
-            If cp1 IsNot Nothing Then cap1 = cp1.GetLong
-            If mp0 IsNot Nothing Then max0 = mp0.GetLong
-            If mp1 IsNot Nothing Then max1 = mp1.GetLong
-            If cp0 Is Nothing Then
-                Select Case TapeUtils.DriverTypeSetting
-                    Case TapeUtils.DriverType.IBM3592
-                        Dim mp23h As Byte() = TapeUtils.ModeSense(driveHandle, &H23, SkipHeader:=False)
-                        Select Case (CShort(mp23h(4 + 12)) << 8 Or mp23h(5 + 12))
-                            Case 0
-                            Case &H141
-                                MediaDescription = "JA"
-                            Case &H142
-                                MediaDescription = "JB"
-                            Case &H143
-                                MediaDescription = "JC"
-                            Case &H144
-                                MediaDescription = "JD"
-                            Case &H145
-                                MediaDescription = "JE"
-                            Case &H146
-                                MediaDescription = "JF"
-                            Case &H151
-                                MediaDescription = "JJ"
-                            Case &H152
-                                MediaDescription = "JK"
-                            Case &H153
-                                MediaDescription = "JL"
-                            Case &H154
-                                MediaDescription = "JM"
-                            Case &H241
-                                MediaDescription = "JW"
-                            Case &H242
-                                MediaDescription = "JX"
-                            Case &H243
-                                MediaDescription = "JY"
-                            Case &H244
-                                MediaDescription = "JZ"
-                            Case &H251
-                                MediaDescription = "JR"
-                        End Select
-                        GenAbbr = MediaDescription
-                        Select Case mp23h(6 + 12)
-                            Case &H31
-                                MediaDescription &= " A1"
-                            Case &H32
-                                MediaDescription &= " A2"
-                            Case &H33
-                                MediaDescription &= " A3"
-                            Case &H34
-                                MediaDescription &= " A4"
-                            Case &H35
-                                MediaDescription &= " A5"
-                            Case &H36
-                                MediaDescription &= " B5"
-                            Case &H37
-                                MediaDescription &= " A6"
-                            Case &H39
-                                MediaDescription &= " A7"
-                            Case &H71
-                                MediaDescription &= " A1"
-                            Case &H72
-                                MediaDescription &= " A2"
-                            Case &H73
-                                MediaDescription &= " A3"
-                            Case &H74
-                                MediaDescription &= " A4"
-                            Case &H75
-                                MediaDescription &= " A5"
-                            Case &H76
-                                MediaDescription &= " B5"
-                            Case &H77
-                                MediaDescription &= " A6"
-                            Case &H79
-                                MediaDescription &= " A7"
-                        End Select
-                        If (((mp23h(10 + 12) >> 7) And 1) = 1) Then
-                            MediaDescription &= " RO(Phy)"
-                            WP = True
-                        ElseIf (((mp23h(10 + 12) >> 6) And 1) = 1) Then
-                            MediaDescription &= " RO(Asc)"
-                            WP = True
-                        ElseIf (((mp23h(10 + 12) >> 4) And 1) = 1) Then
-                            MediaDescription &= " RO(Pst)"
-                            WP = True
-                        ElseIf (((mp23h(10 + 12) >> 0) And 1) = 1) Then
-                            MediaDescription &= " RO(Pmn)"
-                            WP = True
-                        Else
-                            MediaDescription &= " RW"
-                        End If
-                        Dim mps As TapeUtils.PageData.DataItem.DynamicParamPage = VolumeStatisticsLogPage.TryGetPage(&H202)
-                        If mps Is Nothing Then
-                            mp0 = VolumeStatisticsLogPage.TryGetPage(&H16)
-                            cp0 = VolumeStatisticsLogPage.TryGetPage(&H17)
-                            If mp0 IsNot Nothing Then max0 = mp0.GetLong
-                            If cp0 IsNot Nothing Then cap0 = max0 - cp0.GetLong
-                        Else
-                            Dim cps As TapeUtils.PageData.DataItem.DynamicParamPage = VolumeStatisticsLogPage.TryGetPage(&H203)
-                            Dim cpsdata As Byte() = cps.RawData
-                            Dim mpsdata As Byte() = mps.RawData
-                            For i As Integer = If(cpsdata.Length Mod 8 = 0, 0, 4) To cpsdata.Length - 1 Step 8
-                                If cpsdata(i + 2) = 0 Then
-                                    If cpsdata(i + 3) = 0 Then
-                                        cap0 = cpsdata(i + 4)
-                                        cap0 <<= 8
-                                        cap0 = cap0 Or cpsdata(i + 5)
-                                        cap0 <<= 8
-                                        cap0 = cap0 Or cpsdata(i + 6)
-                                        cap0 <<= 8
-                                        cap0 = cap0 Or cpsdata(i + 7)
-                                    ElseIf cpsdata(i + 3) = 1 Then
-                                        cap1 = cpsdata(i + 4)
-                                        cap1 <<= 8
-                                        cap1 = cap1 Or cpsdata(i + 5)
-                                        cap1 <<= 8
-                                        cap1 = cap1 Or cpsdata(i + 6)
-                                        cap1 <<= 8
-                                        cap1 = cap1 Or cpsdata(i + 7)
+                Dim cap0, cap1, max0, max1 As Long
+                Dim cp0 As TapeUtils.PageData.DataItem.DynamicParamPage = CapacityLogPage.TryGetPage(1)
+                Dim cp1 As TapeUtils.PageData.DataItem.DynamicParamPage = CapacityLogPage.TryGetPage(2)
+                Dim mp0 As TapeUtils.PageData.DataItem.DynamicParamPage = CapacityLogPage.TryGetPage(3)
+                Dim mp1 As TapeUtils.PageData.DataItem.DynamicParamPage = CapacityLogPage.TryGetPage(4)
+                If cp0 IsNot Nothing Then cap0 = cp0.GetLong
+                If cp1 IsNot Nothing Then cap1 = cp1.GetLong
+                If mp0 IsNot Nothing Then max0 = mp0.GetLong
+                If mp1 IsNot Nothing Then max1 = mp1.GetLong
+                If cp0 Is Nothing Then
+                    Select Case TapeUtils.DriverTypeSetting
+                        Case TapeUtils.DriverType.IBM3592
+                            Dim mp23h As Byte() = TapeUtils.ModeSense(driveHandle, &H23, SkipHeader:=False)
+                            Select Case (CShort(mp23h(4 + 12)) << 8 Or mp23h(5 + 12))
+                                Case 0
+                                Case &H141
+                                    MediaDescription = "JA"
+                                Case &H142
+                                    MediaDescription = "JB"
+                                Case &H143
+                                    MediaDescription = "JC"
+                                Case &H144
+                                    MediaDescription = "JD"
+                                Case &H145
+                                    MediaDescription = "JE"
+                                Case &H146
+                                    MediaDescription = "JF"
+                                Case &H151
+                                    MediaDescription = "JJ"
+                                Case &H152
+                                    MediaDescription = "JK"
+                                Case &H153
+                                    MediaDescription = "JL"
+                                Case &H154
+                                    MediaDescription = "JM"
+                                Case &H241
+                                    MediaDescription = "JW"
+                                Case &H242
+                                    MediaDescription = "JX"
+                                Case &H243
+                                    MediaDescription = "JY"
+                                Case &H244
+                                    MediaDescription = "JZ"
+                                Case &H251
+                                    MediaDescription = "JR"
+                            End Select
+                            GenAbbr = MediaDescription
+                            Select Case mp23h(6 + 12)
+                                Case &H31
+                                    MediaDescription &= " A1"
+                                Case &H32
+                                    MediaDescription &= " A2"
+                                Case &H33
+                                    MediaDescription &= " A3"
+                                Case &H34
+                                    MediaDescription &= " A4"
+                                Case &H35
+                                    MediaDescription &= " A5"
+                                Case &H36
+                                    MediaDescription &= " B5"
+                                Case &H37
+                                    MediaDescription &= " A6"
+                                Case &H39
+                                    MediaDescription &= " A7"
+                                Case &H71
+                                    MediaDescription &= " A1"
+                                Case &H72
+                                    MediaDescription &= " A2"
+                                Case &H73
+                                    MediaDescription &= " A3"
+                                Case &H74
+                                    MediaDescription &= " A4"
+                                Case &H75
+                                    MediaDescription &= " A5"
+                                Case &H76
+                                    MediaDescription &= " B5"
+                                Case &H77
+                                    MediaDescription &= " A6"
+                                Case &H79
+                                    MediaDescription &= " A7"
+                            End Select
+                            If (((mp23h(10 + 12) >> 7) And 1) = 1) Then
+                                MediaDescription &= " RO(Phy)"
+                                WP = True
+                            ElseIf (((mp23h(10 + 12) >> 6) And 1) = 1) Then
+                                MediaDescription &= " RO(Asc)"
+                                WP = True
+                            ElseIf (((mp23h(10 + 12) >> 4) And 1) = 1) Then
+                                MediaDescription &= " RO(Pst)"
+                                WP = True
+                            ElseIf (((mp23h(10 + 12) >> 0) And 1) = 1) Then
+                                MediaDescription &= " RO(Pmn)"
+                                WP = True
+                            Else
+                                MediaDescription &= " RW"
+                            End If
+                            Dim mps As TapeUtils.PageData.DataItem.DynamicParamPage = VolumeStatisticsLogPage.TryGetPage(&H202)
+                            If mps Is Nothing Then
+                                mp0 = VolumeStatisticsLogPage.TryGetPage(&H16)
+                                cp0 = VolumeStatisticsLogPage.TryGetPage(&H17)
+                                If mp0 IsNot Nothing Then max0 = mp0.GetLong
+                                If cp0 IsNot Nothing Then cap0 = max0 - cp0.GetLong
+                            Else
+                                Dim cps As TapeUtils.PageData.DataItem.DynamicParamPage = VolumeStatisticsLogPage.TryGetPage(&H203)
+                                Dim cpsdata As Byte() = cps.RawData
+                                Dim mpsdata As Byte() = mps.RawData
+                                For i As Integer = If(cpsdata.Length Mod 8 = 0, 0, 4) To cpsdata.Length - 1 Step 8
+                                    If cpsdata(i + 2) = 0 Then
+                                        If cpsdata(i + 3) = 0 Then
+                                            cap0 = cpsdata(i + 4)
+                                            cap0 <<= 8
+                                            cap0 = cap0 Or cpsdata(i + 5)
+                                            cap0 <<= 8
+                                            cap0 = cap0 Or cpsdata(i + 6)
+                                            cap0 <<= 8
+                                            cap0 = cap0 Or cpsdata(i + 7)
+                                        ElseIf cpsdata(i + 3) = 1 Then
+                                            cap1 = cpsdata(i + 4)
+                                            cap1 <<= 8
+                                            cap1 = cap1 Or cpsdata(i + 5)
+                                            cap1 <<= 8
+                                            cap1 = cap1 Or cpsdata(i + 6)
+                                            cap1 <<= 8
+                                            cap1 = cap1 Or cpsdata(i + 7)
+                                        End If
                                     End If
-                                End If
-                            Next
-                            For i As Integer = If(cpsdata.Length Mod 8 = 0, 0, 4) To mpsdata.Length - 1 Step 8
-                                If mpsdata(i + 2) = 0 Then
-                                    If mpsdata(i + 3) = 0 Then
-                                        max0 = mpsdata(i + 4)
-                                        max0 <<= 8
-                                        max0 = max0 Or mpsdata(i + 5)
-                                        max0 <<= 8
-                                        max0 = max0 Or mpsdata(i + 6)
-                                        max0 <<= 8
-                                        max0 = max0 Or mpsdata(i + 7)
-                                    ElseIf mpsdata(i + 3) = 1 Then
-                                        max1 = mpsdata(i + 4)
-                                        max1 <<= 8
-                                        max1 = max1 Or mpsdata(i + 5)
-                                        max1 <<= 8
-                                        max1 = max1 Or mpsdata(i + 6)
-                                        max1 <<= 8
-                                        max1 = max1 Or mpsdata(i + 7)
+                                Next
+                                For i As Integer = If(cpsdata.Length Mod 8 = 0, 0, 4) To mpsdata.Length - 1 Step 8
+                                    If mpsdata(i + 2) = 0 Then
+                                        If mpsdata(i + 3) = 0 Then
+                                            max0 = mpsdata(i + 4)
+                                            max0 <<= 8
+                                            max0 = max0 Or mpsdata(i + 5)
+                                            max0 <<= 8
+                                            max0 = max0 Or mpsdata(i + 6)
+                                            max0 <<= 8
+                                            max0 = max0 Or mpsdata(i + 7)
+                                        ElseIf mpsdata(i + 3) = 1 Then
+                                            max1 = mpsdata(i + 4)
+                                            max1 <<= 8
+                                            max1 = max1 Or mpsdata(i + 5)
+                                            max1 <<= 8
+                                            max1 = max1 Or mpsdata(i + 6)
+                                            max1 <<= 8
+                                            max1 = max1 Or mpsdata(i + 7)
+                                        End If
                                     End If
-                                End If
-                            Next
-                            cap0 = max0 - cap0
-                            cap1 = max1 - cap1
+                                Next
+                                cap0 = max0 - cap0
+                                cap1 = max1 - cap1
+                            End If
+                    End Select
+                End If
+
+
+                'cap0 = TapeUtils.MAMAttribute.FromTapeDrive(TapeDrive, 0, 0, 0).AsNumeric
+                Dim loss As Long
+                If My.Settings.LTFSWriter_ShowLoss Then
+                    Dim CMInfo As TapeUtils.CMParser
+                    Try
+                        Dim errormsg As Exception = Nothing
+                        CMInfo = New TapeUtils.CMParser(TapeUtils.ReceiveDiagCM(driveHandle, TapeUtils.CMParser.Cartridge_mfg.GetCMLength($"L{Gen}")), errormsg)
+                        If errormsg IsNot Nothing Then Throw errormsg
+                    Catch ex As Exception
+                        CMInfo = New TapeUtils.CMParser(driveHandle)
+                    End Try
+                    Dim nLossDS As Long = 0
+                    Dim DataSize As New List(Of Long)
+                    If CMInfo.CartridgeMfgData.CartridgeTypeAbbr = "CU" Then Exit Try
+                    Dim StartBlock As Integer = 0
+                    Dim CurrSize As Long = 0
+                    Dim gw As Boolean = False
+                    For wn As Integer = 0 To CMInfo.a_NWraps - 1
+                        Dim StartBlockStr As String = StartBlock.ToString()
+                        If CMInfo.TapeDirectoryData.CapacityLoss(wn) = -1 Or CMInfo.TapeDirectoryData.CapacityLoss(wn) = -3 Then StartBlockStr = ""
+                        Dim EndBlock As Integer = StartBlock + CMInfo.TapeDirectoryData.WrapEntryInfo(wn).RecCount + CMInfo.TapeDirectoryData.WrapEntryInfo(wn).FileMarkCount - 1
+                        If CMInfo.TapeDirectoryData.CapacityLoss(wn) = -2 Then EndBlock += 1
+                        StartBlock += CMInfo.TapeDirectoryData.WrapEntryInfo(wn).RecCount + CMInfo.TapeDirectoryData.WrapEntryInfo(wn).FileMarkCount
+                        If CMInfo.TapeDirectoryData.CapacityLoss(wn) >= 0 Then
+                            nLossDS += Math.Max(0, CMInfo.a_SetsPerWrap - CMInfo.TapeDirectoryData.DatasetsOnWrapData(wn).Data)
+                            CurrSize += CMInfo.TapeDirectoryData.DatasetsOnWrapData(wn).Data
+                        ElseIf CMInfo.TapeDirectoryData.CapacityLoss(wn) = -1 Then
+                            StartBlock = 0
+                        ElseIf CMInfo.TapeDirectoryData.CapacityLoss(wn) = -2 Then
+                            CurrSize += CMInfo.TapeDirectoryData.DatasetsOnWrapData(wn).Data
+                        ElseIf CMInfo.TapeDirectoryData.CapacityLoss(wn) = -3 Then
+                            StartBlock = 0
+                            If gw Then
+                                DataSize.Add(CurrSize)
+                                CurrSize = 0
+                                gw = False
+                            Else
+                                gw = True
+                            End If
                         End If
-                End Select
-            End If
+                    Next
+                    loss = nLossDS * CMInfo.CartridgeMfgData.KB_PER_DATASET * 1000
 
+                End If
+                Dim lshbits As Byte = 20
 
-            'cap0 = TapeUtils.MAMAttribute.FromTapeDrive(TapeDrive, 0, 0, 0).AsNumeric
-            Dim loss As Long
-            If My.Settings.LTFSWriter_ShowLoss Then
-                Dim CMInfo As TapeUtils.CMParser
-                Try
-                    Dim errormsg As Exception = Nothing
-                    CMInfo = New TapeUtils.CMParser(TapeUtils.ReceiveDiagCM(driveHandle, TapeUtils.CMParser.Cartridge_mfg.GetCMLength($"L{Gen}")), errormsg)
-                    If errormsg IsNot Nothing Then Throw errormsg
-                Catch ex As Exception
-                    CMInfo = New TapeUtils.CMParser(driveHandle)
-                End Try
-                Dim nLossDS As Long = 0
-                Dim DataSize As New List(Of Long)
-                If CMInfo.CartridgeMfgData.CartridgeTypeAbbr = "CU" Then Exit Try
-                Dim StartBlock As Integer = 0
-                Dim CurrSize As Long = 0
-                Dim gw As Boolean = False
-                For wn As Integer = 0 To CMInfo.a_NWraps - 1
-                    Dim StartBlockStr As String = StartBlock.ToString()
-                    If CMInfo.TapeDirectoryData.CapacityLoss(wn) = -1 Or CMInfo.TapeDirectoryData.CapacityLoss(wn) = -3 Then StartBlockStr = ""
-                    Dim EndBlock As Integer = StartBlock + CMInfo.TapeDirectoryData.WrapEntryInfo(wn).RecCount + CMInfo.TapeDirectoryData.WrapEntryInfo(wn).FileMarkCount - 1
-                    If CMInfo.TapeDirectoryData.CapacityLoss(wn) = -2 Then EndBlock += 1
-                    StartBlock += CMInfo.TapeDirectoryData.WrapEntryInfo(wn).RecCount + CMInfo.TapeDirectoryData.WrapEntryInfo(wn).FileMarkCount
-                    If CMInfo.TapeDirectoryData.CapacityLoss(wn) >= 0 Then
-                        nLossDS += Math.Max(0, CMInfo.a_SetsPerWrap - CMInfo.TapeDirectoryData.DatasetsOnWrapData(wn).Data)
-                        CurrSize += CMInfo.TapeDirectoryData.DatasetsOnWrapData(wn).Data
-                    ElseIf CMInfo.TapeDirectoryData.CapacityLoss(wn) = -1 Then
-                        StartBlock = 0
-                    ElseIf CMInfo.TapeDirectoryData.CapacityLoss(wn) = -2 Then
-                        CurrSize += CMInfo.TapeDirectoryData.DatasetsOnWrapData(wn).Data
-                    ElseIf CMInfo.TapeDirectoryData.CapacityLoss(wn) = -3 Then
-                        StartBlock = 0
-                        If gw Then
-                            DataSize.Add(CurrSize)
-                            CurrSize = 0
-                            gw = False
-                        Else
-                            gw = True
+                'DAT Unit in KB
+                If Gen = 0 AndAlso max0 > 20 * 1024 * 1024 Then lshbits = 10
+                If ExtraPartitionCount > 0 Then
+                    MaxCapacity = max1
+                    If MaxCapacity = 0 Then MaxCapacity = TapeUtils.MAMAttribute.FromTapeDrive(driveHandle, 0, 1, 1).AsNumeric
+                    LastRemainCapValue = cap1 << lshbits
+                    'cap1 = TapeUtils.MAMAttribute.FromTapeDrive(TapeDrive, 0, 0, 1).AsNumeric
+                    Invoke(Sub()
+                               ToolStripStatusLabel2.Text = $"{MediaDescription} {My.Resources.ResText_CapRem} P0:{IOManager.FormatSize(cap0 << lshbits)} P1:{IOManager.FormatSize(cap1 << lshbits)}"
+                               ToolStripStatusLabel2.ToolTipText = $"{MediaDescription} {My.Resources.ResText_CapRem} P0:{LTFSConfigurator.ReduceDataUnit(cap0 >> (20 - lshbits))}/{LTFSConfigurator.ReduceDataUnit(max0 >> (20 - lshbits))} P1:{LTFSConfigurator.ReduceDataUnit(cap1 >> (20 - lshbits))}/{LTFSConfigurator.ReduceDataUnit(max1 >> (20 - lshbits))}"
+                               If WP Then
+                                   ToolStripStatusLabel2.BackgroundImage = GetProgressImage(CInt(MaxCapacity - cap1), CInt(MaxCapacity), Color.FromArgb(191, 191, 191))
+                               Else
+                                   If cap1 >= 4096 Then
+                                       ToolStripStatusLabel2.BackgroundImage = GetProgressImage(CInt(MaxCapacity - cap1), CInt(MaxCapacity), Color.FromArgb(121, 196, 232))
+                                   Else
+                                       ToolStripStatusLabel2.BackgroundImage = GetProgressImage(CInt(MaxCapacity - cap1), CInt(MaxCapacity), Color.FromArgb(255, 127, 127))
+                                   End If
+                               End If
+
+                           End Sub)
+                    result(2) = max1 - cap1
+                    result(3) = max1
+                Else
+                    MaxCapacity = max0
+                    LastRemainCapValue = cap0 << lshbits
+                    Try
+                        If MaxCapacity = 0 Then
+                            Dim MAMCap As TapeUtils.MAMAttribute = TapeUtils.MAMAttribute.FromTapeDrive(driveHandle, 0, 1, 0)
+                            If MAMCap IsNot Nothing Then MaxCapacity = MAMCap.AsNumeric
                         End If
-                    End If
-                Next
-                loss = nLossDS * CMInfo.CartridgeMfgData.KB_PER_DATASET * 1000
-
-            End If
-            Dim lshbits As Byte = 20
-
-            'DAT Unit in KB
-            If Gen = 0 AndAlso max0 > 20 * 1024 * 1024 Then lshbits = 10
-            If ExtraPartitionCount > 0 Then
-                MaxCapacity = max1
-                If MaxCapacity = 0 Then MaxCapacity = TapeUtils.MAMAttribute.FromTapeDrive(driveHandle, 0, 1, 1).AsNumeric
-                LastRemainCapValue = cap1 << lshbits
-                'cap1 = TapeUtils.MAMAttribute.FromTapeDrive(TapeDrive, 0, 0, 1).AsNumeric
-                Invoke(Sub()
-                           ToolStripStatusLabel2.Text = $"{MediaDescription} {My.Resources.ResText_CapRem} P0:{IOManager.FormatSize(cap0 << lshbits)} P1:{IOManager.FormatSize(cap1 << lshbits)}"
-                           ToolStripStatusLabel2.ToolTipText = $"{MediaDescription} {My.Resources.ResText_CapRem} P0:{LTFSConfigurator.ReduceDataUnit(cap0 >> (20 - lshbits))}/{LTFSConfigurator.ReduceDataUnit(max0 >> (20 - lshbits))} P1:{LTFSConfigurator.ReduceDataUnit(cap1 >> (20 - lshbits))}/{LTFSConfigurator.ReduceDataUnit(max1 >> (20 - lshbits))}"
-                           If WP Then
-                               ToolStripStatusLabel2.BackgroundImage = GetProgressImage(CInt(MaxCapacity - cap1), CInt(MaxCapacity), Color.FromArgb(191, 191, 191))
-                           Else
-                               If cap1 >= 4096 Then
-                                   ToolStripStatusLabel2.BackgroundImage = GetProgressImage(CInt(MaxCapacity - cap1), CInt(MaxCapacity), Color.FromArgb(121, 196, 232))
+                    Catch ex As Exception
+                    End Try
+                    Invoke(Sub()
+                               'If cap0 < 0 Then Exit Sub
+                               ToolStripStatusLabel2.Text = $"{MediaDescription} {My.Resources.ResText_CapRem} P0:{IOManager.FormatSize(cap0 << lshbits)}"
+                               ToolStripStatusLabel2.ToolTipText = $"{MediaDescription} {My.Resources.ResText_CapRem} P0:{LTFSConfigurator.ReduceDataUnit(cap0 >> (20 - lshbits))}/{LTFSConfigurator.ReduceDataUnit(max0 >> (20 - lshbits))}"
+                               If WP Then
+                                   ToolStripStatusLabel2.BackgroundImage = GetProgressImage(CInt(MaxCapacity - cap0), CInt(MaxCapacity), Color.FromArgb(191, 191, 191))
                                Else
-                                   ToolStripStatusLabel2.BackgroundImage = GetProgressImage(CInt(MaxCapacity - cap1), CInt(MaxCapacity), Color.FromArgb(255, 127, 127))
+                                   If cap0 >= 4096 Then
+                                       ToolStripStatusLabel2.BackgroundImage = GetProgressImage(CInt(MaxCapacity - cap0), CInt(MaxCapacity), Color.FromArgb(121, 196, 232))
+                                   Else
+                                       ToolStripStatusLabel2.BackgroundImage = GetProgressImage(CInt(MaxCapacity - cap0), CInt(MaxCapacity), Color.FromArgb(255, 127, 127))
+                                   End If
                                End If
-                           End If
 
-                       End Sub)
-                result(2) = max1 - cap1
-                result(3) = max1
-            Else
-                MaxCapacity = max0
-                LastRemainCapValue = cap0 << lshbits
-                Try
-                    If MaxCapacity = 0 Then
-                        Dim MAMCap As TapeUtils.MAMAttribute = TapeUtils.MAMAttribute.FromTapeDrive(driveHandle, 0, 1, 0)
-                        If MAMCap IsNot Nothing Then MaxCapacity = MAMCap.AsNumeric
-                    End If
-                Catch ex As Exception
-                End Try
-                Invoke(Sub()
-                           'If cap0 < 0 Then Exit Sub
-                           ToolStripStatusLabel2.Text = $"{MediaDescription} {My.Resources.ResText_CapRem} P0:{IOManager.FormatSize(cap0 << lshbits)}"
-                           ToolStripStatusLabel2.ToolTipText = $"{MediaDescription} {My.Resources.ResText_CapRem} P0:{LTFSConfigurator.ReduceDataUnit(cap0 >> (20 - lshbits))}/{LTFSConfigurator.ReduceDataUnit(max0 >> (20 - lshbits))}"
-                           If WP Then
-                               ToolStripStatusLabel2.BackgroundImage = GetProgressImage(CInt(MaxCapacity - cap0), CInt(MaxCapacity), Color.FromArgb(191, 191, 191))
-                           Else
-                               If cap0 >= 4096 Then
-                                   ToolStripStatusLabel2.BackgroundImage = GetProgressImage(CInt(MaxCapacity - cap0), CInt(MaxCapacity), Color.FromArgb(121, 196, 232))
-                               Else
-                                   ToolStripStatusLabel2.BackgroundImage = GetProgressImage(CInt(MaxCapacity - cap0), CInt(MaxCapacity), Color.FromArgb(255, 127, 127))
-                               End If
-                           End If
+                           End Sub)
 
-                       End Sub)
+                End If
+                result(0) = max0 - cap0
+                result(1) = max0
+                'If errRate < 0 Then
+                '    Invoke(Sub()
+                '               ToolStripStatusLabel2.Text &= $" Err:{errRate.ToString("f2")}"
+                '               ChanInfo &= $" Err:{errRate.ToString("f2")}"
+                '           End Sub)
+                'End If
 
-            End If
-            result(0) = max0 - cap0
-            result(1) = max0
-            'If errRate < 0 Then
-            '    Invoke(Sub()
-            '               ToolStripStatusLabel2.Text &= $" Err:{errRate.ToString("f2")}"
-            '               ChanInfo &= $" Err:{errRate.ToString("f2")}"
-            '           End Sub)
-            'End If
-
-            If My.Settings.LTFSWriter_ShowLoss Then
-                Invoke(Sub()
-                           ToolStripStatusLabel2.Text &= $" Loss:{IOManager.FormatSize(loss)}"
-                           ToolStripStatusLabel2.ToolTipText &= $" Loss:{IOManager.FormatSize(loss)}"
-                       End Sub)
-            End If
-            LastRefresh = Now
-            PrintMsg($"[RefreshCapacity] Finished {result(0)} {result(1)} {result(2)} {result(3)}", LogOnly:=True)
-            GC.Collect()
+                If My.Settings.LTFSWriter_ShowLoss Then
+                    Invoke(Sub()
+                               ToolStripStatusLabel2.Text &= $" Loss:{IOManager.FormatSize(loss)}"
+                               ToolStripStatusLabel2.ToolTipText &= $" Loss:{IOManager.FormatSize(loss)}"
+                           End Sub)
+                End If
+                LastRefresh = Now
+                PrintMsg($"[RefreshCapacity] Finished {result(0)} {result(1)} {result(2)} {result(3)}", LogOnly:=True)
+                GC.Collect()
             Catch ex As Exception
                 PrintMsg(My.Resources.ResText_RCErr, TooltipText:=ex.ToString)
                 SetStatusLight(LWStatus.Err)
