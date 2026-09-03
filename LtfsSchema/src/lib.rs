@@ -3,7 +3,7 @@
 use hashbrown::HashMap;
 use memmap2::{Mmap, MmapOptions};
 use quick_xml::escape::{escape, unescape};
-use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use rayon::slice::ParallelSliceMut;
 use std::cmp::Ordering;
@@ -6827,8 +6827,16 @@ pub unsafe extern "system" fn lsc_writer_open(
                 .map_err(|error| {
                     format!("cannot open schema output {}: {error}", path.display())
                 })?;
+            let mut writer = Writer::new(BufWriter::with_capacity(64 * 1024, file));
+            writer
+                .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+                .map_err(|error| error.to_string())?;
+            writer
+                .get_mut()
+                .write_all(b"\n")
+                .map_err(|error| error.to_string())?;
             Ok(Box::into_raw(Box::new(SchemaWriter {
-                writer: Some(Writer::new(BufWriter::with_capacity(64 * 1024, file))),
+                writer: Some(writer),
             })))
         },
         output,
@@ -7157,6 +7165,63 @@ mod tests {
         assert_eq!(summary.info.start_block, 42);
         assert_eq!(summary.info.byte_offset, 7);
         assert_eq!(summary.info.byte_count, 9);
+    }
+
+    #[test]
+    fn schema_writer_starts_with_utf8_xml_declaration() {
+        let root = std::env::temp_dir().join(format!(
+            "ltfscopy_schema_writer_header_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create writer header test directory");
+        let output = root.join("output.schema");
+        let path_utf16: Vec<u16> = output.to_string_lossy().encode_utf16().collect();
+        let name_utf16: Vec<u16> = "ltfsindex".encode_utf16().collect();
+        let mut handle: *mut SchemaWriter = std::ptr::null_mut();
+
+        assert_eq!(
+            unsafe {
+                lsc_writer_open(
+                    path_utf16.as_ptr(),
+                    u32::try_from(path_utf16.len()).expect("path length"),
+                    &mut handle,
+                )
+            },
+            LSC_OK
+        );
+        assert!(!handle.is_null());
+
+        assert_eq!(
+            unsafe {
+                lsc_writer_start(
+                    handle,
+                    name_utf16.as_ptr(),
+                    u32::try_from(name_utf16.len()).expect("name length"),
+                )
+            },
+            LSC_OK
+        );
+        assert_eq!(
+            unsafe {
+                lsc_writer_end(
+                    handle,
+                    name_utf16.as_ptr(),
+                    u32::try_from(name_utf16.len()).expect("name length"),
+                )
+            },
+            LSC_OK
+        );
+        assert_eq!(unsafe { lsc_writer_finish(handle) }, LSC_OK);
+        unsafe { lsc_writer_destroy(handle) };
+
+        let xml = std::fs::read_to_string(&output).expect("read schema writer output");
+        assert_eq!(
+            xml,
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ltfsindex></ltfsindex>"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
