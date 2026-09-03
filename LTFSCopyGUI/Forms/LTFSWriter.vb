@@ -953,18 +953,27 @@ Public Class LTFSWriter
     Private Sub Timer1_Tick(sender As Object, e As EventArgs) Handles Timer1.Tick
         If TapeEjectedReadOnly Then Exit Sub
         Try
-            Dim pnow As Long = TotalBytesProcessed
-            If pnow = 0 Then d_last = 0
-            If pnow >= d_last Then
+            Dim pnow As Long = Threading.Interlocked.Read(TotalBytesProcessed)
+            ddelta = 0
+            If pnow < d_last Then
+                d_last = pnow
+            Else
                 ddelta = pnow - d_last
                 d_last = pnow
             End If
-            Dim tval As Long = TotalFilesProcessed
-            If tval = 0 Then t_last = 0
-            If tval >= t_last Then
+            Dim tval As Long = Threading.Interlocked.Read(TotalFilesProcessed)
+            fdelta = 0
+            If tval < t_last Then
+                t_last = tval
+            Else
                 fdelta = tval - t_last
                 t_last = tval
             End If
+
+            Dim totalBytesSnapshot As Long = Threading.Interlocked.Read(TotalBytesProcessed)
+            Dim totalFilesSnapshot As Long = Threading.Interlocked.Read(TotalFilesProcessed)
+            Dim currentBytesSnapshot As Long = Threading.Interlocked.Read(CurrentBytesProcessed)
+            Dim currentFilesSnapshot As Long = Threading.Interlocked.Read(CurrentFilesProcessed)
 
 
             SpeedHistory.Add(ddelta / 1048576)
@@ -1042,21 +1051,21 @@ Public Class LTFSWriter
             End If
             ToolStripStatusLabel4.Text = " "
             ToolStripStatusLabel4.Text &= $"{My.Resources.ResText_S0}{IOManager.FormatSize(ddelta)}/s"
-            ToolStripStatusLabel4.Text &= $"  {My.Resources.ResText_S1}{IOManager.FormatSize(TotalBytesProcessed)}"
-            If CurrentBytesProcessed > 0 Then ToolStripStatusLabel4.Text &= $"({IOManager.FormatSize(CurrentBytesProcessed)})"
-            ToolStripStatusLabel4.Text &= $"|{TotalFilesProcessed}"
-            If CurrentFilesProcessed > 0 Then ToolStripStatusLabel4.Text &= $"({CurrentFilesProcessed})"
+            ToolStripStatusLabel4.Text &= $"  {My.Resources.ResText_S1}{IOManager.FormatSize(totalBytesSnapshot)}"
+            If currentBytesSnapshot > 0 Then ToolStripStatusLabel4.Text &= $"({IOManager.FormatSize(currentBytesSnapshot)})"
+            ToolStripStatusLabel4.Text &= $"|{totalFilesSnapshot}"
+            If currentFilesSnapshot > 0 Then ToolStripStatusLabel4.Text &= $"({currentFilesSnapshot})"
             ToolStripStatusLabel4.Text &= $"  {My.Resources.ResText_S2}"
-            If UFile > 0 AndAlso UFile >= CurrentFilesProcessed Then ToolStripStatusLabel4.Text &= $"[{UFile - CurrentFilesProcessed}/{UFile}]"
-            ToolStripStatusLabel4.Text &= $"{ IOManager.FormatSize(Math.Max(0, USize - CurrentBytesProcessed))}/{IOManager.FormatSize(USize)}"
+            If UFile > 0 AndAlso UFile >= currentFilesSnapshot Then ToolStripStatusLabel4.Text &= $"[{UFile - currentFilesSnapshot}/{UFile}]"
+            ToolStripStatusLabel4.Text &= $"{ IOManager.FormatSize(Math.Max(0, USize - currentBytesSnapshot))}/{IOManager.FormatSize(USize)}"
             ToolStripStatusLabel4.Text &= $"  {My.Resources.ResText_S3}{IOManager.FormatSize(TotalBytesUnindexed)}"
             ToolStripStatusLabel4.Text &= $"  {My.Resources.ResText_S5}{IOManager.FormatSize(PipeBufferLength)}"
             ToolStripStatusLabel4.ToolTipText = ToolStripStatusLabel4.Text
             If Threading.Volatile.Read(_searchProgressActive) = 0 AndAlso
                Threading.Volatile.Read(_directorySortProgressActive) = 0 Then
                 ToolStripStatusLabel6.Text = ""
-                If USize > 0 AndAlso CurrentBytesProcessed >= 0 AndAlso CurrentBytesProcessed <= USize Then
-                    ToolStripProgressBar1.Value = CInt(CurrentBytesProcessed / USize * 10000)
+                If USize > 0 AndAlso currentBytesSnapshot >= 0 AndAlso currentBytesSnapshot <= USize Then
+                    ToolStripProgressBar1.Value = CInt(currentBytesSnapshot / USize * 10000)
                     With Microsoft.WindowsAPICodePack.Taskbar.TaskbarManager.Instance
                         If ToolStripProgressBar1.Value = 0 OrElse ToolStripProgressBar1.Value = ToolStripProgressBar1.Maximum Then
                             .SetProgressState(Microsoft.WindowsAPICodePack.Taskbar.TaskbarProgressBarState.NoProgress)
@@ -1068,11 +1077,11 @@ Public Class LTFSWriter
                             .SetProgressValue(ToolStripProgressBar1.Value, ToolStripProgressBar1.Maximum)
                         End If
                     End With
-                    ToolStripProgressBar1.ToolTipText = $"{My.Resources.ResText_S4}{IOManager.FormatSize(CurrentBytesProcessed)}/{IOManager.FormatSize(USize)}"
+                    ToolStripProgressBar1.ToolTipText = $"{My.Resources.ResText_S4}{IOManager.FormatSize(currentBytesSnapshot)}/{IOManager.FormatSize(USize)}"
                     Dim CurrentTime As Date = Now
                     Dim totalTimeCost As Long = (CurrentTime - StartTime).Ticks
-                    If totalTimeCost > 0 AndAlso CurrentBytesProcessed > 0 Then
-                        Dim eteTotalCost As Double = totalTimeCost / CurrentBytesProcessed * USize
+                    If totalTimeCost > 0 AndAlso currentBytesSnapshot > 0 Then
+                        Dim eteTotalCost As Double = totalTimeCost / currentBytesSnapshot * USize
                         Dim RemainTicks As Long = CLng(Math.Min(Long.MaxValue, eteTotalCost) - totalTimeCost)
                         Dim remainTime As New TimeSpan(RemainTicks)
                         ToolStripStatusLabel6.Text = $"{My.Resources.ResText_Remaining} {Math.Truncate(remainTime.TotalHours).ToString().PadLeft(2, "0"c)}:{remainTime.Minutes.ToString().PadLeft(2, "0"c)}:{remainTime.Seconds.ToString().PadLeft(2, "0"c)}"
@@ -7987,8 +7996,6 @@ Public Class LTFSWriter
                 End Using
             End Using
         End If
-        TotalFilesProcessed += 1
-        CurrentFilesProcessed += 1
         Return Not StopFlag
     End Function
 
@@ -8304,8 +8311,6 @@ Public Class LTFSWriter
                                                  } -> {IOManager.FormatSize(CLng(Math.Max(0, UnwrittenSize - CurrentBytesProcessed - fr.File.length)))}")
                                         TotalBytesProcessed += fr.File.length
                                         CurrentBytesProcessed += fr.File.length
-                                        TotalFilesProcessed += 1
-                                        CurrentFilesProcessed += 1
                                         If useFastReader Then
                                             'HASH pre-scan does not enqueue shared-memory data, so there is nothing to drain.
                                         ElseIf RingBufferEnabled Then
@@ -8377,8 +8382,6 @@ Public Class LTFSWriter
                                             fr.File.WrittenBytes += fr.File.length
                                             TotalBytesProcessed += fr.File.length
                                             CurrentBytesProcessed += fr.File.length
-                                            TotalFilesProcessed += 1
-                                            CurrentFilesProcessed += 1
                                             TotalBytesUnindexed += fr.File.length
                                         ElseIf useFastReader AndAlso Not IsIndexPartition Then
                                             Dim providerFileIndex = If(fr.IsDirectTapeCopy, CInt(fr.DirectCopyOrdinal), i)
@@ -8524,8 +8527,6 @@ Public Class LTFSWriter
                                             fr.File.WrittenBytes += fr.File.length
                                             TotalBytesProcessed += fr.File.length
                                             CurrentBytesProcessed += fr.File.length
-                                            TotalFilesProcessed += 1
-                                            CurrentFilesProcessed += 1
                                             TotalBytesUnindexed += fr.File.length
                                         Else
                                             'Select Case fr.Open()
@@ -8886,8 +8887,6 @@ Public Class LTFSWriter
                                             ElseIf sh IsNot Nothing Then
                                                 sh.StopFlag = True
                                             End If
-                                            TotalFilesProcessed += 1
-                                            CurrentFilesProcessed += 1
                                         End If
                                         If Not String.IsNullOrEmpty(currentPlan.ExpectedDedupeHash) Then
                                             SetFileDedupeHash(fr.File, currentPlan.ExpectedDedupeHash)
@@ -8910,8 +8909,6 @@ Public Class LTFSWriter
                                     fr.File.SetXattr(ltfsindex.file.xattr.HashType.XxHash3, "2D06800538D394C2")
                                     fr.File.SetXattr(ltfsindex.file.xattr.HashType.XxHash128, IOManager.Byte2Hex(IO.Hashing.XxHash128.Hash({})).Replace(" ", "").Replace("|", "").ToUpper())
                                     TotalBytesUnindexed += 1
-                                    TotalFilesProcessed += 1
-                                    CurrentFilesProcessed += 1
                                 End If
                                 If tarScanner IsNot Nothing AndAlso Not StopFlag Then
                                     CommitTarMetadata(fr, tarScanner)
@@ -8924,6 +8921,8 @@ Public Class LTFSWriter
                                 'lazy schema store can then update one mutation
                                 'and propagate one aggregate count per parent.
                                 MarkWriteFileCompleted(fr.File)
+                                Threading.Interlocked.Increment(TotalFilesProcessed)
+                                Threading.Interlocked.Increment(CurrentFilesProcessed)
                                 completedWriteRecords.Add(fr)
                                 If Not useFastReader Then
                                     ReleaseManagedWriteRecord(WriteList, i, dedupeReferenceUseCount)
