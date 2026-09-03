@@ -5445,6 +5445,13 @@ fn parse_file_summary_bytes(bytes: &[u8]) -> Result<ParsedFileSummary, String> {
     FileParser::new(Reader::from_reader(Cursor::new(bytes))).parse_summary()
 }
 
+// HPLTFS consumes the index as a line-oriented XML document.  Keep the
+// indentation width at zero so every element starts on its own line without
+// changing the compact, schema-compatible tag layout.
+fn new_xml_writer<W: Write>(inner: W) -> Writer<W> {
+    Writer::new_with_indent(inner, b' ', 0)
+}
+
 fn file_data_from_input(input: &LscFileInput) -> Result<FileData, String> {
     let text = |slice: LscUtf16Slice| unsafe { utf16_string(slice.ptr, slice.len) };
     let optional = |slice: LscUtf16Slice| -> Result<Option<String>, String> {
@@ -5968,20 +5975,11 @@ fn copy_store_file_record_to_writer(
         .seek(SeekFrom::Start(offset))
         .map_err(|error| format!("cannot seek file records backing file: {error}"))?;
 
-    let mut remaining = length;
-    let mut buffer = [0u8; 64 * 1024];
-    while remaining > 0 {
-        let chunk = remaining.min(buffer.len());
-        source
-            .read_exact(&mut buffer[..chunk])
-            .map_err(|error| format!("cannot read file records backing file: {error}"))?;
-        writer
-            .get_mut()
-            .write_all(&buffer[..chunk])
-            .map_err(|error| error.to_string())?;
-        remaining -= chunk;
-    }
-    Ok(())
+    let mut bytes = vec![0u8; length];
+    source
+        .read_exact(&mut bytes)
+        .map_err(|error| format!("cannot read file records backing file: {error}"))?;
+    write_fragment(writer, &bytes)
 }
 
 fn writer_name(ptr: *const u16, len: u32) -> Result<String, String> {
@@ -6827,13 +6825,9 @@ pub unsafe extern "system" fn lsc_writer_open(
                 .map_err(|error| {
                     format!("cannot open schema output {}: {error}", path.display())
                 })?;
-            let mut writer = Writer::new(BufWriter::with_capacity(64 * 1024, file));
+            let mut writer = new_xml_writer(BufWriter::with_capacity(64 * 1024, file));
             writer
                 .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
-                .map_err(|error| error.to_string())?;
-            writer
-                .get_mut()
-                .write_all(b"\n")
                 .map_err(|error| error.to_string())?;
             Ok(Box::into_raw(Box::new(SchemaWriter {
                 writer: Some(writer),
@@ -6962,10 +6956,7 @@ pub unsafe extern "system" fn lsc_writer_file(
         let value = unsafe { file_data_from_input(&*input) }?;
         let bytes = serialize_file(&value)?;
         // SAFETY: writer was checked for null and is owned by the caller.
-        writer_mut(unsafe { &mut *writer })?
-            .get_mut()
-            .write_all(&bytes)
-            .map_err(|error| error.to_string())
+        write_fragment(writer_mut(unsafe { &mut *writer })?, &bytes)
     })
 }
 
@@ -7218,7 +7209,118 @@ mod tests {
         let xml = std::fs::read_to_string(&output).expect("read schema writer output");
         assert_eq!(
             xml,
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ltfsindex></ltfsindex>"
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ltfsindex>\n</ltfsindex>"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema_writer_places_raw_elements_on_separate_lines() {
+        let root = std::env::temp_dir().join(format!(
+            "ltfscopy_schema_writer_lines_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create writer line test directory");
+        let output = root.join("output.schema");
+        let path_utf16: Vec<u16> = output.to_string_lossy().encode_utf16().collect();
+        let mut handle: *mut SchemaWriter = std::ptr::null_mut();
+
+        assert_eq!(
+            unsafe {
+                lsc_writer_open(
+                    path_utf16.as_ptr(),
+                    u32::try_from(path_utf16.len()).expect("path length"),
+                    &mut handle,
+                )
+            },
+            LSC_OK
+        );
+        assert!(!handle.is_null());
+
+        let start = |value: &str| value.encode_utf16().collect::<Vec<u16>>();
+        let root_name = start("ltfsindex");
+        let directory_name = start("directory");
+        let contents_name = start("contents");
+        let compact_file = b"<file><name>one.txt</name><length>1</length></file>";
+        assert_eq!(
+            unsafe {
+                lsc_writer_start(
+                    handle,
+                    root_name.as_ptr(),
+                    u32::try_from(root_name.len()).expect("root name length"),
+                )
+            },
+            LSC_OK
+        );
+        assert_eq!(
+            unsafe {
+                lsc_writer_start(
+                    handle,
+                    directory_name.as_ptr(),
+                    u32::try_from(directory_name.len()).expect("directory name length"),
+                )
+            },
+            LSC_OK
+        );
+        assert_eq!(
+            unsafe {
+                lsc_writer_start(
+                    handle,
+                    contents_name.as_ptr(),
+                    u32::try_from(contents_name.len()).expect("contents name length"),
+                )
+            },
+            LSC_OK
+        );
+        assert_eq!(
+            unsafe {
+                lsc_writer_raw(
+                    handle,
+                    compact_file.as_ptr(),
+                    u64::try_from(compact_file.len()).expect("fragment length"),
+                )
+            },
+            LSC_OK
+        );
+        assert_eq!(
+            unsafe {
+                lsc_writer_end(
+                    handle,
+                    contents_name.as_ptr(),
+                    u32::try_from(contents_name.len()).expect("contents name length"),
+                )
+            },
+            LSC_OK
+        );
+        assert_eq!(
+            unsafe {
+                lsc_writer_end(
+                    handle,
+                    directory_name.as_ptr(),
+                    u32::try_from(directory_name.len()).expect("directory name length"),
+                )
+            },
+            LSC_OK
+        );
+        assert_eq!(
+            unsafe {
+                lsc_writer_end(
+                    handle,
+                    root_name.as_ptr(),
+                    u32::try_from(root_name.len()).expect("root name length"),
+                )
+            },
+            LSC_OK
+        );
+        assert_eq!(unsafe { lsc_writer_finish(handle) }, LSC_OK);
+        unsafe { lsc_writer_destroy(handle) };
+
+        let xml = std::fs::read_to_string(&output).expect("read line-oriented schema");
+        assert_eq!(
+            xml,
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ltfsindex>\n<directory>\n<contents>\n<file>\n<name>one.txt</name>\n<length>1</length>\n</file>\n</contents>\n</directory>\n</ltfsindex>"
         );
 
         let _ = std::fs::remove_dir_all(root);
