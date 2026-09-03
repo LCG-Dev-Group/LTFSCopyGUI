@@ -150,16 +150,7 @@ Public Module AppLogging
             End If
         End SyncLock
 
-        ' Preserve the old force-on-start behavior: even when informational
-        ' logging is disabled, the startup event proves which directory owns
-        ' the active pipeline and creates the normal log file.
-        Dim configuredLevel = InformationLevel.MinimumLevel
-        Try
-            InformationLevel.MinimumLevel = LogEventLevel.Information
-            Log.Information("Logging initialized. LogDirectory={LogDirectory}", _logDirectory)
-        Finally
-            InformationLevel.MinimumLevel = configuredLevel
-        End Try
+        Log.Warning("Logging initialized. LogDirectory={LogDirectory}", _logDirectory)
     End Sub
 
     Public Sub SetInformationEnabled(value As Boolean)

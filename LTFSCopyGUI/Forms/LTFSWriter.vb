@@ -573,7 +573,7 @@ Public Class LTFSWriter
     Public Sub PrintMsg(s As String, Optional ByVal Warning As Boolean = False,
                         Optional ByVal TooltipText As String = "",
                         Optional ByVal LogOnly As Boolean = False,
-                        Optional ByVal ForceLog As Boolean = False,
+                        Optional ByVal IsWarn As Boolean = False,
                         Optional ByVal DeDupe As Boolean = False,
                         Optional ByVal Category As String = "LTFSWriter")
         If s Is Nothing Then s = String.Empty
@@ -598,10 +598,8 @@ Public Class LTFSWriter
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", logCategory)
                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
                     Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "WriterStatus")
-                        If Warning Then
-                            Log.Warning(If(ForceLog, "Writer status update forced.", "Writer warning status update."))
-                        ElseIf ForceLog Then
-                            Log.Warning("Writer status update forced.")
+                        If Warning OrElse IsWarn Then
+                            Log.Warning("Writer warning status update.")
                         Else
                             Log.Information(If(LogOnly, "Writer diagnostic status update.", "Writer status update."))
                         End If
@@ -1899,7 +1897,7 @@ Public Class LTFSWriter
             _deviceLease = TapeUtils.SCSILockManager.AcquireWriterLease(TapeDrive, _logSessionId, 10000)
         End SyncLock
         If _deviceLease Is Nothing Then
-            PrintMsg("Device is busy in another process.", Warning:=True, LogOnly:=False, ForceLog:=True)
+            PrintMsg("Device is busy in another process.", Warning:=True, LogOnly:=False, IsWarn:=True)
             SetStatusLight(LWStatus.Err)
             LoadComplete = True
             BeginInvoke(Sub()
@@ -5658,7 +5656,7 @@ Public Class LTFSWriter
             If data.Length = 0 Then Throw New IO.EndOfStreamException("The tape returned an empty block while reading an extent")
             If data.Length < blockLength Then
                 Dim message As String = $"Error reading tape block: read {data.Length} bytes, expected {blockLength}"
-                PrintMsg(message, LogOnly:=True, ForceLog:=True)
+                PrintMsg(message, LogOnly:=True, IsWarn:=True)
                 If Not My.Settings.LTFSWriter_IgnoreILI AndAlso Not shortReadIgnored Then
                     Select Case AskExtractionRetry(message)
                         Case DialogResult.Abort
@@ -6118,7 +6116,7 @@ Public Class LTFSWriter
                                 End SyncLock
                                 If Data.Length <> CurrentBlockLen OrElse CurrentBlockLen = 0 Then
                                     Dim errmsg As String = $"Error reading at p{RestorePosition.PartitionNumber}b{RestorePosition.BlockNumber}: readed length {Data.Length} should be {CurrentBlockLen}"
-                                    PrintMsg(errmsg, LogOnly:=True, ForceLog:=True)
+                                    PrintMsg(errmsg, LogOnly:=True, IsWarn:=True)
                                     If (Not ignored) AndAlso (Not My.Settings.LTFSWriter_IgnoreILI) Then
                                         While True
                                             Dim dResult As DialogResult
@@ -6177,14 +6175,14 @@ Public Class LTFSWriter
                         Loop
 
                         If Not succ Then
-                            PrintMsg($"{FileIndex.name}{My.Resources.ResText_RestoreErr}", ForceLog:=True)
+                            PrintMsg($"{FileIndex.name}{My.Resources.ResText_RestoreErr}", IsWarn:=True)
                             SetStatusLight(LWStatus.Err)
                             Exit For
                         End If
                         If StopFlag Then Exit Sub
                     Next
                 Catch ex As Exception
-                    PrintMsg($"{FileIndex.name}{My.Resources.ResText_RestoreErr}{ex.ToString}", ForceLog:=True)
+                    PrintMsg($"{FileIndex.name}{My.Resources.ResText_RestoreErr}{ex.ToString}", IsWarn:=True)
                     Invoke(Sub() MessageBox.Show($"{FileIndex.name}{My.Resources.ResText_RestoreErr}{ex.ToString}"))
                     SetStatusLight(LWStatus.Err)
                 End Try
@@ -6458,7 +6456,7 @@ Public Class LTFSWriter
                         SetStatusLight(LWStatus.Succ)
                     End If
                 Catch ex As Exception
-                    PrintMsg($"{My.Resources.ResText_RestoreErr}{ex}", ForceLog:=True)
+                    PrintMsg($"{My.Resources.ResText_RestoreErr}{ex}", IsWarn:=True)
                     SetStatusLight(LWStatus.Err)
                 Finally
                     If reserved Then
@@ -6549,7 +6547,7 @@ Public Class LTFSWriter
                             SetStatusLight(LWStatus.Succ)
                         End If
                     Catch ex As Exception
-                        PrintMsg($"{My.Resources.ResText_RestoreErr}{ex.ToString}", ForceLog:=True)
+                        PrintMsg($"{My.Resources.ResText_RestoreErr}{ex.ToString}", IsWarn:=True)
                         SetStatusLight(LWStatus.Err)
                     Finally
                         If reserved Then
@@ -6660,7 +6658,7 @@ Public Class LTFSWriter
                         End If
                     Catch ex As Exception
                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString}"))
-                        PrintMsg($"{My.Resources.ResText_RestoreErr}{ex.ToString}", ForceLog:=True)
+                        PrintMsg($"{My.Resources.ResText_RestoreErr}{ex.ToString}", IsWarn:=True)
                         SetStatusLight(LWStatus.Err)
                     End Try
                     SyncLock OperationLock
@@ -6819,7 +6817,7 @@ Public Class LTFSWriter
                 If My.Settings.LTFSWriter_WaitOnBufferEmpty AndAlso length <= My.Settings.LTFSWriter_MinimumSegmentSize * 2 Then PipePause = True
                 Return length
             Catch ex As Exception
-                PrintMsg(ex.ToString, LogOnly:=True, ForceLog:=True)
+                PrintMsg(ex.ToString, LogOnly:=True, IsWarn:=True)
                 Threading.Monitor.Exit(PipeLock)
                 Return -1
             End Try
@@ -6836,7 +6834,7 @@ Public Class LTFSWriter
             Dim n As Integer = rb.AvailableToRead()
             Return CLng(n)
         Catch ex As Exception
-            PrintMsg(ex.ToString, LogOnly:=True, ForceLog:=True)
+            PrintMsg(ex.ToString, LogOnly:=True, IsWarn:=True)
             Return -1
         End Try
     End Function
@@ -7197,7 +7195,7 @@ Public Class LTFSWriter
                                                                      fr = New FileRecord With {
                                                                         .File = file,
                                                                         .SourcePath = outputDirectory.FullName & "\" & If(file.name, String.Empty)}
-                                                                     PrintMsg($"Path error for {fr.SourcePath} - {ex.ToString}", LogOnly:=True, ForceLog:=True)
+                                                                     PrintMsg($"Path error for {fr.SourcePath} - {ex.ToString}", LogOnly:=True, IsWarn:=True)
                                                                  End Try
                                                                  onFile(fr)
                                                              End Sub)
@@ -7261,11 +7259,11 @@ Public Class LTFSWriter
                 Return
             End If
         Catch ex As Exception
-            PrintMsg($"tar metadata encode skipped: {fr.SourcePath}; {ex.Message}", LogOnly:=True, ForceLog:=True)
+            PrintMsg($"tar metadata encode skipped: {fr.SourcePath}; {ex.Message}", LogOnly:=True, IsWarn:=True)
         End Try
         fr.File.RemoveXattr(ltfsindex.file.xattr.ApplicationSpecific.TarMetadata)
         If scanner.Failed Then
-            PrintMsg($"tar metadata skipped: {fr.SourcePath}; {scanner.ErrorMessage}", LogOnly:=True, ForceLog:=True)
+            PrintMsg($"tar metadata skipped: {fr.SourcePath}; {scanner.ErrorMessage}", LogOnly:=True, IsWarn:=True)
         End If
     End Sub
 
@@ -7534,7 +7532,7 @@ Public Class LTFSWriter
             timer.Stop()
             LogFastReaderFillStats(operation, before, fastProvider.GetPerformanceStats(), timer.Elapsed)
         Catch ex As OperationCanceledException When waitCancellation.IsCancellationRequested AndAlso Not StopFlag
-            PrintMsg($"fastreader {operation} wait cancelled", LogOnly:=True, ForceLog:=True)
+            PrintMsg($"fastreader {operation} wait cancelled", LogOnly:=True, IsWarn:=True)
         Finally
             Threading.Interlocked.CompareExchange(_fastReaderWaitCancellation, Nothing, waitCancellation)
             waitCancellation.Dispose()
@@ -7564,7 +7562,7 @@ Public Class LTFSWriter
 
         PrintMsg($"fastreader refill paused: buffered={IOManager.FormatSize(buffered)} low_water={IOManager.FormatSize(lowWater)} resume_water={IOManager.FormatSize(GetFastReaderWatermark(capacity, FastReaderResumeWatermarkFraction))}",
                  LogOnly:=True,
-                 ForceLog:=True)
+                 IsWarn:=True)
         WaitForFastReaderFillFraction(fastProvider, FastReaderResumeWatermarkFraction, "refill")
     End Sub
 
@@ -7629,7 +7627,7 @@ Public Class LTFSWriter
         End Using
         PrintMsg($"fastreader {operation}: elapsed={elapsed.TotalSeconds:F3}s read={readMiBs:F1}MiB/s published={publishMiBs:F1}MiB/s io_wait={ioWaitMs:F1}ms hash={hashMs:F1}ms publish_wait={publishWaitMs:F1}ms buffered={IOManager.FormatSize(CLng(after.BufferedBytes))} slots={after.OccupiedSlots}",
                  LogOnly:=True,
-                 ForceLog:=True)
+                 IsWarn:=True)
     End Sub
 
     Private Function WriteFileFromFastReader(fastProvider As IFastReaderConsumer,
@@ -7925,7 +7923,7 @@ Public Class LTFSWriter
             End Using
             PrintMsg($"fastreader tape write: calls={writeCallCount} bytes={IOManager.FormatSize(writeByteCount)} elapsed={writeElapsedSeconds:F3}s average={averageWriteMiBs:F1}MiB/s slowest={slowestWrite:F1}MiB/s min_buffered={IOManager.FormatSize(minimumBuffer)}",
                      LogOnly:=True,
-                     ForceLog:=True)
+                     IsWarn:=True)
         Else
             Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSWriter))
                 Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")
@@ -8110,7 +8108,7 @@ Public Class LTFSWriter
                                 Next
                                 PrintMsg($"direct tape fastreader enabled: files={materialOrdinals.Count} buffer={IOManager.FormatSize(My.Settings.LTFSWriter_PreLoadBytes)}",
                                          LogOnly:=True,
-                                         ForceLog:=True)
+                                         IsWarn:=True)
                             Catch ex As Exception
                                 If ReferenceEquals(_activeFastReaderProvider, fastProvider) Then _activeFastReaderProvider = Nothing
                                 If fastProvider IsNot Nothing Then fastProvider.Dispose()
@@ -8136,7 +8134,7 @@ Public Class LTFSWriter
                                         End Using
                                     End Using
                                 End Using
-                                PrintMsg($"fastreader enabled: driver={TapeUtils.DriverTypeSetting} buffer={IOManager.FormatSize(My.Settings.LTFSWriter_PreLoadBytes)}", LogOnly:=True, ForceLog:=True)
+                                PrintMsg($"fastreader enabled: driver={TapeUtils.DriverTypeSetting} buffer={IOManager.FormatSize(My.Settings.LTFSWriter_PreLoadBytes)}", LogOnly:=True, IsWarn:=True)
                                 For Each fr As FileRecord In WriteList
                                     If fr IsNot Nothing Then fr.IsOpened = True
                                 Next
@@ -8150,7 +8148,7 @@ Public Class LTFSWriter
                                         End Using
                                     End Using
                                 End Using
-                                PrintMsg($"native fastreader unavailable: {ex.Message}", LogOnly:=True, ForceLog:=True)
+                                PrintMsg($"native fastreader unavailable: {ex.Message}", LogOnly:=True, IsWarn:=True)
                                 If ReferenceEquals(_activeFastReaderProvider, fastProvider) Then _activeFastReaderProvider = Nothing
                                 If fastProvider IsNot Nothing Then fastProvider.Dispose()
                                 fastProvider = Nothing
@@ -8358,7 +8356,7 @@ Public Class LTFSWriter
                                             End If
                                             Select Case fr.Open()
                                                 Case DialogResult.Ignore
-                                                    PrintMsg($"Cannot open file {fr.SourcePath}", LogOnly:=True, ForceLog:=True)
+                                                    PrintMsg($"Cannot open file {fr.SourcePath}", LogOnly:=True, IsWarn:=True)
                                                     StopFlag = True
                                                     Throw New IO.IOException($"Cannot open file {fr.SourcePath}")
                                                 Case DialogResult.Abort
@@ -8440,7 +8438,7 @@ Public Class LTFSWriter
                                                         Case DialogResult.Retry
 
                                                         Case DialogResult.Ignore
-                                                            PrintMsg($"Cannot read file {fr.SourcePath}", LogOnly:=True, ForceLog:=True)
+                                                            PrintMsg($"Cannot read file {fr.SourcePath}", LogOnly:=True, IsWarn:=True)
                                                             StopFlag = True
                                                             Exit For
                                                     End Select
@@ -8554,7 +8552,7 @@ Public Class LTFSWriter
                                         Else
                                             'Select Case fr.Open()
                                             '    Case DialogResult.Ignore
-                                            '        PrintMsg($"Cannot open file {fr.SourcePath}", LogOnly:=True, ForceLog:=True)
+                                            '        PrintMsg($"Cannot open file {fr.SourcePath}", LogOnly:=True, IsWarn:=True)
                                             '        Continue For
                                             '    Case DialogResult.Abort
                                             '        StopFlag = True
@@ -8641,7 +8639,7 @@ Public Class LTFSWriter
                                                         Case DialogResult.Retry
                                                             Continue While
                                                         Case DialogResult.Ignore
-                                                            PrintMsg($"Cannot read file {fr.SourcePath}", LogOnly:=True, ForceLog:=True)
+                                                            PrintMsg($"Cannot read file {fr.SourcePath}", LogOnly:=True, IsWarn:=True)
                                                             SetStatusLight(LWStatus.Err)
                                                             StopFlag = True
                                                             Exit For
@@ -9826,7 +9824,7 @@ Public Class LTFSWriter
         PrintMsg(My.Resources.ResText_Exporting)
         If Not schema.SaveFile(schemaTxtPath) Then
             SetStatusLight(LWStatus.Err)
-            PrintMsg("索引自动备份失败：无法保存索引文件。", Warning:=True, ForceLog:=True)
+            PrintMsg("索引自动备份失败：无法保存索引文件。", Warning:=True, IsWarn:=True)
             Return Nothing
         End If
 
@@ -9839,7 +9837,7 @@ Public Class LTFSWriter
         Catch ex As Exception
             dumpFailed = True
             SetStatusLight(LWStatus.Err)
-            PrintMsg($"保存容量报告失败：{ex.Message}", Warning:=True, ForceLog:=True)
+            PrintMsg($"保存容量报告失败：{ex.Message}", Warning:=True, IsWarn:=True)
         End Try
 
         Try
@@ -9881,7 +9879,7 @@ Public Class LTFSWriter
         End Try
 
         If dumpFailed Then
-            PrintMsg($"索引备份已生成，但部分附加数据失败：{schemaTxtPath}", Warning:=True, ForceLog:=True)
+            PrintMsg($"索引备份已生成，但部分附加数据失败：{schemaTxtPath}", Warning:=True, IsWarn:=True)
             SetStatusLight(LWStatus.Err)
         Else
             PrintMsg(My.Resources.ResText_IndexBaked, False, $"{My.Resources.ResText_IndexBak2}{vbCrLf}{schemaTxtPath}")
@@ -11501,7 +11499,7 @@ Public Class LTFSWriter
                 Else
                     SetChecksumColor(file, name, Color.Red)
                     Threading.Interlocked.Increment(errorCount)
-                    PrintMsg($"{name} mismatch at fileuid={file.fileuid} filename={file.name} logged={actual} calculated={expected}", ForceLog:=True)
+                    PrintMsg($"{name} mismatch at fileuid={file.fileuid} filename={file.name} logged={actual} calculated={expected}", IsWarn:=True)
                 End If
             ElseIf updateHashes Then
                 If Not String.Equals(actual, expected, StringComparison.OrdinalIgnoreCase) Then
@@ -11511,7 +11509,7 @@ Public Class LTFSWriter
                     Else
                         SetChecksumColor(file, name, Color.OrangeRed)
                         Threading.Interlocked.Increment(errorCount)
-                        PrintMsg($"{name} changed at fileuid={file.fileuid} filename={file.name} logged={actual} calculated={expected}", ForceLog:=True)
+                        PrintMsg($"{name} changed at fileuid={file.fileuid} filename={file.name} logged={actual} calculated={expected}", IsWarn:=True)
                     End If
                 Else
                     SetChecksumColor(file, name, Color.Green)
@@ -11821,7 +11819,7 @@ Public Class LTFSWriter
         hw.Button4.Visible = False
         Dim errCount As Integer = 0
         AddHandler hw.SHA1Changed, Sub(f As ltfsindex.file, msg As String)
-                                       PrintMsg($"SHA1 mismatch:[FID {f.fileuid}] {msg} {f.fullpath}", ForceLog:=True, LogOnly:=True)
+                                       PrintMsg($"SHA1 mismatch:[FID {f.fileuid}] {msg} {f.fullpath}", IsWarn:=True, LogOnly:=True)
                                        Threading.Interlocked.Increment(errCount)
                                    End Sub
         hw.ShowDialog()
@@ -12072,7 +12070,7 @@ Public Class LTFSWriter
                         Invoke(
                             Sub()
                                 Try
-                                    PrintMsg($"Statistics failed: {ex}", ForceLog:=True)
+                                    PrintMsg($"Statistics failed: {ex}", IsWarn:=True)
                                 Finally
                                     LockGUI(False)
                                 End Try
@@ -13039,7 +13037,7 @@ Public Class LTFSWriter
                              Modified = True
                          Catch ex As Exception
                              SetStatusLight(LWStatus.Err)
-                             PrintMsg($"压缩索引出错：{ex.Message}{vbCrLf}{ex.StackTrace}", ForceLog:=True)
+                             PrintMsg($"压缩索引出错：{ex.Message}{vbCrLf}{ex.StackTrace}", IsWarn:=True)
                              Try
                                  Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"压缩索引出错：{ex}", My.Resources.ResText_Warning))
                              Catch
@@ -13101,7 +13099,7 @@ Public Class LTFSWriter
                                  SetStatusLight(LWStatus.Idle)
                              Catch ex As Exception
                                  SetStatusLight(LWStatus.Err)
-                                 PrintMsg($"解压索引出错：{ex.ToString}", ForceLog:=True)
+                                 PrintMsg($"解压索引出错：{ex.ToString}", IsWarn:=True)
                              End Try
 
                              RefreshDisplay()
@@ -13277,7 +13275,7 @@ Public Class LTFSWriter
             Dim totalBytes = manifest.Files.Aggregate(0L, Function(total, file) AddDirectCopyTotal(total, Math.Max(0L, file.Length)))
             PrintMsg($"{My.Resources.ResText_DirectCopyCopied}: {manifest.Files.Count} {My.Resources.ResText_DirectCopyCopied_files}, {manifest.Directories.Count} {My.Resources.ResText_DirectCopyCopied_directories}, {IOManager.FormatSize(totalBytes)}",
                      LogOnly:=False,
-                     ForceLog:=True)
+                     IsWarn:=True)
         Catch ex As Exception
             MessageBox.Show(New Form With {.TopMost = True}, ex.Message, My.Resources.ResText_Warning, MessageBoxButtons.OK, MessageBoxIcon.Warning)
         End Try
@@ -13442,7 +13440,7 @@ Public Class LTFSWriter
                                 Throw New IO.IOException("Source tape changed when copy.")
                             End If
                             Dim file = lookup(ordinal)
-                            PrintMsg($"direct tape read: {file.RelativePath} ({IOManager.FormatSize(file.Length)})", LogOnly:=True, ForceLog:=True)
+                            PrintMsg($"direct tape read: {file.RelativePath} ({IOManager.FormatSize(file.Length)})", LogOnly:=True, IsWarn:=True)
                             producer.StreamFile(
                                 driveHandle,
                                 file,
@@ -13972,7 +13970,7 @@ Public Class LTFSWriter
 
                             Select Case fr.Open()
                                 Case DialogResult.Ignore
-                                    PrintMsg($"Cannot open file {fr.SourcePath}", LogOnly:=True, ForceLog:=True)
+                                    PrintMsg($"Cannot open file {fr.SourcePath}", LogOnly:=True, IsWarn:=True)
                                     StopFlag = True
                                     Throw New IO.IOException($"Cannot open file {fr.SourcePath}")
                                 Case DialogResult.Abort
@@ -14004,7 +14002,7 @@ Public Class LTFSWriter
                                             Case DialogResult.Retry
 
                                             Case DialogResult.Ignore
-                                                PrintMsg($"Cannot read file {fr.SourcePath}", LogOnly:=True, ForceLog:=True)
+                                                PrintMsg($"Cannot read file {fr.SourcePath}", LogOnly:=True, IsWarn:=True)
                                                 StopFlag = True
                                                 Throw New IO.IOException($"Cannot read file {fr.SourcePath}")
                                         End Select
@@ -14853,7 +14851,7 @@ Public Class LTFSWriter
                     RefreshDisplay()
                     FinishDirectorySortProgress(True)
                 Catch ex As Exception
-                    PrintMsg($"Directory sort failed: {ex}", Warning:=True, ForceLog:=True)
+                    PrintMsg($"Directory sort failed: {ex}", Warning:=True, IsWarn:=True)
                     FinishDirectorySortProgress(False)
                 Finally
                     GC.KeepAlive(nativeProgressCallback)
@@ -15042,7 +15040,7 @@ Public Class LTFSWriter
                                                         End If
                                                     End If
                                                     If hit.File Is Nothing Then
-                                                        PrintMsg($"Search found but file navigation failed: \{hit.Path}", ForceLog:=True)
+                                                        PrintMsg($"Search found but file navigation failed: \{hit.Path}", IsWarn:=True)
                                                     Else
                                                         Dim rowIndex As Integer = FindListViewFileIndex(hit.Directory, hit.File, hit.FileIndex)
                                                         If rowIndex >= 0 Then SelectListViewIndex(rowIndex)
@@ -15054,7 +15052,7 @@ Public Class LTFSWriter
                                                     SelectListViewIndex(0)
                                                 End If
                                             Else
-                                                PrintMsg($"Search found but navigation failed: \{hit.Path}", ForceLog:=True)
+                                                PrintMsg($"Search found but navigation failed: \{hit.Path}", IsWarn:=True)
                                             End If
                                         Finally
                                             FinishSearchProgress(True)
@@ -15068,7 +15066,7 @@ Public Class LTFSWriter
                                     MessageBox.Show(New Form With {.TopMost = True}, $"""{searchKeyword}"" not found.")
                                 End Sub)
                      Catch ex As Exception
-                         PrintMsg($"Search failed: {ex}", ForceLog:=True)
+                         PrintMsg($"Search failed: {ex}", IsWarn:=True)
                          Try
                              FinishSearchProgress(False)
                          Catch
@@ -15997,7 +15995,7 @@ Public Class LTFSWriter
                         End If
                     Catch ex As Exception
                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString}"))
-                        PrintMsg($"{My.Resources.ResText_RestoreErr}{ex.ToString}", ForceLog:=True)
+                        PrintMsg($"{My.Resources.ResText_RestoreErr}{ex.ToString}", IsWarn:=True)
                         SetStatusLight(LWStatus.Err)
                     End Try
                     SyncLock OperationLock
@@ -16063,7 +16061,7 @@ Public Class LTFSWriter
                                             IO.File.Delete(fr.SourcePath)
                                         End If
                                     Catch ex As Exception
-                                        PrintMsg($"[ERROR]{fr.SourcePath}>{ex.ToString()}", LogOnly:=True, ForceLog:=True)
+                                        PrintMsg($"[ERROR]{fr.SourcePath}>{ex.ToString()}", LogOnly:=True, IsWarn:=True)
                                     End Try
                                 End Sub, parallelRestore:=True)
                         Next
@@ -16077,7 +16075,7 @@ Public Class LTFSWriter
                         End If
                     Catch ex As Exception
                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString}"))
-                        PrintMsg($"{My.Resources.ResText_Error}{ex.ToString}", ForceLog:=True)
+                        PrintMsg($"{My.Resources.ResText_Error}{ex.ToString}", IsWarn:=True)
                         SetStatusLight(LWStatus.Err)
                     End Try
                     SyncLock OperationLock
@@ -16113,7 +16111,7 @@ Public Class LTFSWriter
                                     RaiseEvent TapeEjected()
                                 End Sub)
                      Catch ex As Exception
-                         PrintMsg($"{My.Resources.ResText_IUErr}{vbCrLf}{ex}", ForceLog:=True)
+                         PrintMsg($"{My.Resources.ResText_IUErr}{vbCrLf}{ex}", IsWarn:=True)
                          SetStatusLight(LWStatus.Err)
                          LockGUI(False)
                      End Try

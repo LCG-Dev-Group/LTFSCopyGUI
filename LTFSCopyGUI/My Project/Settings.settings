@@ -32,7 +32,7 @@
     <Setting Name="LTFSWriter_FileLabel" Description="文件标签设置" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>
-    <Setting Name="LTFSWriter_LogEnabled" Description="启用日志" Type="System.Boolean" Scope="User">
+    <Setting Name="LTFSWriter_LogEnabled" Description="启用信息级日志" Type="System.Boolean" Scope="User">
       <Value Profile="(Default)">False</Value>
     </Setting>
     <Setting Name="LTFSWriter_ForceIndex" Description="总是更新数据区索引" Type="System.Boolean" Scope="User">

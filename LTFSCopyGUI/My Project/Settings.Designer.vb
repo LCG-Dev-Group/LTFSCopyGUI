@@ -176,7 +176,7 @@ Namespace My
         End Property
 
         <Global.System.Configuration.UserScopedSettingAttribute(),
-         Global.System.Configuration.SettingsDescriptionAttribute("启用日志"),
+         Global.System.Configuration.SettingsDescriptionAttribute("启用信息级日志"),
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),
          Global.System.Configuration.DefaultSettingValueAttribute("False"),
          Category("LTFSWriter"),

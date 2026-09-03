@@ -792,7 +792,7 @@
     <value>索引更新间隔（字节）</value>
   </data>
   <data name="PropertyDescription_LTFSWriter_LogEnabled" xml:space="preserve">
-    <value>启用日志</value>
+    <value>启用信息级日志</value>
   </data>
   <data name="PropertyDescription_LTFSWriter_OnWriteFinished" xml:space="preserve">
     <value>写入完成后：

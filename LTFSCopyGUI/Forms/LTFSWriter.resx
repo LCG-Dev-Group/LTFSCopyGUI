@@ -1266,7 +1266,7 @@
     <value>227, 22</value>
   </data>
   <data name="启用日志记录ToolStripMenuItem.Text" xml:space="preserve">
-    <value>启用日志记录</value>
+    <value>启用信息级日志</value>
   </data>
   <data name="总是更新数据区索引ToolStripMenuItem.Size" type="System.Drawing.Size, System.Drawing">
     <value>227, 22</value>

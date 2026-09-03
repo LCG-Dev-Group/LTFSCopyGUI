@@ -785,7 +785,7 @@ Valid only if HashOnWriting=True</value>
     <value>Index update interval (bytes)</value>
   </data>
   <data name="PropertyDescription_LTFSWriter_LogEnabled" xml:space="preserve">
-    <value>Log enabled</value>
+    <value>Enable information-level logging</value>
   </data>
   <data name="PropertyDescription_LTFSWriter_OnWriteFinished" xml:space="preserve">
     <value>On write finished:
