@@ -7188,9 +7188,18 @@ Public Class LTFSWriter
             Parallel.ForEach(directory.EnumerateLazyFiles(), Sub(file As ltfsindex.file)
                                                                  If StopFlag Then Exit Sub
                                                                  file.TempObj = New ltfsindex.file.refFile() With {.FileName = ""}
-                                                                 onFile(New FileRecord With {
+                                                                 Dim fr As FileRecord
+                                                                 Try
+                                                                     fr = New FileRecord With {
                                                                         .File = file,
-                                                                        .SourcePath = IO.Path.Combine(outputDirectory.FullName, If(file.name, String.Empty))})
+                                                                        .SourcePath = IO.Path.Combine(outputDirectory.FullName, If(file.name, String.Empty))}
+                                                                 Catch ex As Exception
+                                                                     fr = New FileRecord With {
+                                                                        .File = file,
+                                                                        .SourcePath = outputDirectory.FullName & "\" & If(file.name, String.Empty)}
+                                                                     PrintMsg($"Path error for {fr.SourcePath} - {ex.ToString}", LogOnly:=True, ForceLog:=True)
+                                                                 End Try
+                                                                 onFile(fr)
                                                              End Sub)
             If StopFlag Then Exit Sub
         End If
