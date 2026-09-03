@@ -21,6 +21,9 @@ Public Class LTFSWriter
     Private Const WriterTreePageSize As Integer = 1024
     Private _lastSelectedFolder As String = String.Empty
     Private _deviceLease As SCSIDeviceLockManager.WriterLease
+    Private ReadOnly _deviceLeaseLock As New Object()
+    Private _allowOperationValue As Integer = 1
+    Private _tapeEjectedValue As Integer
 
     Public Sub New(processSessionId As String)
         Me.New()
@@ -123,7 +126,13 @@ Public Class LTFSWriter
     <Category("LTFSWriter")>
     Public ReadOnly Property GetPos As TapeUtils.PositionData
         Get
-            Return TapeUtils.ReadPosition(driveHandle)
+            If TapeEjectedReadOnly Then Return New TapeUtils.PositionData()
+            Dim handleSnapshot As IntPtr = driveHandle
+            If handleSnapshot = IntPtr.Zero OrElse handleSnapshot = New IntPtr(-1) Then Return New TapeUtils.PositionData()
+            SyncLock TapeUtils.GetSCSIOperationLock(handleSnapshot)
+                If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return New TapeUtils.PositionData()
+                Return TapeUtils.ReadPosition(handleSnapshot)
+            End SyncLock
         End Get
     End Property
     <Category("LTFSWriter")>
@@ -194,7 +203,23 @@ Public Class LTFSWriter
     End Property
 
     <Category("LTFSWriter")>
-    Public Property AllowOperation As Boolean = True
+    Public Property AllowOperation As Boolean
+        Get
+            Return Threading.Volatile.Read(_allowOperationValue) <> 0
+        End Get
+        Set(value As Boolean)
+            If TapeEjectedReadOnly Then value = False
+            Threading.Interlocked.Exchange(_allowOperationValue, If(value, 1, 0))
+        End Set
+    End Property
+    Private ReadOnly Property TapeEjectedReadOnly As Boolean
+        Get
+            Return Threading.Volatile.Read(_tapeEjectedValue) <> 0
+        End Get
+    End Property
+    Private Function CanOperateTape() As Boolean
+        Return AllowOperation AndAlso Not TapeEjectedReadOnly
+    End Function
     Public OperationLock As New Object
     <Category("LTFSWriter")>
     Public Property Barcode As String = ""
@@ -827,29 +852,28 @@ Public Class LTFSWriter
     Public Property PageValid As Boolean = True
     Public Function ReadChanLRInfo(Optional ByVal TimeOut As Integer = 200) As Double
         Dim result As Double = Double.NegativeInfinity
+        If TapeEjectedReadOnly Then Return 0
+        Dim handleSnapshot As IntPtr = driveHandle
+        If handleSnapshot = IntPtr.Zero OrElse handleSnapshot = New IntPtr(-1) Then Return 0
         Dim debuginfo As New StringBuilder
         Dim WERLHeader As Byte()
         Dim WERLPage As Byte() = Nothing
-        If Threading.Monitor.TryEnter(TapeUtils.GetSCSIOperationLock(driveHandle), TimeOut) Then
+        If Threading.Monitor.TryEnter(TapeUtils.GetSCSIOperationLock(handleSnapshot), TimeOut) Then
             Try
-                If Not PageValid Then
-                    Threading.Monitor.Exit(TapeUtils.GetSCSIOperationLock(driveHandle))
-                    Return 0
-                End If
-                Dim pos As New TapeUtils.PositionData(driveHandle)
-                Dim TapeCapLogPage As TapeUtils.PageData = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_TapeCapacityLogPage, TapeUtils.LogSense(handle:=driveHandle, PageCode:=CByte(TapeUtils.PageData.DefaultPages.HPLTO6_TapeCapacityLogPage), SubPageCode:=0))
+                If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot OrElse Not PageValid Then Return 0
+                Dim pos As New TapeUtils.PositionData(handleSnapshot)
+                Dim TapeCapLogPage As TapeUtils.PageData = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_TapeCapacityLogPage, TapeUtils.LogSense(handle:=handleSnapshot, PageCode:=CByte(TapeUtils.PageData.DefaultPages.HPLTO6_TapeCapacityLogPage), SubPageCode:=0))
                 Dim RemainCapacity As Integer = CInt(TapeCapLogPage.TryGetPage(pos.PartitionNumber + 1).GetLong)
-                Dim TapeUsageLogPage As TapeUtils.PageData = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_TapeUsageLogPage, TapeUtils.LogSense(handle:=driveHandle, PageCode:=CByte(TapeUtils.PageData.DefaultPages.HPLTO6_TapeUsageLogPage), SubPageCode:=0))
+                Dim TapeUsageLogPage As TapeUtils.PageData = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_TapeUsageLogPage, TapeUtils.LogSense(handle:=handleSnapshot, PageCode:=CByte(TapeUtils.PageData.DefaultPages.HPLTO6_TapeUsageLogPage), SubPageCode:=0))
                 Dim TotalDataSetW As Integer = CInt(TapeUsageLogPage.TryGetPage(2).GetLong)
                 debuginfo.Append($"[ERRLOGRATE] P={pos.PartitionNumber} B={pos.BlockNumber} RemainCapacity={RemainCapacity} TotalDatasetWritten={TotalDataSetW}{vbTab}")
 
-                WERLHeader = TapeUtils.SCSIReadParam(driveHandle, {&H1C, &H1, &H88, &H0, &H4, &H0}, 4,
+                WERLHeader = TapeUtils.SCSIReadParam(handleSnapshot, {&H1C, &H1, &H88, &H0, &H4, &H0}, 4,
                                                         Function(senseData As Byte()) As Boolean
                                                             PrintMsg(TapeUtils.ParseSenseData(senseData), LogOnly:=True)
                                                             Return True
                                                         End Function, 1)
                 If WERLHeader.Length <> 4 Then
-                    Threading.Monitor.Exit(TapeUtils.GetSCSIOperationLock(driveHandle))
                     PrintMsg("Invalid page. Skip Errrate Check", LogOnly:=True)
                     PageValid = False
                     Return 0
@@ -858,17 +882,17 @@ Public Class LTFSWriter
                 WERLPageLen <<= 8
                 WERLPageLen = WERLPageLen Or WERLHeader(3)
                 If WERLPageLen = 0 Then
-                    Threading.Monitor.Exit(TapeUtils.GetSCSIOperationLock(driveHandle))
                     PrintMsg("Page is empty. Skip Errrate Check", LogOnly:=True)
                     PageValid = False
                     Return 0
                 End If
                 WERLPageLen += 4
-                WERLPage = TapeUtils.SCSIReadParam(handle:=driveHandle, cdbData:=New Byte() {&H1C, &H1, &H88, CByte((WERLPageLen >> 8) And &HFF), CByte(WERLPageLen And &HFF), &H0}, paramLen:=WERLPageLen)
+                WERLPage = TapeUtils.SCSIReadParam(handle:=handleSnapshot, cdbData:=New Byte() {&H1C, &H1, &H88, CByte((WERLPageLen >> 8) And &HFF), CByte(WERLPageLen And &HFF), &H0}, paramLen:=WERLPageLen)
             Catch ex As Exception
                 PrintMsg(ex.ToString(), Warning:=True, LogOnly:=True)
+            Finally
+                Threading.Monitor.Exit(TapeUtils.GetSCSIOperationLock(handleSnapshot))
             End Try
-            Threading.Monitor.Exit(TapeUtils.GetSCSIOperationLock(driveHandle))
         Else
             PrintMsg("Device is busy. Skip Errrate Check", LogOnly:=True)
             Return 0
@@ -926,6 +950,7 @@ Public Class LTFSWriter
     Public t_last As Long = 0
     Public TickCount As Long = 0
     Private Sub Timer1_Tick(sender As Object, e As EventArgs) Handles Timer1.Tick
+        If TapeEjectedReadOnly Then Exit Sub
         Try
             Dim pnow As Long = TotalBytesProcessed
             If pnow = 0 Then d_last = 0
@@ -980,10 +1005,20 @@ Public Class LTFSWriter
             If Threading.Monitor.TryEnter(OperationLock) Then
                 Try
                     If AllowOperation And Clean Then
-                        AllowOperation = False
+                        LockGUI(True)
                         Task.Run(Sub()
-                                     CheckClean()
-                                     AllowOperation = True
+                                     Try
+                                         CheckClean()
+                                     Catch ex As Exception
+                                         PrintMsg($"Automatic tape reload failed: {ex}", Warning:=True, LogOnly:=True)
+                                         SetStatusLight(LWStatus.Err)
+                                     Finally
+                                         Try
+                                             LockGUI(False)
+                                         Catch cleanupEx As Exception
+                                             Log.Error(cleanupEx, "Automatic tape reload GUI unlock failed.")
+                                         End Try
+                                     End Try
                                  End Sub)
                     End If
                 Catch ex As Exception
@@ -1834,7 +1869,9 @@ Public Class LTFSWriter
             Exit Sub
         End If
 
-        _deviceLease = TapeUtils.SCSILockManager.AcquireWriterLease(TapeDrive, _logSessionId, 10000)
+        SyncLock _deviceLeaseLock
+            _deviceLease = TapeUtils.SCSILockManager.AcquireWriterLease(TapeDrive, _logSessionId, 10000)
+        End SyncLock
         If _deviceLease Is Nothing Then
             PrintMsg("Device is busy in another process.", Warning:=True, LogOnly:=False, ForceLog:=True)
             SetStatusLight(LWStatus.Err)
@@ -1866,10 +1903,8 @@ Public Class LTFSWriter
         Catch ex As Exception
             PrintMsg(My.Resources.ResText_ErrP)
             SetStatusLight(LWStatus.Err)
-            If _deviceLease IsNot Nothing Then
-                _deviceLease.Dispose()
-                _deviceLease = Nothing
-            End If
+            Dim leaseToDispose As SCSIDeviceLockManager.WriterLease = DetachDeviceLease()
+            If leaseToDispose IsNot Nothing Then leaseToDispose.Dispose()
             LoadComplete = True
             BeginInvoke(Sub()
                             If Not IsDisposed AndAlso Not Disposing Then Close()
@@ -1885,7 +1920,7 @@ Public Class LTFSWriter
                      Dim ToolTipChanErrLogShown As Boolean = False
                      Dim ToolTipChanErrLogShownLock As New Object
                      Dim thF12Lock As New Object
-                     While True AndAlso Me IsNot Nothing AndAlso Me.Visible
+                     While True AndAlso Me IsNot Nothing AndAlso Me.Visible AndAlso Not TapeEjectedReadOnly
                          Try
                              Threading.Thread.Sleep(Timer1.Interval)
                              Dim NowTick As Long = TickCount
@@ -1937,13 +1972,24 @@ Public Class LTFSWriter
                  End Sub)
         LoadComplete = True
         If driveOpened Then
-            TapeUtils.CheckSwitchConfig(driveHandle)
+            Try
+                TapeUtils.CheckSwitchConfig(driveHandle)
+            Catch ex As Exception
+                ' Device inquiry/configuration is best effort.  In
+                ' particular, an unformatted tape must still reach the
+                ' normal LTFS probe so the user can format it.
+                Log.Error(ex, "Writer device configuration check failed during load.")
+            End Try
             BeginInvoke(Sub() 读取索引ToolStripMenuItem_Click(sender, e))
         End If
     End Sub
     Private Sub LTFSWriter_Closing(sender As Object, e As CancelEventArgs) Handles Me.Closing
         Static ForceCloseCount As Integer = 0
         e.Cancel = False
+        If TapeEjectedReadOnly Then
+            Save_Settings()
+            Exit Sub
+        End If
         If Not AllowOperation Then
             If ForceCloseCount < 3 Then
                 MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_X0)
@@ -1985,15 +2031,23 @@ Public Class LTFSWriter
     Dim CurrDrive As TapeUtils.BlockDevice
     Public Function GetLocInfo() As String
         Dim DriveInfo As String = ""
-        Dim IsOpened As Boolean = TapeUtils.IsOpened(driveHandle)
-        If IsOpened Then
-            If CurrDrive Is Nothing AndAlso Threading.Monitor.TryEnter(TapeUtils.GetSCSIOperationLock(driveHandle)) Then
+        Dim handleSnapshot As IntPtr = driveHandle
+        Dim IsOpened As Boolean = Not TapeEjectedReadOnly AndAlso
+                                  handleSnapshot <> IntPtr.Zero AndAlso
+                                  handleSnapshot <> New IntPtr(-1) AndAlso
+                                  TapeUtils.IsOpened(handleSnapshot)
+        If IsOpened AndAlso CurrDrive Is Nothing Then
+            Dim deviceLock As Object = TapeUtils.GetSCSIOperationLock(handleSnapshot)
+            If Threading.Monitor.TryEnter(deviceLock) Then
                 Try
-                    CurrDrive = TapeUtils.Inquiry(driveHandle)
+                    If Not TapeEjectedReadOnly AndAlso driveHandle = handleSnapshot Then
+                        CurrDrive = TapeUtils.Inquiry(handleSnapshot)
+                    End If
                 Catch ex As Exception
                     PrintMsg(ex.ToString(), Warning:=True, LogOnly:=True)
+                Finally
+                    Threading.Monitor.Exit(deviceLock)
                 End Try
-                Threading.Monitor.Exit(TapeUtils.GetSCSIOperationLock(driveHandle))
             End If
         End If
         If CurrDrive IsNot Nothing Then
@@ -2050,21 +2104,26 @@ Public Class LTFSWriter
     Public Property DeviceStatusLogPage As TapeUtils.PageData
     Public Property DTDStatusLogPage As TapeUtils.PageData
     Public Sub RefreshDriveLEDIndicator()
+        If TapeEjectedReadOnly Then Return
+        Dim handleSnapshot As IntPtr = driveHandle
+        If handleSnapshot = IntPtr.Zero OrElse handleSnapshot = New IntPtr(-1) Then Return
         Dim logdataDSLP As Byte()
         Dim logdataDTD As Byte()
         Task.Run(Sub()
-                     If Threading.Monitor.TryEnter(TapeUtils.GetSCSIOperationLock(driveHandle), 500) Then
+                     If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return
+                     If Threading.Monitor.TryEnter(TapeUtils.GetSCSIOperationLock(handleSnapshot), 500) Then
                          Try
-                             logdataDSLP = TapeUtils.LogSense(driveHandle, &H3E, 0, PageControl:=1)
-                             logdataDTD = TapeUtils.LogSense(driveHandle, &H11, 0, PageControl:=1)
-                             Threading.Monitor.Exit(TapeUtils.GetSCSIOperationLock(driveHandle))
+                             If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return
+                             logdataDSLP = TapeUtils.LogSense(handleSnapshot, &H3E, 0, PageControl:=1)
+                             logdataDTD = TapeUtils.LogSense(handleSnapshot, &H11, 0, PageControl:=1)
                          Catch ex As Exception
-                             Threading.Monitor.Exit(TapeUtils.GetSCSIOperationLock(driveHandle))
                              PrintMsg(ex.ToString(), LogOnly:=True)
                              Exit Sub
+                         Finally
+                             Threading.Monitor.Exit(TapeUtils.GetSCSIOperationLock(handleSnapshot))
                          End Try
                          Try
-                             Invoke(Sub()
+                             If Not TapeEjectedReadOnly Then Invoke(Sub()
                                         Try
                                             DeviceStatusLogPage = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_DeviceStatusLogPage, logdataDSLP)
                                             DTDStatusLogPage = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_DataTransferDeviceStatusLogPage, logdataDTD)
@@ -2137,9 +2196,14 @@ Public Class LTFSWriter
 
     Public Function RefreshCapacity() As Long()
         Dim result(3) As Long
-        Dim logdataCap As Byte() = TapeUtils.LogSense(driveHandle, &H31, 0, PageControl:=1)
-        Dim logdataVStat As Byte() = TapeUtils.LogSense(driveHandle, &H17, 0, PageControl:=1)
-        Try
+        If TapeEjectedReadOnly Then Return result
+        Dim handleSnapshot As IntPtr = driveHandle
+        If handleSnapshot = IntPtr.Zero OrElse handleSnapshot = New IntPtr(-1) Then Return result
+        SyncLock TapeUtils.GetSCSIOperationLock(handleSnapshot)
+            If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return result
+            Dim logdataCap As Byte() = TapeUtils.LogSense(handleSnapshot, &H31, 0, PageControl:=1)
+            Dim logdataVStat As Byte() = TapeUtils.LogSense(handleSnapshot, &H17, 0, PageControl:=1)
+            Try
             CapacityLogPage = TapeUtils.PageData.CreateDefault(TapeUtils.PageData.DefaultPages.HPLTO6_TapeCapacityLogPage, logdataCap)
             Dim Gen As Integer, WORM As Boolean, WP As Boolean, GenStr As String = ""
             If logdataVStat Is Nothing OrElse logdataVStat.Length <= 4 Then
@@ -2455,22 +2519,33 @@ Public Class LTFSWriter
             LastRefresh = Now
             PrintMsg($"[RefreshCapacity] Finished {result(0)} {result(1)} {result(2)} {result(3)}", LogOnly:=True)
             GC.Collect()
-        Catch ex As Exception
-            PrintMsg(My.Resources.ResText_RCErr, TooltipText:=ex.ToString)
-            SetStatusLight(LWStatus.Err)
-        End Try
+            Catch ex As Exception
+                PrintMsg(My.Resources.ResText_RCErr, TooltipText:=ex.ToString)
+                SetStatusLight(LWStatus.Err)
+            End Try
+        End SyncLock
         Return result
     End Function
     <Category("LTFSWriter")>
     Public ReadOnly Property GetCapacityMegaBytes As Long
         Get
-            If Threading.Monitor.TryEnter(TapeUtils.GetSCSIOperationLock(driveHandle)) Then
-                Threading.Monitor.Exit(TapeUtils.GetSCSIOperationLock(driveHandle))
-                If ExtraPartitionCount > 0 Then
-                    Return TapeUtils.MAMAttribute.FromTapeDrive(driveHandle, 0, 0, 1).AsNumeric
-                Else
-                    Return TapeUtils.MAMAttribute.FromTapeDrive(driveHandle, 0, 0, 0).AsNumeric
-                End If
+            If TapeEjectedReadOnly Then Return 0
+            Dim handleSnapshot As IntPtr = driveHandle
+            If handleSnapshot = IntPtr.Zero OrElse handleSnapshot = New IntPtr(-1) Then Return 0
+            Dim deviceLock As Object = TapeUtils.GetSCSIOperationLock(handleSnapshot)
+            If Threading.Monitor.TryEnter(deviceLock) Then
+                Try
+                    If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return 0
+                    Dim capacity As TapeUtils.MAMAttribute
+                    If ExtraPartitionCount > 0 Then
+                        capacity = TapeUtils.MAMAttribute.FromTapeDrive(handleSnapshot, 0, 0, 1)
+                    Else
+                        capacity = TapeUtils.MAMAttribute.FromTapeDrive(handleSnapshot, 0, 0, 0)
+                    End If
+                    Return If(capacity Is Nothing, 0, capacity.AsNumeric)
+                Finally
+                    Threading.Monitor.Exit(deviceLock)
+                End Try
             Else
                 Return 0
             End If
@@ -2922,12 +2997,20 @@ Public Class LTFSWriter
 
     Private Sub ToolStripStatusLabel2_Click(sender As Object, e As EventArgs) Handles ToolStripStatusLabel2.Click
         Try
-            If True OrElse AllowOperation Then
+            If Not TapeEjectedReadOnly Then
+                Dim handleSnapshot As IntPtr = driveHandle
+                If handleSnapshot = IntPtr.Zero OrElse handleSnapshot = New IntPtr(-1) Then Return
                 Task.Run(Sub()
-                             If Threading.Monitor.TryEnter(TapeUtils.GetSCSIOperationLock(driveHandle)) Then
-                                 Threading.Monitor.Exit(TapeUtils.GetSCSIOperationLock(driveHandle))
-                                 RefreshCapacity()
-                                 PrintMsg(My.Resources.ResText_CRef, TooltipText:=Nothing)
+                             If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return
+                             Dim deviceLock As Object = TapeUtils.GetSCSIOperationLock(handleSnapshot)
+                             If Threading.Monitor.TryEnter(deviceLock) Then
+                                 Try
+                                     If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return
+                                     RefreshCapacity()
+                                     PrintMsg(My.Resources.ResText_CRef, TooltipText:=Nothing)
+                                 Finally
+                                     Threading.Monitor.Exit(deviceLock)
+                                 End Try
                              End If
                          End Sub)
             Else
@@ -2939,22 +3022,111 @@ Public Class LTFSWriter
         End Try
 
     End Sub
+    Private Function DetachDeviceLease() As SCSIDeviceLockManager.WriterLease
+        SyncLock _deviceLeaseLock
+            Dim result As SCSIDeviceLockManager.WriterLease = _deviceLease
+            _deviceLease = Nothing
+            Return result
+        End SyncLock
+    End Function
+
+    Private Sub MarkTapeEjected(handleToClose As IntPtr)
+        If Threading.Interlocked.Exchange(_tapeEjectedValue, 1) <> 0 Then Return
+        AllowOperation = False
+
+        ' Stop every later writer callback from reusing the ejected handle.
+        driveHandle = IntPtr.Zero
+
+        Dim closePending As Boolean = False
+        If handleToClose <> IntPtr.Zero AndAlso handleToClose <> New IntPtr(-1) Then
+            Try
+                closePending = Not TapeUtils.CloseTapeDrive(handleToClose, 0)
+            Catch ex As Exception
+                closePending = True
+                Log.Error(ex, "Writer tape handle close failed after eject.")
+            End Try
+        End If
+
+        Dim leaseToDispose As SCSIDeviceLockManager.WriterLease = DetachDeviceLease()
+        If leaseToDispose IsNot Nothing Then leaseToDispose.Dispose()
+
+        If closePending Then
+            Threading.ThreadPool.QueueUserWorkItem(
+                Sub(state As Object)
+                    Try
+                        TapeUtils.CloseTapeDrive(handleToClose)
+                    Catch ex As Exception
+                        Log.Error(ex, "Deferred writer tape handle close failed after eject.")
+                    End Try
+                End Sub)
+        End If
+    End Sub
+
+    Private Function TryEjectTape(Optional releaseUnit As Boolean = False) As Boolean
+        If TapeEjectedReadOnly Then Return False
+
+        Dim handleToEject As IntPtr = driveHandle
+        If handleToEject = IntPtr.Zero OrElse handleToEject = New IntPtr(-1) Then Return False
+
+        SyncLock TapeUtils.GetSCSIOperationLock(handleToEject)
+            If releaseUnit Then
+                TapeUtils.ReleaseUnit(handleToEject)
+                TapeUtils.AllowMediumRemoval(handleToEject)
+            End If
+            If Not TapeUtils.LoadEject(handleToEject, TapeUtils.LoadOption.Eject) Then Return False
+
+            ' Keep the operation lock while marking the page read-only and
+            ' closing the persistent handle, so no polling command can slip
+            ' between eject and cleanup.
+            MarkTapeEjected(handleToEject)
+            Return True
+        End SyncLock
+    End Function
+
+    ' The caller must hold the per-handle SCSI operation lock.  Only an
+    ' explicit eject is allowed to enter MarkTapeEjected; a failed LTFS probe
+    ' must leave the page in the normal, usable state.
+    Private Function TryReloadTapeLocked(handleSnapshot As IntPtr, lockVolume As Boolean) As Boolean
+        If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return False
+        Try
+            If Not TapeUtils.DoReload(handleSnapshot, lockVolume, EncryptionKey) Then
+                PrintMsg("Tape reload returned failure.", Warning:=True, LogOnly:=True)
+                SetStatusLight(LWStatus.Err)
+                Return False
+            End If
+            Return True
+        Catch ex As Exception
+            PrintMsg($"Tape reload failed: {ex}", Warning:=True, LogOnly:=True)
+            SetStatusLight(LWStatus.Err)
+            Return False
+        End Try
+    End Function
+
     Public Sub LockGUI(Optional ByVal Lock As Boolean = True)
         Invoke(Sub()
                    SyncLock OperationLock
-                       AllowOperation = Not Lock
-                       'MenuStrip1.Enabled = AllowOperation
-                       ContextMenuStrip1.Enabled = AllowOperation
+                       Dim pageIsReadOnly As Boolean = TapeEjectedReadOnly
+                       Dim operationAllowed As Boolean = Not Lock AndAlso Not pageIsReadOnly
+                       AllowOperation = operationAllowed
+                       MenuStrip1.Enabled = Not pageIsReadOnly
+                       ContextMenuStrip1.Enabled = operationAllowed
                        For Each Items As ToolStripMenuItem In MenuStrip1.Items
                            For Each SubItem In Items.DropDownItems
                                If TypeOf (SubItem) Is ToolStripDropDownItem Then
-                                   CType(SubItem, ToolStripDropDownItem).Enabled = AllowOperation
+                                   CType(SubItem, ToolStripDropDownItem).Enabled = operationAllowed
                                End If
                            Next
                        Next
-                       自动化ToolStripMenuItem1.Enabled = True
-                       CommandBar.Enabled = AllowOperation
-                       ContextMenuStrip3.Enabled = AllowOperation
+                       自动化ToolStripMenuItem1.Enabled = Not pageIsReadOnly
+                       CommandBar.Enabled = operationAllowed
+                       ContextMenuStrip3.Enabled = operationAllowed
+                       If pageIsReadOnly Then
+                           ContextMenuStrip4.Enabled = False
+                           ToolStripDropDownButton1.Enabled = False
+                           ToolStripDropDownButton2.Enabled = False
+                           ToolStripDropDownButton3.Enabled = False
+                           ToolStripStatusLabel2.Enabled = False
+                       End If
                    End SyncLock
                End Sub)
     End Sub
@@ -3839,6 +4011,7 @@ Public Class LTFSWriter
     End Function
 
     Public Function CheckUnindexedDataLimit(Optional ByVal ForceFlush As Boolean = False, Optional ByVal CheckOnly As Boolean = False) As Boolean
+        If TapeEjectedReadOnly Then Return False
         If CheckOnly Then Return IsUnindexedDataLimitReached(ForceFlush)
         If IsUnindexedDataLimitReached(ForceFlush) Then
             WriteCurrentIndex(False, False)
@@ -3902,6 +4075,7 @@ Public Class LTFSWriter
         Return succ
     End Function
     Public Sub WriteCurrentIndex(Optional ByVal GotoEOD As Boolean = True, Optional ByVal ClearCurrentStat As Boolean = True)
+        If TapeEjectedReadOnly Then Exit Sub
         SetStatusLight(LWStatus.Busy)
         PrintMsg($"Position = {GetPos.ToString()}", LogOnly:=True)
         If GotoEOD Then TapeUtils.Locate(driveHandle, 0UL, DataPartition, TapeUtils.LocateDestType.EOD)
@@ -3973,6 +4147,7 @@ Public Class LTFSWriter
         End Try
     End Sub
     Public Sub RefreshIndexPartition()
+        If TapeEjectedReadOnly Then Exit Sub
         SetStatusLight(LWStatus.Busy)
         Dim originalLocationPartition As ltfsindex.PartitionLabel = schema.location.partition
         Dim originalLocationStartBlock As ULong = schema.location.startblock
@@ -4036,6 +4211,7 @@ Public Class LTFSWriter
     ''' Data start position
     ''' </returns>
     Public Function DumpDataToIndexPartition(ByVal Data As IO.Stream, Optional ByVal RetainPosisiton As Boolean = True, Optional ByVal IsFirstFile As Boolean = True, Optional ByVal IsLastFile As Boolean = True, Optional ByVal DataRead As Action(Of Byte(), Integer, Integer) = Nothing) As Long
+        If TapeEjectedReadOnly Then Return -1
         Try
             If ExtraPartitionCount = 0 Then Return -1
             Static tmpf As String = ""
@@ -4079,6 +4255,7 @@ Public Class LTFSWriter
         Return -1
     End Function
     Public Sub MoveToIndexPartition(ByVal f As ltfsindex.file, Optional ByVal tmpfile As String = "")
+        If TapeEjectedReadOnly Then Exit Sub
         Try
             If ExtraPartitionCount = 0 Then Exit Sub
             If f Is Nothing Then Exit Sub
@@ -4106,6 +4283,7 @@ Public Class LTFSWriter
         Return DumpDataToIndexPartition(s, RetainPosisiton)
     End Function
     Public Sub UpdataAllIndex()
+        If TapeEjectedReadOnly Then Return
         SetStatusLight(LWStatus.Busy)
         If (My.Settings.LTFSWriter_ForceIndex OrElse (TotalBytesUnindexed <> 0)) AndAlso schema IsNot Nothing AndAlso schema.location.partition = ltfsindex.PartitionLabel.b Then
             PrintMsg(My.Resources.ResText_UDI)
@@ -4120,7 +4298,8 @@ Public Class LTFSWriter
         If schema IsNot Nothing AndAlso schema.location.partition = ltfsindex.PartitionLabel.a Then Me.Invoke(Sub() 更新数据区索引ToolStripMenuItem.Enabled = False)
         If SilentMode Then
             If SilentAutoEject Then
-                TapeUtils.LoadEject(driveHandle, TapeUtils.LoadOption.Eject)
+                If Not TryEjectTape() Then Throw New IOException("Cannot eject tape.")
+                LockGUI(False)
                 RaiseEvent TapeEjected()
             End If
         Else
@@ -4129,8 +4308,9 @@ Public Class LTFSWriter
                        DoEject = WA3ToolStripMenuItem.Checked OrElse MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_PEj, My.Resources.ResText_Hint, MessageBoxButtons.OKCancel) = DialogResult.OK
                    End Sub)
             If DoEject Then
-                TapeUtils.LoadEject(driveHandle, TapeUtils.LoadOption.Eject)
+                If Not TryEjectTape() Then Throw New IOException("Cannot eject tape.")
                 PrintMsg(My.Resources.ResText_Ejd)
+                LockGUI(False)
                 RaiseEvent TapeEjected()
             End If
         End If
@@ -4800,7 +4980,7 @@ Public Class LTFSWriter
     End Function
 
     Private Sub ListView1_DragEnter(sender As Object, e As DragEventArgs) Handles ListView1.DragEnter
-        If Not AllowOperation OrElse Not MenuStrip1.Enabled Then
+        If Not CanOperateTape() OrElse Not MenuStrip1.Enabled Then
             PrintMsg(My.Resources.ResText_DragNA)
             Exit Sub
         End If
@@ -5757,6 +5937,7 @@ Public Class LTFSWriter
     End Sub
 
     Public Sub RestoreFile(FileName As String, FileIndex As ltfsindex.file)
+        If TapeEjectedReadOnly Then Exit Sub
         If Not FileName.StartsWith("\\") Then FileName = $"\\?\{FileName}"
         Dim FileExist As Boolean = True
         If Not IO.File.Exists(FileName) Then
@@ -6276,6 +6457,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 提取ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 提取ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim selectedItems As List(Of ListViewItem) = GetSelectedListViewItems()
         If selectedItems.Count = 0 Then Exit Sub
         Dim tarFiles As New List(Of TarVirtualFile)
@@ -6370,6 +6552,7 @@ Public Class LTFSWriter
         th.Start()
     End Sub
     Private Sub 提取ToolStripMenuItem1_Click(sender As Object, e As EventArgs) Handles 提取ToolStripMenuItem1.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim Nodes As List(Of TreeNode) = SelectedNodes
         If Nodes.Count = 0 Then Exit Sub
         Dim tarDirectories As New List(Of TarVirtualDirectory)
@@ -6490,6 +6673,7 @@ Public Class LTFSWriter
         th.Start()
     End Sub
     Public Function LocateToWritePosition() As Boolean
+        If TapeEjectedReadOnly Then Return False
         If schema.location.partition = ltfsindex.PartitionLabel.a Then
             Dim p As TapeUtils.PositionData = Nothing
             While True
@@ -7795,6 +7979,7 @@ Public Class LTFSWriter
 
 
     Private Sub 写入数据ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 写入数据ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim th As New Threading.Thread(
             Sub()
                 Dim OnWriteFinishMessage As String = ""
@@ -9174,6 +9359,7 @@ Public Class LTFSWriter
         th.Start()
     End Sub
     Private Sub 读取索引ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 读取索引ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim th As New Threading.Thread(
             Sub()
                 Try
@@ -9240,7 +9426,6 @@ Public Class LTFSWriter
                         If senseData.Length >= 14 Then Add_Key = CUShort(CInt(senseData(12)) << 8 Or senseData(13))
                         PrintMsg(My.Resources.ResText_NVOL1)
                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_NLTFS}{vbCrLf}{TapeUtils.ParseSenseData(senseData)}", My.Resources.ResText_Error))
-                        LockGUI(False)
                         SetStatusLight(LWStatus.NotReady)
                         Exit Try
                     End If
@@ -9292,7 +9477,6 @@ Public Class LTFSWriter
                                 PrintMsg(My.Resources.ResText_IRFailed)
                                 Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_NLTFS, My.Resources.ResText_Error))
                                 SetStatusLight(LWStatus.Err)
-                                LockGUI(False)
                                 Exit Try
                             End If
                             TapeUtils.Locate(driveHandle, CULng(FM - 1), CByte(0), TapeUtils.LocateDestType.FileMark)
@@ -9377,19 +9561,27 @@ Public Class LTFSWriter
 
                     PrintMsg(My.Resources.ResText_IRSucc)
                     SetStatusLight(LWStatus.Succ)
-                    LockGUI(False)
                     Invoke(Sub() RaiseEvent LTFSLoaded())
                 Catch ex As Exception
                     PrintMsg(My.Resources.ResText_IRFailed)
                     PrintMsg($"{ex.ToString}", LogOnly:=True)
                     SetStatusLight(LWStatus.Err)
-                    LockGUI(False)
+                Finally
+                    ' A failed LTFS probe is not an eject.  LockGUI(False)
+                    ' restores normal operation unless MarkTapeEjected was
+                    ' actually reached by an explicit eject operation.
+                    Try
+                        LockGUI(False)
+                    Catch cleanupEx As Exception
+                        Log.Error(cleanupEx, "LTFS index load GUI unlock failed.")
+                    End Try
                 End Try
             End Sub)
         LockGUI()
         th.Start()
     End Sub
     Private Sub 读取数据区索引ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 读取数据区索引ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         If ExtraPartitionCount = 0 Then
             读取索引ToolStripMenuItem_Click(sender, e)
             Exit Sub
@@ -9491,6 +9683,7 @@ Public Class LTFSWriter
         th.Start()
     End Sub
     Private Sub 更新数据区索引ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 更新数据区索引ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim th As New Threading.Thread(
         Sub()
             Try
@@ -9516,6 +9709,7 @@ Public Class LTFSWriter
         th.Start()
     End Sub
     Public Sub LoadIndexFile(FileName As String, Optional ByVal Silent As Boolean = False)
+        If TapeEjectedReadOnly Then Return
         Try
             PrintMsg(My.Resources.ResText_RI)
             PrintMsg(My.Resources.ResText_AI)
@@ -9565,6 +9759,7 @@ Public Class LTFSWriter
     End Sub
 
     Public Function AutoDump() As String
+        If TapeEjectedReadOnly Then Return String.Empty
         SetStatusLight(LWStatus.Busy)
         Dim id As String = If(String.IsNullOrWhiteSpace(Barcode), schema.volumeuuid.ToString(), Barcode)
 
@@ -9660,6 +9855,7 @@ Public Class LTFSWriter
     End Function
 
     Private Sub 备份当前索引ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 备份当前索引ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim th As New Threading.Thread(
             Sub()
                 Try
@@ -9678,6 +9874,7 @@ Public Class LTFSWriter
         th.Start()
     End Sub
     Private Sub 格式化ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 格式化ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         If MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_DataLossWarning, My.Resources.ResText_Warning, MessageBoxButtons.OKCancel) = DialogResult.OK Then
             While True
                 Threading.Thread.Sleep(0)
@@ -9968,6 +10165,7 @@ Public Class LTFSWriter
         End If
     End Sub
     Private Sub 设置高度ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 设置高度ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim p As TapeUtils.PositionData = GetPos
         PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
         Dim Pos As Long = CLng(p.BlockNumber)
@@ -9977,6 +10175,7 @@ Public Class LTFSWriter
         End If
     End Sub
     Private Sub 定位到起始块ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 定位到起始块ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim selectedItems As List(Of ListViewItem) = GetSelectedListViewItems()
         If selectedItems.Count > 0 AndAlso
         selectedItems(0).Tag IsNot Nothing AndAlso
@@ -10039,45 +10238,66 @@ Public Class LTFSWriter
     End Sub
     Public LRHistory As Double
     Public Function CheckFlush() As Boolean
+        If TapeEjectedReadOnly Then Return False
+        Dim handleSnapshot As IntPtr = driveHandle
+        If handleSnapshot = IntPtr.Zero OrElse handleSnapshot = New IntPtr(-1) Then Return False
         If Threading.Interlocked.Exchange(_flushState, 0) <> 0 Then
-            PrintMsg("Flush Triggered", LogOnly:=True)
-            Dim Loc As TapeUtils.PositionData = GetPos
-            If Loc.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
-            PrintMsg($"Position = {Loc.ToString()}", LogOnly:=True)
-            Dim ChanLRValue As Double = ReadChanLRInfo(10000)
-            PrintMsg($"ErrRateLogValue: {ChanLRValue}", LogOnly:=True)
-            If ChanLRValue <> 0 Then LRHistory = ChanLRValue
-            If (Not ForceFlush) AndAlso (ChanLRValue < My.Settings.LTFSWriter_AutoCleanErrRateLogThreashould) Then
-                PrintMsg("Error rate log OK, ignore", LogOnly:=True)
-                Return False
-            ElseIf ForceFlush OrElse (LRHistory = 0) OrElse (ChanLRValue <> 0) Then
-                Threading.Interlocked.Increment(CapReduceCount)
-                TapeUtils.Flush(driveHandle)
-                If Not ForceFlush Then
-                    Threading.Thread.Sleep(My.Settings.LTFSWriter_AutoFlushCooldownMilliseconds)
+            SyncLock TapeUtils.GetSCSIOperationLock(handleSnapshot)
+                If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return False
+                PrintMsg("Flush Triggered", LogOnly:=True)
+                Dim Loc As TapeUtils.PositionData = GetPos
+                If Loc.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                PrintMsg($"Position = {Loc.ToString()}", LogOnly:=True)
+                Dim ChanLRValue As Double = ReadChanLRInfo(10000)
+                PrintMsg($"ErrRateLogValue: {ChanLRValue}", LogOnly:=True)
+                If ChanLRValue <> 0 Then LRHistory = ChanLRValue
+                If (Not ForceFlush) AndAlso (ChanLRValue < My.Settings.LTFSWriter_AutoCleanErrRateLogThreashould) Then
+                    PrintMsg("Error rate log OK, ignore", LogOnly:=True)
+                    Return False
+                ElseIf ForceFlush OrElse (LRHistory = 0) OrElse (ChanLRValue <> 0) Then
+                    Threading.Interlocked.Increment(CapReduceCount)
+                    If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return False
+                    TapeUtils.Flush(handleSnapshot)
+                    If Not ForceFlush Then
+                        Threading.Thread.Sleep(My.Settings.LTFSWriter_AutoFlushCooldownMilliseconds)
+                    End If
+                    ForceFlush = False
+                    RefreshCapacity()
+                    Return True
+                Else
+                    Return False
                 End If
-                ForceFlush = False
-                RefreshCapacity()
-                Return True
-            Else
-                Return False
-            End If
+            End SyncLock
         Else
             Return False
         End If
     End Function
     Public Sub CheckClean(Optional ByVal LockVolume As Boolean = False)
+        If TapeEjectedReadOnly Then Return
+        Dim handleSnapshot As IntPtr = driveHandle
+        If handleSnapshot = IntPtr.Zero OrElse handleSnapshot = New IntPtr(-1) Then Return
         If Threading.Interlocked.Exchange(_cleanState, 0) <> 0 Then
-            If (Now - Clean_last).TotalSeconds < 300 Then Exit Sub
-            PrintMsg("Clean Triggered", LogOnly:=True)
-            Clean_last = Now
-            Dim Loc As TapeUtils.PositionData = GetPos
-            If Loc.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
-            PrintMsg($"Position = {Loc.ToString()}", LogOnly:=True)
-            If Not Loc.EOP Then
-                TapeUtils.DoReload(driveHandle, LockVolume, EncryptionKey)
-            End If
-            RefreshCapacity()
+            If schema Is Nothing OrElse plabel Is Nothing Then Return
+            Try
+                SyncLock TapeUtils.GetSCSIOperationLock(handleSnapshot)
+                    If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return
+                    If (Now - Clean_last).TotalSeconds < 300 Then Exit Sub
+                    PrintMsg("Clean Triggered", LogOnly:=True)
+                    Clean_last = Now
+                    Dim Loc As TapeUtils.PositionData = GetPos
+                    If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return
+                    If Loc.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                    PrintMsg($"Position = {Loc.ToString()}", LogOnly:=True)
+                    If Not Loc.EOP Then
+                        If Not TryReloadTapeLocked(handleSnapshot, LockVolume) Then Return
+                    End If
+                    If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return
+                    RefreshCapacity()
+                End SyncLock
+            Catch ex As Exception
+                PrintMsg($"Automatic tape reload failed: {ex}", Warning:=True, LogOnly:=True)
+                SetStatusLight(LWStatus.Err)
+            End Try
         End If
     End Sub
     Private Sub LinearToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles LinearToolStripMenuItem.Click
@@ -10102,13 +10322,37 @@ Public Class LTFSWriter
         Flush = True
     End Sub
     Private Sub ToolStripDropDownButton3_Click(sender As Object, e As EventArgs) Handles ToolStripDropDownButton3.Click
+        If TapeEjectedReadOnly Then Exit Sub
         If Not AllowOperation Then
             Clean = True
         Else
+            Dim handleSnapshot As IntPtr = driveHandle
+            If handleSnapshot = IntPtr.Zero OrElse handleSnapshot = New IntPtr(-1) Then Exit Sub
+            Dim lockVolume As Boolean = Not AllowOperation
             ToolStripDropDownButton3.Enabled = False
+            LockGUI(True)
             Task.Run(Sub()
-                         TapeUtils.DoReload(driveHandle, Not AllowOperation, EncryptionKey)
-                         Invoke(Sub() ToolStripDropDownButton3.Enabled = True)
+                         Try
+                             SyncLock TapeUtils.GetSCSIOperationLock(handleSnapshot)
+                                 If Not TapeEjectedReadOnly AndAlso driveHandle = handleSnapshot Then
+                                     TryReloadTapeLocked(handleSnapshot, lockVolume)
+                                 End If
+                             End SyncLock
+                         Catch ex As Exception
+                             PrintMsg($"Manual tape reload failed: {ex}", Warning:=True, LogOnly:=True)
+                             SetStatusLight(LWStatus.Err)
+                         Finally
+                             Try
+                                 LockGUI(False)
+                             Catch cleanupEx As Exception
+                                 Log.Error(cleanupEx, "Manual tape reload GUI unlock failed.")
+                             End Try
+                             Try
+                                 Invoke(Sub() ToolStripDropDownButton3.Enabled = Not TapeEjectedReadOnly)
+                             Catch cleanupEx As Exception
+                                 Log.Error(cleanupEx, "Manual tape reload button restore failed.")
+                             End Try
+                         End Try
                      End Sub)
         End If
 
@@ -11481,6 +11725,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub SafeEjectButton_Click(sender As Object, e As EventArgs) Handles SafeEjectButton.Click
+        If TapeEjectedReadOnly Then Exit Sub
         If MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_UIE, My.Resources.ResText_Confirm, MessageBoxButtons.OKCancel) = DialogResult.Cancel Then Exit Sub
         Dim th As New Threading.Thread(
                 Sub()
@@ -11499,7 +11744,7 @@ Public Class LTFSWriter
                         PrintMsg(My.Resources.ResText_IUd)
                         If schema IsNot Nothing AndAlso schema.location.partition = ltfsindex.PartitionLabel.a Then Invoke(Sub() 更新数据区索引ToolStripMenuItem.Enabled = False)
                         SetStatusLight(LWStatus.Busy)
-                        TapeUtils.LoadEject(driveHandle, TapeUtils.LoadOption.Eject)
+                        If Not TryEjectTape() Then Throw New IOException("Cannot eject tape.")
                         PrintMsg(My.Resources.ResText_Ejd)
                         Invoke(Sub()
                                    SetStatusLight(LWStatus.Succ)
@@ -12588,6 +12833,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 压缩索引ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 压缩索引ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         If TreeView1.SelectedNode IsNot Nothing AndAlso
            TypeOf TreeView1.SelectedNode.Tag Is ltfsindex.directory AndAlso
            TreeView1.SelectedNode.Parent IsNot Nothing AndAlso
@@ -12799,6 +13045,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 解压索引ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 解压索引ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         If TreeView1.SelectedNode IsNot Nothing AndAlso TypeOf TreeView1.SelectedNode.Tag Is ltfsindex.file Then
             Dim f As ltfsindex.file = DirectCast(TreeView1.SelectedNode.Tag, ltfsindex.file)
             Dim d As ltfsindex.directory = DirectCast(TreeView1.SelectedNode.Parent.Tag, ltfsindex.directory)
@@ -12847,6 +13094,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 移动到索引区ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 移动到索引区ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim selectedItems As List(Of ListViewItem) = GetSelectedListViewItems()
         If selectedItems.Count > 0 Then
             LockGUI()
@@ -12925,6 +13173,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 设置密钥ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 设置密钥ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim key As String = ""
         If EncryptionKey IsNot Nothing AndAlso EncryptionKey.Length = 32 Then
             key = BitConverter.ToString(EncryptionKey).Replace("-", "").ToUpper
@@ -12948,6 +13197,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 设置密码ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 设置密码ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim key As String = ""
         If DisplayHelper.ShowInputDialog(设置密码ToolStripMenuItem.Text, "LTFSWriter", key) <> DialogResult.OK Then Exit Sub
         If key.Length = 0 Then
@@ -12965,6 +13215,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub CopySelectedToAnotherTape(sender As Object, e As EventArgs) Handles 复制到另一磁带ToolStripMenuItem1.Click, 复制到另一磁带ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Try
             If OfflineMode OrElse TapeUtils.DriverTypeSetting <> TapeUtils.DriverType.LTO Then
                 Throw New NotSupportedException("Direct tape copy now only support LTO drive.")
@@ -13606,12 +13857,14 @@ Public Class LTFSWriter
 
 
     Private Sub 加锁ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 加锁ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         TapeUtils.OpenTapeDrive(TapeDrive, driveHandle)
         If TapeUtils.IsOpened(driveHandle) Then SetStatusLight(LWStatus.Idle)
         MessageBox.Show(New Form With {.TopMost = True}, $"Lock: {TapeUtils.DriveOpenCount(TapeDrive)}")
     End Sub
 
     Private Sub 新建压缩文件ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 新建压缩文件ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         If ListView1.Tag IsNot Nothing Then
             Dim th As New Threading.Thread(
             Sub()
@@ -14117,6 +14370,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 解锁ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 解锁ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         TapeUtils.CloseTapeDrive(driveHandle)
         If Not TapeUtils.IsOpened(driveHandle) Then SetStatusLight(LWStatus.NotReady)
         MessageBox.Show(New Form With {.TopMost = True}, $"Lock: {TapeUtils.DriveOpenCount(TapeDrive)}")
@@ -14786,6 +15040,7 @@ Public Class LTFSWriter
                  End Sub)
     End Sub
     Private Sub LTFSWriter_KeyDown(sender As Object, e As KeyEventArgs) Handles Me.KeyDown
+        If TapeEjectedReadOnly Then Exit Sub
         Select Case e.KeyCode
             Case Keys.V
                 If Not AllowOperation Then Exit Sub
@@ -14903,20 +15158,23 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub ToolStripStatusLabel1_MouseUp(sender As Object, e As MouseEventArgs) Handles ToolStripStatusLabel1.MouseUp
-        If e.Button = MouseButtons.Right Then
+        If Not TapeEjectedReadOnly AndAlso e.Button = MouseButtons.Right Then
             ContextMenuStrip4.Show(ToolStripStatusLabel1.GetCurrentParent, e.Location + CType(ToolStripStatusLabel1.Bounds.Location, Size))
         End If
     End Sub
 
     Private Sub LTFSWriter_Closed(sender As Object, e As EventArgs) Handles Me.Closed
         Dim handleToClose As IntPtr = driveHandle
-        Dim leaseToDispose As SCSIDeviceLockManager.WriterLease = _deviceLease
-        _deviceLease = Nothing
+        Dim leaseToDispose As SCSIDeviceLockManager.WriterLease = DetachDeviceLease()
         Dim closed As Boolean = False
 
         Try
             ' Do not let a close event wait behind an in-flight SCSI command.
-            closed = TapeUtils.CloseTapeDrive(handleToClose, 0)
+            If handleToClose = IntPtr.Zero OrElse handleToClose = New IntPtr(-1) Then
+                closed = True
+            Else
+                closed = TapeUtils.CloseTapeDrive(handleToClose, 0)
+            End If
         Catch
         Finally
             If leaseToDispose IsNot Nothing Then
@@ -15041,6 +15299,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 启动iSCSI服务ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 启动iSCSI服务ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim svc As New iSCSIService()
         SetStatusLight(LWStatus.Busy)
         AddHandler svc.LogPrint, Sub(s As String)
@@ -15645,6 +15904,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 提取为空文件ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 提取为空文件ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         Dim Nodes As List(Of TreeNode) = SelectedNodes
         If Nodes.Count = 0 Then Exit Sub
         Dim outputDirectory As String = SelectWriterFolder()
@@ -15799,24 +16059,30 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub ForceEjectButton_Click(sender As Object, e As EventArgs) Handles ForceEjectButton.Click
+        If TapeEjectedReadOnly Then Exit Sub
         If MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_ForceEjectConfirm, My.Resources.ResText_Confirm, MessageBoxButtons.OKCancel) = DialogResult.Cancel Then Exit Sub
         LockGUI(True)
         Task.Run(Sub()
-                     SetStatusLight(LWStatus.Busy)
-                     TapeUtils.ReleaseUnit(driveHandle)
-                     TapeUtils.AllowMediumRemoval(driveHandle)
-                     TapeUtils.LoadEject(driveHandle, TapeUtils.LoadOption.Eject)
-                     PrintMsg(My.Resources.ResText_Ejd)
-                     Invoke(Sub()
-                                SetStatusLight(LWStatus.Succ)
-                                LockGUI(False)
-                                RefreshDisplay()
-                                RaiseEvent TapeEjected()
-                            End Sub)
+                     Try
+                         SetStatusLight(LWStatus.Busy)
+                         If Not TryEjectTape(releaseUnit:=True) Then Throw New IOException("Cannot eject tape.")
+                         PrintMsg(My.Resources.ResText_Ejd)
+                         Invoke(Sub()
+                                    SetStatusLight(LWStatus.Succ)
+                                    LockGUI(False)
+                                    RefreshDisplay()
+                                    RaiseEvent TapeEjected()
+                                End Sub)
+                     Catch ex As Exception
+                         PrintMsg($"{My.Resources.ResText_IUErr}{vbCrLf}{ex}", ForceLog:=True)
+                         SetStatusLight(LWStatus.Err)
+                         LockGUI(False)
+                     End Try
                  End Sub)
     End Sub
 
     Private Sub 创建磁盘镜像ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 创建磁盘镜像ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
         If Not AllowOperation Then Exit Sub
         Dim cfg As New HardDriveDataProvider.Config With {.DrivePath = "\\.\PhysicalDrive1", .StartLBA = 0, .SectorCount = -1}
         Dim sp As New SettingPanel With {.SelectedObject = CType(cfg, Object)}
