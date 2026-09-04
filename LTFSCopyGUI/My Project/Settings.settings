@@ -117,6 +117,9 @@
     <Setting Name="LTFSWriter_ShowFileCount" Description="显示文件数" Type="System.Boolean" Scope="User">
       <Value Profile="(Default)">False</Value>
     </Setting>
+    <Setting Name="LTFSWriter_Accumulate_Chart" Description="图表以累计文件进度作为半透明背景" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">False</Value>
+    </Setting>
     <Setting Name="LTFSWriter_PowerPolicyOnWriteBegin" Description="写入开始时切换电源策略" Type="System.Guid" Scope="User">
       <Value Profile="(Default)">8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c</Value>
     </Setting>

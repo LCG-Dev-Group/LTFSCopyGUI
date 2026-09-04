@@ -851,6 +851,20 @@ Namespace My
             End Set
         End Property
         <Global.System.Configuration.UserScopedSettingAttribute(),
+         Global.System.Configuration.SettingsDescriptionAttribute("图表以累计文件进度作为半透明背景"),
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),
+         Global.System.Configuration.DefaultSettingValueAttribute("False"),
+         Category("LTFSWriter"),
+         LocalizedDescription("PropertyDescription_LTFSWriter_Accumulate_Chart")>
+        Public Property LTFSWriter_Accumulate_Chart() As Boolean
+            Get
+                Return CType(Me("LTFSWriter_Accumulate_Chart"), Boolean)
+            End Get
+            Set
+                Me("LTFSWriter_Accumulate_Chart") = Value
+            End Set
+        End Property
+        <Global.System.Configuration.UserScopedSettingAttribute(),
          Global.System.Configuration.SettingsDescriptionAttribute("空目录显示背景图标"),
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),
          Global.System.Configuration.DefaultSettingValueAttribute("True"),

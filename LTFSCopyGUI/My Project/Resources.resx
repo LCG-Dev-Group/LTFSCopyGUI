@@ -306,6 +306,9 @@
   <data name="ResText_FileRateBT" xml:space="preserve">
     <value>每秒文件</value>
   </data>
+  <data name="ResText_FileProgressBT" xml:space="preserve">
+    <value>累计文件</value>
+  </data>
   <data name="ResText_SpeedBT" xml:space="preserve">
     <value>速度 (MiB/s)</value>
   </data>
@@ -722,6 +725,9 @@
   </data>
   <data name="PropertyDescription_LTFSWriter_ShowFileCount" xml:space="preserve">
     <value>显示文件数</value>
+  </data>
+  <data name="PropertyDescription_LTFSWriter_Accumulate_Chart" xml:space="preserve">
+    <value>图表以累计文件进度作为半透明背景</value>
   </data>
   <data name="PropertyDescription_LTFSWriter_ShowLoss" xml:space="preserve">
     <value>显示容量损失</value>

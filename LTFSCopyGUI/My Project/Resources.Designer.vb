@@ -736,6 +736,15 @@ Namespace My.Resources
                 Return ResourceManager.GetString("PropertyDescription_LTFSWriter_ShowFileCount", resourceCulture)
             End Get
         End Property
+
+        '''<summary>
+        '''  Looks up a localized string similar to 图表以累计文件进度作为半透明背景.
+        '''</summary>
+        Friend ReadOnly Property PropertyDescription_LTFSWriter_Accumulate_Chart() As String
+            Get
+                Return ResourceManager.GetString("PropertyDescription_LTFSWriter_Accumulate_Chart", resourceCulture)
+            End Get
+        End Property
         
         '''<summary>
         '''  Looks up a localized string similar to 显示容量损失.
@@ -1414,6 +1423,15 @@ Namespace My.Resources
         Friend ReadOnly Property ResText_FileRateBT() As String
             Get
                 Return ResourceManager.GetString("ResText_FileRateBT", resourceCulture)
+            End Get
+        End Property
+
+        '''<summary>
+        '''  Looks up a localized string similar to 累计文件.
+        '''</summary>
+        Friend ReadOnly Property ResText_FileProgressBT() As String
+            Get
+                Return ResourceManager.GetString("ResText_FileProgressBT", resourceCulture)
             End Get
         End Property
         

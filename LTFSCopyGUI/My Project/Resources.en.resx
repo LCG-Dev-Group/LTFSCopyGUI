@@ -302,6 +302,9 @@
   <data name="ResText_FileRateBT" xml:space="preserve">
     <value>File rate</value>
   </data>
+  <data name="ResText_FileProgressBT" xml:space="preserve">
+    <value>Cumulative files</value>
+  </data>
   <data name="ResText_SpeedBT" xml:space="preserve">
     <value>Speed (MiB/s)</value>
   </data>
@@ -715,6 +718,9 @@
   </data>
   <data name="PropertyDescription_LTFSWriter_ShowFileCount" xml:space="preserve">
     <value>Show file count</value>
+  </data>
+  <data name="PropertyDescription_LTFSWriter_Accumulate_Chart" xml:space="preserve">
+    <value>Show cumulative file progress as a translucent chart background</value>
   </data>
   <data name="PropertyDescription_LTFSWriter_ShowLoss" xml:space="preserve">
     <value>Show capacity loss</value>

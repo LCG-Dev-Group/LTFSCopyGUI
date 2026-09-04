@@ -438,7 +438,8 @@ Public Class LTFSWriter
                 其他ToolStripMenuItem1.Text = $"{My.Resources.ResText_Other}: {My.Settings.LTFSWriter_PowerPolicyOnWriteEnd.ToString()}"
         End Select
         Chart1.PrimaryAxisTitle = If(My.Settings.Application_UseDecimalUnit, My.Resources.ResText_SpeedBTD, My.Resources.ResText_SpeedBT)
-        Chart1.SecondaryAxisTitle = My.Resources.ResText_FileRateBT
+        Chart1.AccumulateChart = My.Settings.LTFSWriter_Accumulate_Chart
+        Chart1.SecondaryAxisTitle = If(My.Settings.LTFSWriter_Accumulate_Chart, My.Resources.ResText_FileProgressBT, My.Resources.ResText_FileRateBT)
         Chart1.XAxisTitle = Min10ToolStripMenuItem.Text
         Chart1.VisibleSamples = SMaxNum
         TapeUtils.AllowPartition = Not DisablePartition
@@ -1037,9 +1038,12 @@ Public Class LTFSWriter
                 Threading.Monitor.Exit(OperationLock)
             End If
 
-            Chart1.AppendSample(ddelta / 1048576, fdelta)
             Dim USize As Long = CLng(UnwrittenSize)
             Dim UFile As Long = CLng(UnwrittenCount)
+            Chart1.AppendSample(ddelta / 1048576,
+                                fdelta,
+                                accumulatedSecondaryValue:=currentFilesSnapshot,
+                                accumulatedSecondaryMaximum:=UFile)
             Dim fastProviderSnapshot = _activeFastReaderProvider
             If fastProviderSnapshot IsNot Nothing AndAlso Not StopFlag Then
                 Try

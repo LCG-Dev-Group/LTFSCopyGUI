@@ -34,6 +34,8 @@ Public Class Direct2DChartControl
     Private Const PlotTopMargin As Single = 12.0F
     Private Const AnimationIntervalMilliseconds As Integer = 15
     Private Const AnimationDurationMilliseconds As Double = 180.0R
+    Private Const AccumulatedFillAlpha As Integer = 75
+    Private Const AccumulatedSeriesIndex As Integer = 3
 
     Private Structure AxisInfo
         Public Minimum As Double
@@ -58,6 +60,9 @@ Public Class Direct2DChartControl
     Private _primaryValues() As Double
     Private _secondaryValues() As Double
     Private _thirdValues() As Double
+    Private _accumulatedSecondaryValues() As Double
+    Private _accumulatedSecondaryTotal As Double
+    Private _accumulatedSecondaryMaximum As Double = Double.NaN
     Private _sampleCount As Integer
     Private _writeIndex As Integer
     Private _firstSampleIndex As Long
@@ -71,6 +76,7 @@ Public Class Direct2DChartControl
     Private _followLatest As Boolean = True
     Private _smoothScrolling As Boolean = True
     Private _isLogarithmic As Boolean
+    Private _accumulateChart As Boolean
 
     Private ReadOnly _animationTimer As Timer
     Private _factory As ID2D1Factory
@@ -85,6 +91,7 @@ Public Class Direct2DChartControl
     Private _textBrush As ID2D1SolidColorBrush
     Private _primaryBrush As ID2D1SolidColorBrush
     Private _secondaryBrush As ID2D1SolidColorBrush
+    Private _accumulatedSecondaryBrush As ID2D1SolidColorBrush
     Private _thirdBrush As ID2D1SolidColorBrush
     Private _axisLabelLeftFormat As IDWriteTextFormat
     Private _axisLabelRightFormat As IDWriteTextFormat
@@ -189,6 +196,19 @@ Public Class Direct2DChartControl
         Set(value As Boolean)
             If _isLogarithmic = value Then Return
             _isLogarithmic = value
+            Invalidate()
+        End Set
+    End Property
+
+    <Category("Chart")>
+    <DefaultValue(False)>
+    Public Property AccumulateChart As Boolean
+        Get
+            Return _accumulateChart
+        End Get
+        Set(value As Boolean)
+            If _accumulateChart = value Then Return
+            _accumulateChart = value
             Invalidate()
         End Set
     End Property
@@ -321,9 +341,13 @@ Public Class Direct2DChartControl
     ''' Adds one sample.  The method is thread-safe; invalidation is marshalled
     ''' to the UI thread when it is called by a worker.
     ''' </summary>
-    Public Sub AppendSample(primaryValue As Double, secondaryValue As Double, Optional thirdValue As Double = Double.NaN)
+    Public Sub AppendSample(primaryValue As Double,
+                            secondaryValue As Double,
+                            Optional thirdValue As Double = Double.NaN,
+                            Optional accumulatedSecondaryValue As Double = Double.NaN,
+                            Optional accumulatedSecondaryMaximum As Double = Double.NaN)
         SyncLock _dataLock
-            AppendSampleUnsafe(primaryValue, secondaryValue, thirdValue)
+            AppendSampleUnsafe(primaryValue, secondaryValue, thirdValue, accumulatedSecondaryValue, accumulatedSecondaryMaximum)
         End SyncLock
 
         If _followLatest Then
@@ -345,7 +369,7 @@ Public Class Direct2DChartControl
             For i As Integer = 0 To count - 1
                 Dim thirdValue As Double = Double.NaN
                 If thirdValues IsNot Nothing AndAlso i < thirdValues.Count Then thirdValue = thirdValues(i)
-                AppendSampleUnsafe(primaryValues(i), secondaryValues(i), thirdValue)
+                AppendSampleUnsafe(primaryValues(i), secondaryValues(i), thirdValue, Double.NaN, Double.NaN)
             Next
         End SyncLock
 
@@ -574,6 +598,7 @@ Public Class Direct2DChartControl
         _textBrush = _renderTarget.CreateSolidColorBrush(ToColor4(ForeColor), Nothing)
         _primaryBrush = _renderTarget.CreateSolidColorBrush(ToColor4(_primaryColor), Nothing)
         _secondaryBrush = _renderTarget.CreateSolidColorBrush(ToColor4(_secondaryColor), Nothing)
+        _accumulatedSecondaryBrush = _renderTarget.CreateSolidColorBrush(ToColor4(DrawingColor.FromArgb(AccumulatedFillAlpha, _secondaryColor)), Nothing)
         _thirdBrush = _renderTarget.CreateSolidColorBrush(ToColor4(_thirdColor), Nothing)
     End Sub
 
@@ -600,15 +625,27 @@ Public Class Direct2DChartControl
         Dim viewEnd As Double = viewStart + xSpan
 
         Dim primaryAxis As AxisInfo = GetAxisInfo(0, viewStart, viewEnd)
-        Dim secondaryAxis As AxisInfo = GetAxisInfo(1, viewStart, viewEnd)
+        Dim secondarySeriesIndex As Integer = If(_accumulateChart, AccumulatedSeriesIndex, 1)
+        Dim secondaryAxis As AxisInfo = GetAxisInfo(secondarySeriesIndex, viewStart, viewEnd)
+
+        Dim clip As New RawRectF(plot.Left, plot.Top, plot.Right, plot.Bottom)
+        If _accumulateChart Then
+            _renderTarget.PushAxisAlignedClip(clip, AntialiasMode.PerPrimitive)
+            Try
+                DrawFilledSeries(AccumulatedSeriesIndex, secondaryAxis, plot, viewStart, viewEnd, _accumulatedSecondaryBrush)
+            Finally
+                _renderTarget.PopAxisAlignedClip()
+            End Try
+        End If
 
         DrawAxes(plot, primaryAxis, secondaryAxis)
 
-        Dim clip As New RawRectF(plot.Left, plot.Top, plot.Right, plot.Bottom)
         _renderTarget.PushAxisAlignedClip(clip, AntialiasMode.PerPrimitive)
         Try
             DrawSeries(0, primaryAxis, plot, viewStart, viewEnd, _primaryBrush)
-            DrawSeries(1, secondaryAxis, plot, viewStart, viewEnd, _secondaryBrush)
+            If Not _accumulateChart Then
+                DrawSeries(1, secondaryAxis, plot, viewStart, viewEnd, _secondaryBrush)
+            End If
             DrawSeries(2, secondaryAxis, plot, viewStart, viewEnd, _thirdBrush)
         Finally
             _renderTarget.PopAxisAlignedClip()
@@ -715,12 +752,42 @@ Public Class Direct2DChartControl
         End Using
     End Sub
 
+    Private Sub DrawFilledSeries(seriesIndex As Integer, axis As AxisInfo, plot As RectangleF, viewStart As Double, viewEnd As Double, brush As ID2D1Brush)
+        Dim points As List(Of ChartPoint) = GetVisiblePoints(seriesIndex, viewStart, viewEnd, Math.Max(256, CInt(Math.Ceiling(plot.Width * 1.5F))))
+        If points.Count = 0 Then Return
+
+        Using geometry As ID2D1PathGeometry = _factory.CreatePathGeometry()
+            Dim started As Boolean = False
+            Dim lastX As Single = plot.Left
+            Using sink As ID2D1GeometrySink = geometry.Open()
+                For Each point As ChartPoint In points
+                    If Double.IsNaN(point.Y) OrElse Double.IsInfinity(point.Y) Then Continue For
+                    Dim x As Single = CSng(plot.Left + ((point.X - viewStart) / Math.Max(1.0R, viewEnd - viewStart)) * plot.Width)
+                    If Not started Then
+                        sink.BeginFigure(New Vector2(x, plot.Bottom), FigureBegin.Filled)
+                        started = True
+                    End If
+                    sink.AddLine(New Vector2(x, ValueToY(point.Y, axis, plot)))
+                    lastX = x
+                Next
+                If started Then
+                    sink.AddLine(New Vector2(lastX, plot.Bottom))
+                    sink.EndFigure(FigureEnd.Closed)
+                End If
+                sink.Close()
+            End Using
+            If started Then _renderTarget.FillGeometry(geometry, brush)
+        End Using
+    End Sub
+
     Private Function GetAxisInfo(seriesIndex As Integer, viewStart As Double, viewEnd As Double) As AxisInfo
         Dim minimum As Double = Double.PositiveInfinity
         Dim maximum As Double = Double.NegativeInfinity
         Dim hasValue As Boolean = False
+        Dim accumulatedMaximum As Double = Double.NaN
 
         SyncLock _dataLock
+            accumulatedMaximum = _accumulatedSecondaryMaximum
             Dim first As Long = Math.Max(_firstSampleIndex, CLng(Math.Floor(viewStart)))
             Dim last As Long = Math.Min(_nextSampleIndex - 1L, CLng(Math.Ceiling(viewEnd)))
             If first <= last Then
@@ -739,6 +806,22 @@ Public Class Direct2DChartControl
         If Not hasValue Then
             minimum = If(_isLogarithmic AndAlso seriesIndex = 0, 1.0R, 0.0R)
             maximum = If(_isLogarithmic AndAlso seriesIndex = 0, 10.0R, 1.0R)
+        ElseIf seriesIndex = AccumulatedSeriesIndex Then
+            minimum = 0.0R
+        End If
+
+        If seriesIndex = AccumulatedSeriesIndex AndAlso
+           Not Double.IsNaN(accumulatedMaximum) AndAlso
+           Not Double.IsInfinity(accumulatedMaximum) AndAlso
+           accumulatedMaximum > 0.0R Then
+            Return New AxisInfo With {
+                .Minimum = 0.0R,
+                .Maximum = accumulatedMaximum,
+                .StepSize = accumulatedMaximum / 5.0R,
+                .IsLogarithmic = False,
+                .LogMinimum = 0,
+                .LogMaximum = 0
+            }
         End If
 
         If _isLogarithmic AndAlso seriesIndex = 0 Then
@@ -863,16 +946,33 @@ Public Class Direct2DChartControl
                 value = _primaryValues(index)
             Case 1
                 value = _secondaryValues(index)
+            Case AccumulatedSeriesIndex
+                value = _accumulatedSecondaryValues(index)
             Case Else
                 value = _thirdValues(index)
         End Select
         Return True
     End Function
 
-    Private Sub AppendSampleUnsafe(primaryValue As Double, secondaryValue As Double, thirdValue As Double)
+    Private Sub AppendSampleUnsafe(primaryValue As Double,
+                                   secondaryValue As Double,
+                                   thirdValue As Double,
+                                   accumulatedSecondaryValue As Double,
+                                   accumulatedSecondaryMaximum As Double)
         _primaryValues(_writeIndex) = primaryValue
         _secondaryValues(_writeIndex) = secondaryValue
         _thirdValues(_writeIndex) = thirdValue
+        If Not Double.IsNaN(accumulatedSecondaryValue) AndAlso Not Double.IsInfinity(accumulatedSecondaryValue) Then
+            _accumulatedSecondaryTotal = Math.Max(0.0R, accumulatedSecondaryValue)
+        ElseIf Not Double.IsNaN(secondaryValue) AndAlso Not Double.IsInfinity(secondaryValue) AndAlso secondaryValue > 0.0R Then
+            _accumulatedSecondaryTotal += secondaryValue
+        End If
+        If Not Double.IsNaN(accumulatedSecondaryMaximum) AndAlso
+           Not Double.IsInfinity(accumulatedSecondaryMaximum) AndAlso
+           accumulatedSecondaryMaximum > 0.0R Then
+            _accumulatedSecondaryMaximum = accumulatedSecondaryMaximum
+        End If
+        _accumulatedSecondaryValues(_writeIndex) = _accumulatedSecondaryTotal
         _writeIndex += 1
         If _writeIndex >= _maxSamples Then _writeIndex = 0
 
@@ -888,6 +988,9 @@ Public Class Direct2DChartControl
         Array.Clear(_primaryValues, 0, _primaryValues.Length)
         Array.Clear(_secondaryValues, 0, _secondaryValues.Length)
         Array.Clear(_thirdValues, 0, _thirdValues.Length)
+        Array.Clear(_accumulatedSecondaryValues, 0, _accumulatedSecondaryValues.Length)
+        _accumulatedSecondaryTotal = 0.0R
+        _accumulatedSecondaryMaximum = Double.NaN
         _sampleCount = 0
         _writeIndex = 0
         _firstSampleIndex = 0L
@@ -898,11 +1001,13 @@ Public Class Direct2DChartControl
         Dim primary() As Double = Nothing
         Dim secondary() As Double = Nothing
         Dim third() As Double = Nothing
+        Dim accumulatedSecondary() As Double = Nothing
 
         SyncLock _dataLock
             primary = New Double(capacity - 1) {}
             secondary = New Double(capacity - 1) {}
             third = New Double(capacity - 1) {}
+            accumulatedSecondary = New Double(capacity - 1) {}
 
             If _primaryValues IsNot Nothing Then
                 Dim keepCount As Integer = Math.Min(_sampleCount, capacity)
@@ -914,6 +1019,7 @@ Public Class Direct2DChartControl
                     If TryGetValueUnsafe(0, start + i, p) Then primary(i) = p
                     If TryGetValueUnsafe(1, start + i, s) Then secondary(i) = s
                     If TryGetValueUnsafe(2, start + i, t) Then third(i) = t
+                    If TryGetValueUnsafe(AccumulatedSeriesIndex, start + i, s) Then accumulatedSecondary(i) = s
                 Next
                 _firstSampleIndex = start
                 _nextSampleIndex = start + keepCount
@@ -928,6 +1034,7 @@ Public Class Direct2DChartControl
             _primaryValues = primary
             _secondaryValues = secondary
             _thirdValues = third
+            _accumulatedSecondaryValues = accumulatedSecondary
             _writeIndex = If(_sampleCount = capacity, 0, _sampleCount)
         End SyncLock
 
@@ -1052,12 +1159,14 @@ Public Class Direct2DChartControl
         DisposeBrush(_textBrush)
         DisposeBrush(_primaryBrush)
         DisposeBrush(_secondaryBrush)
+        DisposeBrush(_accumulatedSecondaryBrush)
         DisposeBrush(_thirdBrush)
         _gridBrush = Nothing
         _axisBrush = Nothing
         _textBrush = Nothing
         _primaryBrush = Nothing
         _secondaryBrush = Nothing
+        _accumulatedSecondaryBrush = Nothing
         _thirdBrush = Nothing
     End Sub
 
