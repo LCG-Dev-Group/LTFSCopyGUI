@@ -598,10 +598,7 @@ Public Class LTFSWriter
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", logCategory)
                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
                     Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "WriterStatus")
-                        If ShowOnWarningLabel Then
-                            Log.Warning("Writer warning status update.")
-                        End If
-                        If IsWarn Then
+                        If IsWarn OrElse ShowOnWarningLabel Then
                             Log.Warning($"{s}")
                         Else
                             Log.Information(If(LogOnly, $"Bkglog:{s}", $"{s}"))
@@ -7572,7 +7569,7 @@ Public Class LTFSWriter
 
         PrintMsg($"fastreader refill paused: buffered={IOManager.FormatSize(buffered)} low_water={IOManager.FormatSize(lowWater)} resume_water={IOManager.FormatSize(GetFastReaderWatermark(capacity, FastReaderResumeWatermarkFraction))}",
                  LogOnly:=True,
-                 IsWarn:=True)
+                 IsWarn:=False)
         WaitForFastReaderFillFraction(fastProvider, FastReaderResumeWatermarkFraction, "refill")
     End Sub
 
@@ -7637,7 +7634,7 @@ Public Class LTFSWriter
         End Using
         PrintMsg($"fastreader {operation}: elapsed={elapsed.TotalSeconds:F3}s read={readMiBs:F1}MiB/s published={publishMiBs:F1}MiB/s io_wait={ioWaitMs:F1}ms hash={hashMs:F1}ms publish_wait={publishWaitMs:F1}ms buffered={IOManager.FormatSize(CLng(after.BufferedBytes))} slots={after.OccupiedSlots}",
                  LogOnly:=True,
-                 IsWarn:=True)
+                 IsWarn:=False)
     End Sub
 
     Private Function WriteFileFromFastReader(fastProvider As IFastReaderConsumer,
