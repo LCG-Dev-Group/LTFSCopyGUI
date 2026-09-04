@@ -632,7 +632,13 @@ Public Class Direct2DChartControl
         If _accumulateChart Then
             _renderTarget.PushAxisAlignedClip(clip, AntialiasMode.PerPrimitive)
             Try
-                DrawFilledSeries(AccumulatedSeriesIndex, secondaryAxis, plot, viewStart, viewEnd, _accumulatedSecondaryBrush)
+                DrawFilledSeries(AccumulatedSeriesIndex,
+                                 secondaryAxis,
+                                 plot,
+                                 viewStart,
+                                 viewEnd,
+                                 _accumulatedSecondaryBrush,
+                                 _secondaryBrush)
             Finally
                 _renderTarget.PopAxisAlignedClip()
             End Try
@@ -752,7 +758,13 @@ Public Class Direct2DChartControl
         End Using
     End Sub
 
-    Private Sub DrawFilledSeries(seriesIndex As Integer, axis As AxisInfo, plot As RectangleF, viewStart As Double, viewEnd As Double, brush As ID2D1Brush)
+    Private Sub DrawFilledSeries(seriesIndex As Integer,
+                                 axis As AxisInfo,
+                                 plot As RectangleF,
+                                 viewStart As Double,
+                                 viewEnd As Double,
+                                 fillBrush As ID2D1Brush,
+                                 outlineBrush As ID2D1Brush)
         Dim points As List(Of ChartPoint) = GetVisiblePoints(seriesIndex, viewStart, viewEnd, Math.Max(256, CInt(Math.Ceiling(plot.Width * 1.5F))))
         If points.Count = 0 Then Return
 
@@ -776,7 +788,10 @@ Public Class Direct2DChartControl
                 End If
                 sink.Close()
             End Using
-            If started Then _renderTarget.FillGeometry(geometry, brush)
+            If started Then
+                _renderTarget.FillGeometry(geometry, fillBrush)
+                _renderTarget.DrawGeometry(geometry, outlineBrush, 1.0F)
+            End If
         End Using
     End Sub
 
