@@ -599,7 +599,7 @@ Public Class LTFSWriter
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", logCategory)
                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
                     Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "WriterStatus")
-                        If IsWarn OrElse ShowOnWarningLabel Then
+                        If IsWarn Then
                             Log.Warning($"{s}")
                         Else
                             Log.Information(If(LogOnly, $"Bkglog:{s}", $"{s}"))
