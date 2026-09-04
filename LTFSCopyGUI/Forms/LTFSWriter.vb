@@ -570,7 +570,7 @@ Public Class LTFSWriter
                End Sub)
 
     End Sub
-    Public Sub PrintMsg(s As String, Optional ByVal Warning As Boolean = False,
+    Public Sub PrintMsg(s As String, Optional ByVal ShowOnWarningLabel As Boolean = False,
                         Optional ByVal TooltipText As String = "",
                         Optional ByVal LogOnly As Boolean = False,
                         Optional ByVal IsWarn As Boolean = False,
@@ -583,7 +583,7 @@ Public Class LTFSWriter
             If Not LogOnly Then
                 Dim effectiveTooltip = TooltipText
                 If effectiveTooltip IsNot Nothing AndAlso effectiveTooltip = String.Empty Then effectiveTooltip = s
-                If Not Warning Then
+                If Not ShowOnWarningLabel Then
                     Text3 = s
                     If effectiveTooltip IsNot Nothing Then TextT3 = effectiveTooltip
                 Else
@@ -598,7 +598,7 @@ Public Class LTFSWriter
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", logCategory)
                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
                     Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "WriterStatus")
-                        If Warning Then
+                        If ShowOnWarningLabel Then
                             Log.Warning("Writer warning status update.")
                         End If
                         If IsWarn Then
@@ -893,7 +893,7 @@ Public Class LTFSWriter
                 WERLPageLen += 4
                 WERLPage = TapeUtils.SCSIReadParam(handle:=handleSnapshot, cdbData:=New Byte() {&H1C, &H1, &H88, CByte((WERLPageLen >> 8) And &HFF), CByte(WERLPageLen And &HFF), &H0}, paramLen:=WERLPageLen)
             Catch ex As Exception
-                PrintMsg(ex.ToString(), Warning:=True, LogOnly:=True)
+                PrintMsg(ex.ToString(), IsWarn:=True, LogOnly:=True)
             Finally
                 Threading.Monitor.Exit(TapeUtils.GetSCSIOperationLock(handleSnapshot))
             End Try
@@ -1023,7 +1023,7 @@ Public Class LTFSWriter
                                      Try
                                          CheckClean()
                                      Catch ex As Exception
-                                         PrintMsg($"Automatic tape reload failed: {ex}", Warning:=True, LogOnly:=True)
+                                         PrintMsg($"Automatic tape reload failed: {ex}", IsWarn:=True, LogOnly:=True)
                                          SetStatusLight(LWStatus.Err)
                                      Finally
                                          Try
@@ -1035,7 +1035,7 @@ Public Class LTFSWriter
                                  End Sub)
                     End If
                 Catch ex As Exception
-                    PrintMsg(ex.ToString(), Warning:=True, LogOnly:=True)
+                    PrintMsg(ex.ToString(), IsWarn:=True, LogOnly:=True)
                 End Try
                 Threading.Monitor.Exit(OperationLock)
             End If
@@ -1108,7 +1108,7 @@ Public Class LTFSWriter
                 GCCollectCounter = 0
             End If
         Catch ex As Exception
-            PrintMsg(ex.ToString)
+            PrintMsg(ex.ToString, IsWarn:=True)
             SetStatusLight(LWStatus.Err)
         End Try
         If TickCount < Long.MaxValue Then
@@ -1900,7 +1900,7 @@ Public Class LTFSWriter
             _deviceLease = TapeUtils.SCSILockManager.AcquireWriterLease(TapeDrive, _logSessionId, 10000)
         End SyncLock
         If _deviceLease Is Nothing Then
-            PrintMsg("Device is busy in another process.", Warning:=True, LogOnly:=False, IsWarn:=True)
+            PrintMsg("Device is busy in another process.", LogOnly:=False, IsWarn:=True)
             SetStatusLight(LWStatus.Err)
             LoadComplete = True
             BeginInvoke(Sub()
@@ -1928,7 +1928,8 @@ Public Class LTFSWriter
             End If
 
         Catch ex As Exception
-            PrintMsg(My.Resources.ResText_ErrP)
+            PrintMsg(My.Resources.ResText_ErrP, IsWarn:=True)
+            PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
             SetStatusLight(LWStatus.Err)
             Dim leaseToDispose As SCSIDeviceLockManager.WriterLease = DetachDeviceLease()
             If leaseToDispose IsNot Nothing Then leaseToDispose.Dispose()
@@ -2071,7 +2072,7 @@ Public Class LTFSWriter
                         CurrDrive = TapeUtils.Inquiry(handleSnapshot)
                     End If
                 Catch ex As Exception
-                    PrintMsg(ex.ToString(), Warning:=True, LogOnly:=True)
+                    PrintMsg(ex.ToString(), IsWarn:=True, LogOnly:=True)
                 Finally
                     Threading.Monitor.Exit(deviceLock)
                 End Try
@@ -2098,7 +2099,8 @@ Public Class LTFSWriter
             If Modified Then info &= "*"
             info &= $" - {ApplicationWheels.ApplicationInfo} ({TapeUtils.DriverTypeSetting})"
         Catch ex As Exception
-            PrintMsg(My.Resources.ResText_RPosErr)
+            PrintMsg(My.Resources.ResText_RPosErr, IsWarn:=True)
+            PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
             SetStatusLight(LWStatus.Err)
         End Try
         Return info
@@ -2962,7 +2964,7 @@ Public Class LTFSWriter
                     ToolStripStatusLabel4.Text = $"{My.Resources.ResText_DNW} {IOManager.FormatSize(CLng(UnwrittenSize))}"
                     ToolStripStatusLabel4.ToolTipText = ToolStripStatusLabel4.Text
                 Catch ex As Exception
-                    PrintMsg(My.Resources.ResText_RDErr)
+                    PrintMsg(My.Resources.ResText_RDErr, IsWarn:=True)
                     SetStatusLight(LWStatus.Err)
                 End Try
 
@@ -3044,7 +3046,8 @@ Public Class LTFSWriter
                 LastRefresh = Now - New TimeSpan(0, 0, CapacityRefreshInterval)
             End If
         Catch ex As Exception
-            PrintMsg(My.Resources.ResText_CRefErr)
+            PrintMsg(My.Resources.ResText_CRefErr, IsWarn:=True)
+            PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
             SetStatusLight(LWStatus.Err)
         End Try
 
@@ -3117,13 +3120,13 @@ Public Class LTFSWriter
         If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return False
         Try
             If Not TapeUtils.DoReload(handleSnapshot, lockVolume, EncryptionKey) Then
-                PrintMsg("Tape reload returned failure.", Warning:=True, LogOnly:=True)
+                PrintMsg("Tape reload returned failure.", IsWarn:=True, LogOnly:=True)
                 SetStatusLight(LWStatus.Err)
                 Return False
             End If
             Return True
         Catch ex As Exception
-            PrintMsg($"Tape reload failed: {ex}", Warning:=True, LogOnly:=True)
+            PrintMsg($"Tape reload failed: {ex}", IsWarn:=True, LogOnly:=True)
             SetStatusLight(LWStatus.Err)
             Return False
         End Try
@@ -3864,7 +3867,8 @@ Public Class LTFSWriter
 
             Catch ex As Exception
                 _lastListRefreshTag = Nothing
-                PrintMsg(My.Resources.ResText_NavErr)
+                PrintMsg(My.Resources.ResText_NavErr, IsWarn:=True)
+                PrintMsg(ex.ToString, LogOnly:=True, IsWarn:=True)
                 SetStatusLight(LWStatus.Err)
             End Try
             ListView1.EndUpdate()
@@ -4048,7 +4052,7 @@ Public Class LTFSWriter
                 Dim Loc As String = GetLocInfo()
                 Invoke(Sub() Text = Loc)
             Catch ex As Exception
-                PrintMsg($"Error: CheckUnindexedDataSizeLimit {ex.ToString()}", Warning:=True, LogOnly:=True)
+                PrintMsg($"Error: CheckUnindexedDataSizeLimit {ex.ToString()}", IsWarn:=True, LogOnly:=True)
             End Try
             Return True
         End If
@@ -4081,7 +4085,7 @@ Public Class LTFSWriter
                     Exit While
                 End If
             ElseIf (sense(2) And &HF) <> 0 Then
-                PrintMsg($"sense err {TapeUtils.Byte2Hex(sense, True)}", Warning:=True, LogOnly:=True)
+                PrintMsg($"sense err {TapeUtils.Byte2Hex(sense, True)}", IsWarn:=True, LogOnly:=True)
                 Try
                     Throw New Exception("SCSI sense error")
                 Catch ex As Exception
@@ -4159,8 +4163,9 @@ Public Class LTFSWriter
             PrintMsg($"Position = {CurrentPos.ToString()}", LogOnly:=True)
             Modified = ExtraPartitionCount > 0
             SetStatusLight(LWStatus.Succ)
-        Catch
+        Catch ex As exception
             SetStatusLight(LWStatus.Err)
+            PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
             schema.generationnumber = originalGeneration
             schema.updatetime = originalUpdateTime
             schema.location = New ltfsindex.LocationDef With {.partition = originalLocationPartition, .startblock = originalLocationStartBlock}
@@ -4217,8 +4222,9 @@ Public Class LTFSWriter
             TapeUtils.WriteVCI(driveHandle, schema.generationnumber, block0, block1, schema.volumeuuid.ToString(), ExtraPartitionCount)
             Modified = False
             SetStatusLight(LWStatus.Succ)
-        Catch
+        Catch ex As Exception
             SetStatusLight(LWStatus.Err)
+            PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
             schema.location = New ltfsindex.LocationDef With {.partition = originalLocationPartition, .startblock = originalLocationStartBlock}
             schema.previousgenerationlocation = New ltfsindex.LocationDef With {.partition = originalPreviousPartition, .startblock = originalPreviousStartBlock}
             Throw
@@ -4359,7 +4365,7 @@ Public Class LTFSWriter
                     TapeUtils.Flush(driveHandle)
                 End If
             Catch ex As Exception
-                PrintMsg($"{ex.ToString()}{vbCrLf}{ex.StackTrace}")
+                PrintMsg($"{ex.ToString()}{vbCrLf}{ex.StackTrace}", IsWarn:=True)
                 SetStatusLight(LWStatus.Err)
             End Try
             SilentMode = SilentBefore
@@ -4859,7 +4865,7 @@ Public Class LTFSWriter
 
             succeeded = Not StopFlag
         Catch ex As Exception
-            PrintMsg($"Add failed: {ex.Message}")
+            PrintMsg($"Add failed: {ex.Message}", IsWarn:=True)
             SetStatusLight(LWStatus.Err)
             Try
                 Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex}{vbCrLf}{ex.StackTrace}"))
@@ -4899,7 +4905,7 @@ Public Class LTFSWriter
                     Dim files = GlobCollector.EnumerateAdd_ByFullPathInputs(Paths, matcher)
                     AddFilePlanOnWorker(d, files, overwrite, pathCount)
                 Catch ex As Exception
-                    PrintMsg($"Add failed: {ex.Message}")
+                    PrintMsg($"Add failed: {ex.Message}", IsWarn:=True)
                     SetStatusLight(LWStatus.Err)
                     Try
                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex}{vbCrLf}{ex.StackTrace}"))
@@ -4972,6 +4978,7 @@ Public Class LTFSWriter
                                     AddDirectry(f, d, overwrite, exceptExtension)
                                 End If
                             Catch ex As Exception
+                                PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
                                 Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString()}{vbCrLf}{ex.StackTrace}"))
                                 SetStatusLight(LWStatus.Err)
                             End Try
@@ -5579,7 +5586,7 @@ Public Class LTFSWriter
                 tempStream.SetLength(request.FileIndex.length)
             End If
             If Not markedSparse Then
-                PrintMsg($"{request.FileIndex.name}: sparse files are not supported; using a regular temporary file", Warning:=True, LogOnly:=True)
+                PrintMsg($"{request.FileIndex.name}: sparse files are not supported; using a regular temporary file", IsWarn:=True, LogOnly:=True)
             End If
         End Using
 
@@ -5628,11 +5635,11 @@ Public Class LTFSWriter
                 Dim senseKey As Integer = senseValue And &HF
                 If ((senseValue >> 6) And 1) = 1 Then
                     If senseKey <> 13 Then
-                        PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                        PrintMsg(My.Resources.ResText_EWEOM, ShowOnWarningLabel:=True, DeDupe:=True)
                         Throw New IO.EndOfStreamException("The tape reported end of media while reading an extent")
                     End If
                 ElseIf senseKey <> 0 Then
-                    PrintMsg($"sense err {TapeUtils.Byte2Hex(sense, True)}", Warning:=True, LogOnly:=True)
+                    PrintMsg($"sense err {TapeUtils.Byte2Hex(sense, True)}", IsWarn:=True, LogOnly:=True)
                     Dim autoIgnore As Boolean = False
                     If My.Settings.LTFSWriter_IgnoreILI AndAlso sense.Length > 17 Then
                         Dim driveCode As UShort = CUShort(CUShort(sense(16)) << 8 Or sense(17))
@@ -5775,7 +5782,7 @@ Public Class LTFSWriter
             End If
             info.IsReadOnly = fileIndex.readonly
         Catch ex As Exception
-            PrintMsg($"{fileIndex.name}: cannot apply file attributes: {ex.Message}", Warning:=True, LogOnly:=True)
+            PrintMsg($"{fileIndex.name}: cannot apply file attributes: {ex.Message}", IsWarn:=True, LogOnly:=True)
         End Try
     End Sub
 
@@ -5845,7 +5852,7 @@ Public Class LTFSWriter
             End If
         Catch ex As Exception
             PrintMsg($"{directoryRequest.Directory.name}: cannot apply directory attributes: {ex.Message}",
-                     Warning:=True,
+                     IsWarn:=True,
                      LogOnly:=True)
         End Try
     End Sub
@@ -6071,12 +6078,12 @@ Public Class LTFSWriter
                                         If (sense(2) And &HF) = 13 Then
                                             readsucc = True
                                         Else
-                                            PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                                            PrintMsg(My.Resources.ResText_EWEOM, ShowOnWarningLabel:=True, DeDupe:=True)
                                             readsucc = True
                                             Exit While
                                         End If
                                     ElseIf (sense(2) And &HF) <> 0 Then
-                                        PrintMsg($"sense err {TapeUtils.Byte2Hex(sense, True)}", Warning:=True, LogOnly:=True)
+                                        PrintMsg($"sense err {TapeUtils.Byte2Hex(sense, True)}", IsWarn:=True, LogOnly:=True)
                                         Dim AutoIgnore As Boolean = False
                                         If My.Settings.LTFSWriter_IgnoreILI Then
                                             Dim DriveCode As UShort = CUShort(sense(16)) << 8 Or sense(17)
@@ -6691,7 +6698,7 @@ Public Class LTFSWriter
                     Try
                         UpdataAllIndex()
                     Catch ex As Exception
-                        PrintMsg(My.Resources.ResText_IUErr, False, $"{My.Resources.ResText_IUErr}: {ex.ToString}")
+                        PrintMsg(My.Resources.ResText_IUErr, False, $"{My.Resources.ResText_IUErr}: {ex.ToString}", IsWarn:=True)
                         SetStatusLight(LWStatus.Err)
                         LockGUI(False)
                     End Try
@@ -7836,12 +7843,12 @@ Public Class LTFSWriter
                     End Try
                     If (((sense(2) >> 6) And &H1) = 1) Then
                         If ((sense(2) And &HF) = 13) AndAlso (Not My.Settings.LTFSWriter_IgnoreVolumeOverflow) Then
-                            PrintMsg(My.Resources.ResText_VOF)
+                            PrintMsg(My.Resources.ResText_VOF, IsWarn:=True)
                             Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_VOF))
                             StopFlag = True
                             Exit While
                         Else
-                            PrintMsg(If(((sense(2) And &HF) = 13), My.Resources.ResText_VOF, My.Resources.ResText_EWEOM), True, DeDupe:=True)
+                            PrintMsg(If(((sense(2) And &HF) = 13), My.Resources.ResText_VOF, My.Resources.ResText_EWEOM), ShowOnWarningLabel:=True, DeDupe:=True)
                             succ = True
                             Exit While
                         End If
@@ -8474,17 +8481,17 @@ Public Class LTFSWriter
                                                 End Try
                                                 If ((sense(2) >> 6) And &H1) = 1 Then
                                                     If ((sense(2) And &HF) = 13) AndAlso (Not My.Settings.LTFSWriter_IgnoreVolumeOverflow) Then
-                                                        PrintMsg(My.Resources.ResText_VOF)
+                                                        PrintMsg(My.Resources.ResText_VOF, IsWarn:=True)
                                                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_VOF))
                                                         StopFlag = True
                                                         Exit For
                                                     Else
-                                                        PrintMsg(If(((sense(2) And &HF) = 13), My.Resources.ResText_VOF, My.Resources.ResText_EWEOM), True, DeDupe:=True)
+                                                        PrintMsg(If(((sense(2) And &HF) = 13), My.Resources.ResText_VOF, My.Resources.ResText_EWEOM), ShowOnWarningLabel:=True, DeDupe:=True)
                                                         succ = True
                                                         Exit While
                                                     End If
                                                 ElseIf (sense(2) And &HF) <> 0 Then
-                                                    PrintMsg($"sense err {TapeUtils.Byte2Hex(sense, True)}", Warning:=True, LogOnly:=True)
+                                                    PrintMsg($"sense err {TapeUtils.Byte2Hex(sense, True)}", IsWarn:=True, LogOnly:=True)
                                                     Try
                                                         Throw New Exception("SCSI sense error")
                                                     Catch ex As Exception
@@ -8725,7 +8732,7 @@ Public Class LTFSWriter
                                                                  End Try
                                                                  If (((sense(2) >> 6) And &H1) = 1) Then
                                                                      If ((sense(2) And &HF) = 13) AndAlso (Not My.Settings.LTFSWriter_IgnoreVolumeOverflow) Then
-                                                                         PrintMsg(My.Resources.ResText_VOF)
+                                                                         PrintMsg(My.Resources.ResText_VOF, IsWarn:=True)
                                                                          Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_VOF))
                                                                          StopFlag = True
                                                                          Try
@@ -8737,7 +8744,7 @@ Public Class LTFSWriter
                                                                          End Try
                                                                          Exit Sub
                                                                      Else
-                                                                         PrintMsg(If(((sense(2) And &HF) = 13), My.Resources.ResText_VOF, My.Resources.ResText_EWEOM), True, DeDupe:=True)
+                                                                         PrintMsg(If(((sense(2) And &HF) = 13), My.Resources.ResText_VOF, My.Resources.ResText_EWEOM), ShowOnWarningLabel:=True, DeDupe:=True)
                                                                          succ = True
                                                                          Exit While
                                                                      End If
@@ -8920,7 +8927,7 @@ Public Class LTFSWriter
                                             lastpos = New TapeUtils.PositionData(driveHandle)
                                             CurrentHeight = CLng(p.BlockNumber)
                                         End If
-                                        If p.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                                        If p.EOP Then PrintMsg(My.Resources.ResText_EWEOM, ShowOnWarningLabel:=True, DeDupe:=True)
                                         PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
                                     End If
                                 Else
@@ -9015,7 +9022,7 @@ Public Class LTFSWriter
                                 Exit For
                             Catch ex As Exception
                                 Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{ex.ToString}"))
-                                PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}")
+                                PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}", IsWarn:=True)
                                 SetStatusLight(LWStatus.Err)
                                 StopFlag = True
                                 Exit For
@@ -9109,7 +9116,7 @@ Public Class LTFSWriter
                         End Using
                     End Using
                     Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{ex.ToString}"))
-                    PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}")
+                    PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}", IsWarn:=True)
                     SetStatusLight(LWStatus.Err)
                 Finally
                     If locateTask IsNot Nothing Then
@@ -9311,7 +9318,8 @@ Public Class LTFSWriter
                     RefreshDisplay()
                     RefreshCapacity()
                 Catch ex As Exception
-                    PrintMsg(My.Resources.ResText_RFailed)
+                    PrintMsg(My.Resources.ResText_RFailed, IsWarn:=True)
+                    PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
                     SetStatusLight(LWStatus.Err)
                 End Try
                 Modified = False
@@ -9379,7 +9387,8 @@ Public Class LTFSWriter
                     RefreshDisplay()
                     RefreshCapacity()
                 Catch ex As Exception
-                    PrintMsg(My.Resources.ResText_RFailed)
+                    PrintMsg(My.Resources.ResText_RFailed, IsWarn:=True)
+                    PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
                     SetStatusLight(LWStatus.Err)
                 End Try
                 Try
@@ -9569,8 +9578,8 @@ Public Class LTFSWriter
 
                             IO.File.Delete(oldSchema)
                         Next
-                    Catch
-                        PrintMsg("ZSTD compress error", LogOnly:=True)
+                    Catch ex As Exception
+                        PrintMsg($"ZSTD compress error: {ex.ToString()}", LogOnly:=True, IsWarn:=True)
                     End Try
                     While True
                         Threading.Thread.Sleep(0)
@@ -9587,6 +9596,7 @@ Public Class LTFSWriter
                     Try
                         Dim Loc As String = GetLocInfo()
                         Invoke(Sub() Text = Loc)
+                        PrintMsg(Loc, IsWarn:=True)
                     Catch ex As Exception
                     End Try
                     Me.Invoke(Sub()
@@ -9602,7 +9612,7 @@ Public Class LTFSWriter
                     Invoke(Sub() RaiseEvent LTFSLoaded())
                 Catch ex As Exception
                     PrintMsg(My.Resources.ResText_IRFailed)
-                    PrintMsg($"{ex.ToString}", LogOnly:=True)
+                    PrintMsg($"{ex.ToString}", LogOnly:=True, IsWarn:=True)
                     SetStatusLight(LWStatus.Err)
                 Finally
                     ' A failed LTFS probe is not an eject.  LockGUI(False)
@@ -9712,7 +9722,8 @@ Public Class LTFSWriter
                     PrintMsg(My.Resources.ResText_IRSucc)
                     SetStatusLight(LWStatus.Succ)
                 Catch ex As Exception
-                    PrintMsg(My.Resources.ResText_IRFailed)
+                    PrintMsg(My.Resources.ResText_IRFailed, IsWarn:=True)
+                    PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
                     SetStatusLight(LWStatus.Err)
                 End Try
                 LockGUI(False)
@@ -9733,7 +9744,7 @@ Public Class LTFSWriter
                     SetStatusLight(LWStatus.Succ)
                 End If
             Catch ex As Exception
-                PrintMsg(My.Resources.ResText_DPIWFailed, False, $"{My.Resources.ResText_DPIWFailed}: {ex.ToString}")
+                PrintMsg(My.Resources.ResText_DPIWFailed, False, $"{My.Resources.ResText_DPIWFailed}: {ex.ToString}", IsWarn:=True)
                 Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString()}{vbCrLf}{ex.StackTrace}"))
                 SetStatusLight(LWStatus.Err)
             End Try
@@ -9827,7 +9838,7 @@ Public Class LTFSWriter
         PrintMsg(My.Resources.ResText_Exporting)
         If Not schema.SaveFile(schemaTxtPath) Then
             SetStatusLight(LWStatus.Err)
-            PrintMsg("索引自动备份失败：无法保存索引文件。", Warning:=True, IsWarn:=True)
+            PrintMsg("索引自动备份失败：无法保存索引文件。", IsWarn:=True)
             Return Nothing
         End If
 
@@ -9840,7 +9851,7 @@ Public Class LTFSWriter
         Catch ex As Exception
             dumpFailed = True
             SetStatusLight(LWStatus.Err)
-            PrintMsg($"保存容量报告失败：{ex.Message}", Warning:=True, IsWarn:=True)
+            PrintMsg($"保存容量报告失败：{ex.Message}", IsWarn:=True)
         End Try
 
         Try
@@ -9878,11 +9889,11 @@ Public Class LTFSWriter
         Catch ex As Exception
             dumpFailed = True
             SetStatusLight(LWStatus.Err)
-            PrintMsg(My.Resources.ResText_Error, True, "ZSTD compress error")
+            PrintMsg(My.Resources.ResText_Error, True, $"ZSTD compress error: {ex.ToString()}", IsWarn:=True)
         End Try
 
         If dumpFailed Then
-            PrintMsg($"索引备份已生成，但部分附加数据失败：{schemaTxtPath}", Warning:=True, IsWarn:=True)
+            PrintMsg($"索引备份已生成，但部分附加数据失败：{schemaTxtPath}", IsWarn:=True)
             SetStatusLight(LWStatus.Err)
         Else
             PrintMsg(My.Resources.ResText_IndexBaked, False, $"{My.Resources.ResText_IndexBak2}{vbCrLf}{schemaTxtPath}")
@@ -9903,7 +9914,8 @@ Public Class LTFSWriter
                         Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_IndexBak2}{vbCrLf}{outputfile}"))
                     End If
                 Catch ex As Exception
-                    PrintMsg(My.Resources.ResText_IndexBakF)
+                    PrintMsg(My.Resources.ResText_IndexBakF, IsWarn:=True)
+                    PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
                     SetStatusLight(LWStatus.Err)
                 End Try
                 LockGUI(False)
@@ -9993,7 +10005,7 @@ Public Class LTFSWriter
                                         End Sub,
                                         Sub(Message As String)
                                             'OnError
-                                            PrintMsg(Message)
+                                            PrintMsg(Message, IsWarn:=True)
                                             SetStatusLight(LWStatus.Err)
                                             LockGUI(False)
                                             Me.Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_FmtFail}{vbCrLf}{Message}"))
@@ -10162,7 +10174,7 @@ Public Class LTFSWriter
                     End If
                 Catch ex As Exception
                     SetStatusLight(LWStatus.Err)
-                    PrintMsg(ex.ToString)
+                    PrintMsg(ex.ToString, IsWarn:=True)
                 End Try
             Next
             For Each sd As ltfsindex.directory In d.LTFSIndexDir.EnumerateLazyDirectories()
@@ -10196,7 +10208,7 @@ Public Class LTFSWriter
                 RefreshDisplay()
                 PrintMsg($"{My.Resources.ResText_Imported} {result}")
             Catch ex As Exception
-                PrintMsg(ex.ToString)
+                PrintMsg(ex.ToString, IsWarn:=True)
                 SetStatusLight(LWStatus.Err)
             End Try
             SetStatusLight(LWStatus.Succ)
@@ -10284,7 +10296,7 @@ Public Class LTFSWriter
                 If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return False
                 PrintMsg("Flush Triggered", LogOnly:=True)
                 Dim Loc As TapeUtils.PositionData = GetPos
-                If Loc.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                If Loc.EOP Then PrintMsg(My.Resources.ResText_EWEOM, ShowOnWarningLabel:=True, DeDupe:=True)
                 PrintMsg($"Position = {Loc.ToString()}", LogOnly:=True)
                 Dim ChanLRValue As Double = ReadChanLRInfo(10000)
                 PrintMsg($"ErrRateLogValue: {ChanLRValue}", LogOnly:=True)
@@ -10324,7 +10336,7 @@ Public Class LTFSWriter
                     Clean_last = Now
                     Dim Loc As TapeUtils.PositionData = GetPos
                     If TapeEjectedReadOnly OrElse driveHandle <> handleSnapshot Then Return
-                    If Loc.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                    If Loc.EOP Then PrintMsg(My.Resources.ResText_EWEOM, ShowOnWarningLabel:=True, DeDupe:=True)
                     PrintMsg($"Position = {Loc.ToString()}", LogOnly:=True)
                     If Not Loc.EOP Then
                         If Not TryReloadTapeLocked(handleSnapshot, LockVolume) Then Return
@@ -10333,7 +10345,7 @@ Public Class LTFSWriter
                     RefreshCapacity()
                 End SyncLock
             Catch ex As Exception
-                PrintMsg($"Automatic tape reload failed: {ex}", Warning:=True, LogOnly:=True)
+                PrintMsg($"Automatic tape reload failed: {ex}", IsWarn:=True, LogOnly:=True)
                 SetStatusLight(LWStatus.Err)
             End Try
         End If
@@ -10377,7 +10389,7 @@ Public Class LTFSWriter
                                  End If
                              End SyncLock
                          Catch ex As Exception
-                             PrintMsg($"Manual tape reload failed: {ex}", Warning:=True, LogOnly:=True)
+                             PrintMsg($"Manual tape reload failed: {ex}", IsWarn:=True, LogOnly:=True)
                              SetStatusLight(LWStatus.Err)
                          Finally
                              Try
@@ -10878,7 +10890,7 @@ Public Class LTFSWriter
                 Throw New IO.EndOfStreamException($"Empty tape block while validating P{partition} B{block}")
             End If
 
-            PrintMsg($"sense err {TapeUtils.Byte2Hex(sense, True)}", Warning:=True, LogOnly:=True)
+            PrintMsg($"sense err {TapeUtils.Byte2Hex(sense, True)}", IsWarn:=True, LogOnly:=True)
             Dim decision As DialogResult = DialogResult.Abort
             Invoke(Sub() decision = MessageBox.Show(New Form With {.TopMost = True},
                                                      $"{My.Resources.ResText_RErrSCSI}{vbCrLf}{TapeUtils.ParseSenseData(sense)}{vbCrLf}{vbCrLf}sense{vbCrLf}{TapeUtils.Byte2Hex(sense, True)}",
@@ -11672,7 +11684,8 @@ Public Class LTFSWriter
                 Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, ex.ToString))
             Catch
             End Try
-            PrintMsg(My.Resources.ResText_HErr)
+            PrintMsg(My.Resources.ResText_HErr, IsWarn:=True)
+            PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
         Finally
             If progressContext Is Nothing Then
                 UnwrittenSizeOverrideValue = 0
@@ -11791,7 +11804,8 @@ Public Class LTFSWriter
                                    RaiseEvent TapeEjected()
                                End Sub)
                     Catch ex As Exception
-                        PrintMsg(My.Resources.ResText_IUErr, TooltipText:=$"{My.Resources.ResText_IUErr}{vbCrLf}{ex.ToString()}")
+                        PrintMsg(My.Resources.ResText_IUErr, TooltipText:=$"{My.Resources.ResText_IUErr}{vbCrLf}{ex.ToString()}", IsWarn:=True)
+                        PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
                         SetStatusLight(LWStatus.Err)
                         LockGUI(False)
                     End Try
@@ -12410,7 +12424,7 @@ Public Class LTFSWriter
                 VolumeInfo.FreeSize = CULng(TapeUtils.MAMAttribute.FromTapeDrive(LW.TapeDrive, 0, 0, LW.ExtraPartitionCount).AsNumeric << 20)
                 'VolumeInfo.SetVolumeLabel(VolumeLabel)
             Catch ex As Exception
-                LW.PrintMsg(ex.ToString(), LogOnly:=True)
+                LW.PrintMsg(ex.ToString(), LogOnly:=True, IsWarn:=True)
                 If fbytes = 0 Then
                     Dim q As New Stack(Of ltfsindex.directory)
                     q.Push(LW.schema._directory(0))
@@ -12966,14 +12980,14 @@ Public Class LTFSWriter
                                          End Try
                                          If (((sense(2) >> 6) And &H1) = 1) Then
                                              If ((sense(2) And &HF) = 13) Then
-                                                 PrintMsg(My.Resources.ResText_VOF)
+                                                 PrintMsg(My.Resources.ResText_VOF, IsWarn:=True)
                                                  Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_VOF))
                                                  StopFlag = True
                                                  ms.Close()
                                                  SetStatusLight(LWStatus.Err)
                                                  Exit Sub
                                              Else
-                                                 PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                                                 PrintMsg(My.Resources.ResText_EWEOM, ShowOnWarningLabel:=True, DeDupe:=True)
                                                  succ = True
                                                  Exit While
                                              End If
@@ -13028,7 +13042,7 @@ Public Class LTFSWriter
                              CurrentFilesProcessed += 1
                              If TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
                              pos = GetPos
-                             If pos.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                             If pos.EOP Then PrintMsg(My.Resources.ResText_EWEOM, ShowOnWarningLabel:=True, DeDupe:=True)
                              PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
                              CurrentHeight = CLng(pos.BlockNumber)
                              Invoke(Sub() 更新数据区索引ToolStripMenuItem.Enabled = True)
@@ -13182,7 +13196,7 @@ Public Class LTFSWriter
                             Next
                         Catch ex As Exception
                             SetStatusLight(LWStatus.Err)
-                            PrintMsg(My.Resources.ResText_RestoreErr)
+                            PrintMsg(My.Resources.ResText_RestoreErr, IsWarn:=True)
                         End Try
                         TapeUtils.AllowMediumRemoval(driveHandle)
                         TapeUtils.ReleaseUnit(driveHandle)
@@ -13873,7 +13887,8 @@ Public Class LTFSWriter
                     SetStatusLight(LWStatus.Idle)
                 Catch ex As Exception
                     SetStatusLight(LWStatus.Err)
-                    PrintMsg(My.Resources.ResText_IRFailed)
+                    PrintMsg(My.Resources.ResText_IRFailed, IsWarn:=True)
+                    PrintMsg(ex.ToString, LogOnly:=True, IsWarn:=True)
                 End Try
                 LockGUI(False)
             End Sub)
@@ -14064,13 +14079,13 @@ Public Class LTFSWriter
                                             End Try
                                             If (((sense(2) >> 6) And &H1) = 1) Then
                                                 If ((sense(2) And &HF) = 13) Then
-                                                    PrintMsg(My.Resources.ResText_VOF)
+                                                    PrintMsg(My.Resources.ResText_VOF, IsWarn:=True)
                                                     Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_VOF))
                                                     StopFlag = True
                                                     fr.Close()
                                                     Exit Sub
                                                 Else
-                                                    PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                                                    PrintMsg(My.Resources.ResText_EWEOM, ShowOnWarningLabel:=True, DeDupe:=True)
                                                     succ = True
                                                     Exit While
                                                 End If
@@ -14143,7 +14158,7 @@ Public Class LTFSWriter
                             TotalFilesProcessed += 1
                             CurrentFilesProcessed += 1
                             p = GetPos
-                            If p.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                            If p.EOP Then PrintMsg(My.Resources.ResText_EWEOM, ShowOnWarningLabel:=True, DeDupe:=True)
                             PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
                             CurrentHeight = CLng(p.BlockNumber)
                             'mark as written
@@ -14164,7 +14179,7 @@ Public Class LTFSWriter
                             End If
                         Catch ex As Exception
                             Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{ex.ToString}"))
-                            PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}")
+                            PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}", IsWarn:=True)
                             SetStatusLight(LWStatus.Err)
                             StopFlag = True
                         End Try
@@ -14213,7 +14228,7 @@ Public Class LTFSWriter
                     End If
                 Catch ex As Exception
                     Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{ex.ToString}"))
-                    PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}")
+                    PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}", IsWarn:=True)
                     SetStatusLight(LWStatus.Err)
                     StopFlag = True
                 Finally
@@ -14854,7 +14869,7 @@ Public Class LTFSWriter
                     RefreshDisplay()
                     FinishDirectorySortProgress(True)
                 Catch ex As Exception
-                    PrintMsg($"Directory sort failed: {ex}", Warning:=True, IsWarn:=True)
+                    PrintMsg($"Directory sort failed: {ex}", IsWarn:=True)
                     FinishDirectorySortProgress(False)
                 Finally
                     GC.KeepAlive(nativeProgressCallback)
@@ -16379,19 +16394,19 @@ Public Class LTFSWriter
                                                   End Try
                                                   If (((sense(2) >> 6) And &H1) = 1) Then
                                                       If ((sense(2) And &HF) = 13) AndAlso (Not My.Settings.LTFSWriter_IgnoreVolumeOverflow) Then
-                                                          PrintMsg(My.Resources.ResText_VOF)
+                                                          PrintMsg(My.Resources.ResText_VOF, IsWarn:=True)
                                                           Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, My.Resources.ResText_VOF))
                                                           StopFlag = True
                                                           Try
                                                               PipeBufferLength = 0
                                                               provider.Cancel()
                                                               provider.CompleteAsync().GetAwaiter().GetResult()
-                                                          Catch
-                                                              PrintMsg("pipe complete failed", LogOnly:=True)
+                                                          Catch ex As Exception
+                                                              PrintMsg($"pipe complete failed: {ex.ToString()}", LogOnly:=True, IsWarn:=True)
                                                           End Try
                                                           Exit Sub
                                                       Else
-                                                          PrintMsg(If(((sense(2) And &HF) = 13), My.Resources.ResText_VOF, My.Resources.ResText_EWEOM), True, DeDupe:=True)
+                                                          PrintMsg(If(((sense(2) And &HF) = 13), My.Resources.ResText_VOF, My.Resources.ResText_EWEOM), ShowOnWarningLabel:=True, DeDupe:=True)
                                                           succ = True
                                                           Exit While
                                                       End If
@@ -16563,7 +16578,7 @@ Public Class LTFSWriter
                              p = New TapeUtils.PositionData(driveHandle)
                              lastpos = New TapeUtils.PositionData(driveHandle)
                              CurrentHeight = CLng(p.BlockNumber)
-                             If p.EOP Then PrintMsg(My.Resources.ResText_EWEOM, True, DeDupe:=True)
+                             If p.EOP Then PrintMsg(My.Resources.ResText_EWEOM, ShowOnWarningLabel:=True, DeDupe:=True)
                              PrintMsg($"Position = {p.ToString()}", LogOnly:=True)
 
 
@@ -16604,7 +16619,7 @@ Public Class LTFSWriter
                              End If
                          Catch ex As Exception
                              Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{ex.ToString}"))
-                             PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}")
+                             PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}", IsWarn:=True)
                              SetStatusLight(LWStatus.Err)
                              StopFlag = True
                          End Try
@@ -16649,7 +16664,7 @@ Public Class LTFSWriter
                                 End Sub)
                      Catch ex As Exception
                          Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_WErr}{vbCrLf}{ex.ToString}"))
-                         PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}")
+                         PrintMsg($"{My.Resources.ResText_WErr}{ex.Message}{vbCrLf}{ex.StackTrace}", IsWarn:=True)
                          SetStatusLight(LWStatus.Err)
                          StopFlag = True
                      Finally
