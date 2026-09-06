@@ -15904,6 +15904,8 @@ Public Class LTFSWriter
                                             SpeedLimit = Math.Min(160, SpeedLimit + 2)
                                         ElseIf ErrLogRateHistory < -3.8 Then
                                             SpeedLimit = Math.Min(160, SpeedLimit + 1)
+                                        ElseIf ErrLogRateHistory > -0.1 Then
+                                            Exit Sub
                                         ElseIf ErrLogRateHistory >= -3.1 Then
                                             SpeedLimit -= 50
                                         ElseIf ErrLogRateHistory >= -3.2 Then
