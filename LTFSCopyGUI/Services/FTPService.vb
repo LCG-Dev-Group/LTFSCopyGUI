@@ -16,6 +16,8 @@ Public Class FTPService
     Private _server As Zhaobang.FtpServer.FtpServer
     Private _serverTask As Task
     Private _stopTokenSource As CancellationTokenSource
+    Private _readCache As IOManager.LTFSReadBlockCache
+    Private _tapeStreamSession As IOManager.TapeStreamReadSession
 
     Public TapeDrive As String
     Public BlockSize As Integer = 524288
@@ -67,21 +69,33 @@ Public Class FTPService
         Private ReadOnly _blockSize As Integer
         Private ReadOnly _extraPartitionCount As Integer
         Private ReadOnly _logHandler As Action(Of String)
+        Private ReadOnly _readCache As IOManager.LTFSReadBlockCache
+        Private ReadOnly _tapeStreamSession As IOManager.TapeStreamReadSession
 
         Public Sub New(root As ltfsindex.directory,
                        tapeDrive As String,
                        blockSize As Integer,
                        extraPartitionCount As Integer,
+                       readCache As IOManager.LTFSReadBlockCache,
+                       tapeStreamSession As IOManager.TapeStreamReadSession,
                        logHandler As Action(Of String))
             _root = root
             _tapeDrive = tapeDrive
             _blockSize = blockSize
             _extraPartitionCount = extraPartitionCount
+            _readCache = readCache
+            _tapeStreamSession = tapeStreamSession
             _logHandler = logHandler
         End Sub
 
         Public Function GetProvider(user As String) As IFileProvider Implements IFileProviderFactory.GetProvider
-            Return New LTFSFileProvider(_root, _tapeDrive, _blockSize, _extraPartitionCount, _logHandler)
+            Return New LTFSFileProvider(_root,
+                                        _tapeDrive,
+                                        _blockSize,
+                                        _extraPartitionCount,
+                                        _readCache,
+                                        _tapeStreamSession,
+                                        _logHandler)
         End Function
     End Class
 
@@ -94,6 +108,8 @@ Public Class FTPService
         Private ReadOnly _blockSize As Integer
         Private ReadOnly _extraPartitionCount As Integer
         Private ReadOnly _logHandler As Action(Of String)
+        Private ReadOnly _readCache As IOManager.LTFSReadBlockCache
+        Private ReadOnly _tapeStreamSession As IOManager.TapeStreamReadSession
         Private _workingStack As List(Of ltfsindex.directory)
 
         Private Class ResolvedPath
@@ -106,6 +122,8 @@ Public Class FTPService
                        tapeDrive As String,
                        blockSize As Integer,
                        extraPartitionCount As Integer,
+                       readCache As IOManager.LTFSReadBlockCache,
+                       tapeStreamSession As IOManager.TapeStreamReadSession,
                        logHandler As Action(Of String))
             If root Is Nothing Then Throw New ArgumentNullException(NameOf(root))
 
@@ -113,6 +131,8 @@ Public Class FTPService
             _tapeDrive = tapeDrive
             _blockSize = blockSize
             _extraPartitionCount = extraPartitionCount
+            _readCache = readCache
+            _tapeStreamSession = tapeStreamSession
             _logHandler = logHandler
             _workingStack = New List(Of ltfsindex.directory) From {root}
 
@@ -165,14 +185,18 @@ Public Class FTPService
             LogInformation("FTP file read started. FileName={FileName} FileLength={FileLength}.", fileInfo.name, fileInfo.length)
             RaiseLog($"OpenFileForReadAsync file={fileInfo.name}")
 
-            Dim input As New IOManager.LTFSFileStream(fileInfo, _tapeDrive, _blockSize, _extraPartitionCount)
+            Dim input As New IOManager.LTFSFileStream(fileInfo,
+                                                      _tapeDrive,
+                                                      _blockSize,
+                                                      _extraPartitionCount,
+                                                      _readCache,
+                                                      _tapeStreamSession)
             AddHandler input.LogPrint, Sub(message As String)
                                            RaiseLog(message)
                                        End Sub
 
-            Dim result As Stream = New BufferedStream(input, TapeUtils.GlobalBlockLimit)
             LogInformation("FTP file read stream opened. FileName={FileName}.", fileInfo.name)
-            Return Task.FromResult(result)
+            Return Task.FromResult(Of Stream)(input)
         End Function
 
         Public Function OpenFileForWriteAsync(path As String) As Task(Of Stream) Implements IFileProvider.OpenFileForWriteAsync
@@ -326,7 +350,7 @@ Public Class FTPService
                 .LastWriteTime = GetEntryTime(fileInfo.modifytime, fileInfo.changetime, fileInfo.creationtime),
                 .Length = fileInfo.length,
                 .IsDirectory = False,
-                .IsReadOnly = fileInfo.[readonly]
+                .IsReadOnly = True
             }
         End Function
 
@@ -336,7 +360,7 @@ Public Class FTPService
                 .LastWriteTime = GetEntryTime(directoryInfo.modifytime, directoryInfo.changetime, directoryInfo.creationtime),
                 .Length = 0,
                 .IsDirectory = True,
-                .IsReadOnly = directoryInfo.[readonly]
+                .IsReadOnly = True
             }
         End Function
 
@@ -403,32 +427,46 @@ Public Class FTPService
                            TapeDrive, port, BlockSize, ExtraPartitionCount)
 
             Dim root As ltfsindex.directory = schema._directory(0)
-            Dim fileProviderFactory As New LTFSFileProviderFactory(
-                root,
-                TapeDrive,
-                BlockSize,
-                ExtraPartitionCount,
-                Sub(message As String)
-                    RaiseEvent LogPrint(message)
-                End Sub)
+            Dim tapeStreamSession As IOManager.TapeStreamReadSession = Nothing
+            Dim readCache As IOManager.LTFSReadBlockCache = Nothing
             Dim stopTokenSource As New CancellationTokenSource
-            Dim server As New Zhaobang.FtpServer.FtpServer(
-                New IPEndPoint(IPAddress.Any, port),
-                fileProviderFactory,
-                New LocalDataConnectionFactory(),
-                New ConfiguredAuthenticator(Username, Password, AllowAnonymous))
 
             Try
+                If TapeUtils.DriverTypeSetting = TapeUtils.DriverType.TapeStream Then
+                    tapeStreamSession = New IOManager.TapeStreamReadSession(TapeDrive)
+                    readCache = New IOManager.LTFSReadBlockCache(256L * 1024L * 1024L)
+                Else
+                    readCache = New IOManager.LTFSReadBlockCache(32L * 1024L * 1024L)
+                End If
+
+                Dim fileProviderFactory As New LTFSFileProviderFactory(
+                    root,
+                    TapeDrive,
+                    BlockSize,
+                    ExtraPartitionCount,
+                    readCache,
+                    tapeStreamSession,
+                    Sub(message As String)
+                        RaiseEvent LogPrint(message)
+                    End Sub)
+                Dim server As New Zhaobang.FtpServer.FtpServer(
+                    New IPEndPoint(IPAddress.Any, port),
+                    fileProviderFactory,
+                    New LocalDataConnectionFactory(),
+                    New ConfiguredAuthenticator(Username, Password, AllowAnonymous))
                 Dim serverTask As Task = server.RunAsync(stopTokenSource.Token)
                 If serverTask.IsFaulted Then serverTask.GetAwaiter().GetResult()
 
                 _server = server
                 _serverTask = serverTask
                 _stopTokenSource = stopTokenSource
+                _readCache = readCache
+                _tapeStreamSession = tapeStreamSession
                 LogInformation("FTP service started. Port={Port}.", port)
             Catch ex As Exception
                 stopTokenSource.Cancel()
                 stopTokenSource.Dispose()
+                If tapeStreamSession IsNot Nothing Then tapeStreamSession.Dispose()
                 LogError(ex, "FTP service start failed. Port={Port}.", port)
                 Throw
             End Try
@@ -461,9 +499,22 @@ Public Class FTPService
         Finally
             SyncLock _lifecycleSync
                 If ReferenceEquals(_stopTokenSource, stopTokenSource) Then
+                    If _readCache IsNot Nothing Then
+                        LogInformation("FTP read cache statistics. Hits={Hits} Misses={Misses}.",
+                                       _readCache.HitCount,
+                                       _readCache.MissCount)
+                    End If
+                    If _tapeStreamSession IsNot Nothing Then
+                        LogInformation("FTP TapeStream session statistics. Reads={Reads} Locates={Locates}.",
+                                       _tapeStreamSession.ReadCount,
+                                       _tapeStreamSession.LocateCount)
+                        _tapeStreamSession.Dispose()
+                    End If
                     _stopTokenSource = Nothing
                     _serverTask = Nothing
                     _server = Nothing
+                    _readCache = Nothing
+                    _tapeStreamSession = Nothing
                 End If
             End SyncLock
             stopTokenSource.Dispose()

@@ -113,6 +113,7 @@ Public Class TapeImage
     Public CurrentDatasetID As Integer = 0
     Public CurrentIntraSetBlockOffset As Integer = 0
     Public Const BlockHeaderLen As Integer = 16
+    Private _readOnlySession As Boolean
     Public Function GetAvailableDiskSpace(Partition As Integer) As Long
         If PartitionMappingFile.ContainsKey(Partition) Then
             Dim path As String = IO.Path.Combine(idxPath, PartitionMappingFile(Partition))
@@ -172,7 +173,11 @@ Public Class TapeImage
             CreateNewFile(filename, PartitionCount, Compressed)
         End If
     End Sub
-    Public Sub OpenFile(filename As String)
+    Public Sub OpenReadOnlyFile(filename As String)
+        OpenFile(filename, True)
+    End Sub
+    Public Sub OpenFile(filename As String, Optional readOnlySession As Boolean = False)
+        _readOnlySession = readOnlySession
         Dim idx As TapeImage = FromXML(File.ReadAllText(filename))
         idxFile = New FileInfo(filename)
         With idx
@@ -209,12 +214,35 @@ Public Class TapeImage
         End With
         For Each id As Integer In PartitionMappingFile.Keys
             Dim ToAdd As Stream
+            Dim imagePath As String = Path.Combine(idxPath, PartitionMappingFile(id))
+            Dim imageAccess As FileAccess = If(_readOnlySession, FileAccess.Read, FileAccess.ReadWrite)
+            Dim imageShare As FileShare = If(_readOnlySession OrElse TapeUtils.DriverTypeSetting = TapeUtils.DriverType.TapeStream,
+                                            FileShare.ReadWrite,
+                                            FileShare.None)
             If PartitionMappingFile(id).ToLower().EndsWith(".lcgimg.zst") Then
                 Compressed = True
-                ToAdd = New ZstdSharp.CompressionStream(New FileStream(Path.Combine(idxPath, PartitionMappingFile(id)), FileMode.Open), 9, leaveOpen:=False)
+                ToAdd = New ZstdSharp.CompressionStream(New FileStream(imagePath,
+                                                                        FileMode.Open,
+                                                                        imageAccess,
+                                                                        imageShare),
+                                                         9,
+                                                         leaveOpen:=False)
             Else
                 Compressed = False
-                ToAdd = New FileStream(Path.Combine(idxPath, PartitionMappingFile(id)), FileMode.Open, FileAccess.ReadWrite, FileShare.None, 1024 * 1024, FileOptions.SequentialScan)
+                ' A TapeStream image is addressed by block and can seek heavily
+                ' when FTP range requests arrive out of order.  SequentialScan
+                ' makes the Windows cache discard useful pages after each seek;
+                ' use the random-access hint for the local-image driver while
+                ' retaining the existing sequential hint for real tape paths.
+                Dim fileOptions As FileOptions = If(TapeUtils.DriverTypeSetting = TapeUtils.DriverType.TapeStream,
+                                                    FileOptions.RandomAccess,
+                                                    FileOptions.SequentialScan)
+                ToAdd = New FileStream(Path.Combine(idxPath, PartitionMappingFile(id)),
+                                       FileMode.Open,
+                                       imageAccess,
+                                       imageShare,
+                                       1024 * 1024,
+                                       fileOptions)
             End If
             PartitionMappingStream.Add(id, ToAdd)
             If ValidLength(id) = 0 Then ValidLength(id) = ToAdd.Length
@@ -310,15 +338,17 @@ Public Class TapeImage
     End Sub
     Public Sub ReOpen()
         CloseFile()
-        OpenFile(idxFile.FullName)
+        OpenFile(idxFile.FullName, _readOnlySession)
     End Sub
     Public Sub CloseFile()
         Try
-            If VolumeChanged Then
+            If Not _readOnlySession AndAlso VolumeChanged Then
                 VolumeChanged = False
                 VCR = CUInt(VCR + 1)
             End If
-            File.WriteAllText(idxFile.FullName, GetSerializedString())
+            If Not _readOnlySession Then
+                File.WriteAllText(idxFile.FullName, GetSerializedString())
+            End If
             For i As Integer = 0 To PartitionCount - 1
                 PartitionMappingStream(i).Close()
             Next

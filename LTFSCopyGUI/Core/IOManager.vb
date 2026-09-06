@@ -1330,6 +1330,294 @@ Public Class IOManager
         End Property
     End Class
 
+    Public Class LTFSReadBlockCache
+        Private Structure BlockKey
+            Implements IEquatable(Of BlockKey)
+
+            Public ReadOnly Partition As Integer
+            Public ReadOnly Block As Long
+            Public ReadOnly ReadLimit As Integer
+
+            Public Sub New(partition As Integer, block As Long, readLimit As Integer)
+                Me.Partition = partition
+                Me.Block = block
+                Me.ReadLimit = readLimit
+            End Sub
+
+            Public Overloads Function Equals(other As BlockKey) As Boolean Implements IEquatable(Of BlockKey).Equals
+                Return Partition = other.Partition AndAlso Block = other.Block AndAlso ReadLimit = other.ReadLimit
+            End Function
+
+            Public Overrides Function Equals(obj As Object) As Boolean
+                Return TypeOf obj Is BlockKey AndAlso Equals(DirectCast(obj, BlockKey))
+            End Function
+
+            Public Overrides Function GetHashCode() As Integer
+                Return ((Partition * 397) Xor Block.GetHashCode()) * 397 Xor ReadLimit
+            End Function
+        End Structure
+
+        Private Class CacheEntry
+            Public ReadOnly Key As BlockKey
+            Public ReadOnly Data As Byte()
+
+            Public Sub New(key As BlockKey, data As Byte())
+                Me.Key = key
+                Me.Data = data
+            End Sub
+        End Class
+
+        Private ReadOnly _capacityBytes As Long
+        Private ReadOnly _syncRoot As New Object
+        Private ReadOnly _entries As New Dictionary(Of BlockKey, LinkedListNode(Of CacheEntry))
+        Private ReadOnly _lru As New LinkedList(Of CacheEntry)
+        Private _cachedBytes As Long
+        Private _hitCount As Long
+        Private _missCount As Long
+
+        Public Sub New(capacityBytes As Long)
+            If capacityBytes <= 0 Then Throw New ArgumentOutOfRangeException(NameOf(capacityBytes))
+            _capacityBytes = capacityBytes
+        End Sub
+
+        Public ReadOnly Property HitCount As Long
+            Get
+                Return Interlocked.Read(_hitCount)
+            End Get
+        End Property
+
+        Public ReadOnly Property MissCount As Long
+            Get
+                Return Interlocked.Read(_missCount)
+            End Get
+        End Property
+
+        Public Function TryGet(partition As Integer,
+                               block As Long,
+                               readLimit As Integer,
+                               ByRef data As Byte()) As Boolean
+            Dim key As New BlockKey(partition, block, readLimit)
+            SyncLock _syncRoot
+                Dim node As LinkedListNode(Of CacheEntry) = Nothing
+                If Not _entries.TryGetValue(key, node) Then
+                    Interlocked.Increment(_missCount)
+                    data = Nothing
+                    Return False
+                End If
+
+                _lru.Remove(node)
+                _lru.AddFirst(node)
+                Interlocked.Increment(_hitCount)
+                data = node.Value.Data
+                Return True
+            End SyncLock
+        End Function
+
+        Public Sub Store(partition As Integer, block As Long, readLimit As Integer, data As Byte())
+            If data Is Nothing OrElse data.LongLength > _capacityBytes Then Return
+
+            Dim key As New BlockKey(partition, block, readLimit)
+            SyncLock _syncRoot
+                Dim existing As LinkedListNode(Of CacheEntry) = Nothing
+                If _entries.TryGetValue(key, existing) Then
+                    _lru.Remove(existing)
+                    _lru.AddFirst(existing)
+                    Return
+                End If
+
+                While _lru.Last IsNot Nothing AndAlso _cachedBytes + data.LongLength > _capacityBytes
+                    Dim oldest As LinkedListNode(Of CacheEntry) = _lru.Last
+                    _lru.RemoveLast()
+                    _entries.Remove(oldest.Value.Key)
+                    _cachedBytes -= oldest.Value.Data.LongLength
+                End While
+
+                Dim node As New LinkedListNode(Of CacheEntry)(New CacheEntry(key, data))
+                _lru.AddFirst(node)
+                _entries.Add(key, node)
+                _cachedBytes += data.LongLength
+            End SyncLock
+        End Sub
+    End Class
+
+    ''' <summary>
+    ''' Keeps one TapeStream handle open for the lifetime of an FTP service.
+    '''
+    ''' TapeStream is a local image, but the normal TapeUtils drive overloads
+    ''' open and close the image for every SCSI operation.  That is particularly
+    ''' expensive for a read-only FTP mount because one logical read normally
+    ''' consists of LOCATE + READ.  Holding the handle here reuses the already
+    ''' parsed TapeImage and its partition streams.  The caller still has to
+    ''' hold the device operation lock because TapeImage's position is stateful.
+    ''' </summary>
+    Public Class TapeStreamReadSession
+        Implements IDisposable
+
+        Private ReadOnly _tapeDrive As String
+        Private _handle As IntPtr
+        Private ReadOnly _handleSync As New Object
+        Private ReadOnly _readerSync As New Object
+        Private ReadOnly _readers As New List(Of TapeImage)
+        Private _disposed As Integer
+        Private _readCount As Long
+        Private _locateCount As Long
+
+        Public Sub New(tapeDrive As String)
+            If String.IsNullOrWhiteSpace(tapeDrive) Then
+                Throw New ArgumentException("A TapeStream image path is required.", NameOf(tapeDrive))
+            End If
+            If TapeUtils.DriverTypeSetting <> TapeUtils.DriverType.TapeStream Then
+                Throw New InvalidOperationException("TapeStreamReadSession requires the TapeStream driver.")
+            End If
+
+            _tapeDrive = tapeDrive
+        End Sub
+
+        Public ReadOnly Property ReadCount As Long
+            Get
+                Return Interlocked.Read(_readCount)
+            End Get
+        End Property
+
+        Public ReadOnly Property LocateCount As Long
+            Get
+                Return Interlocked.Read(_locateCount)
+            End Get
+        End Property
+
+        Private Function EnsureSharedHandle() As Boolean
+            If _handle <> IntPtr.Zero AndAlso _handle <> New IntPtr(-1) Then Return True
+            SyncLock _handleSync
+                If _handle <> IntPtr.Zero AndAlso _handle <> New IntPtr(-1) Then Return True
+                Dim openedHandle As IntPtr = IntPtr.Zero
+                If Not TapeUtils.OpenTapeDrive(_tapeDrive, openedHandle) Then Return False
+                _handle = openedHandle
+                Return True
+            End SyncLock
+        End Function
+
+        ''' <summary>
+        ''' Opens an independent, read-only TapeImage for one FTP stream.
+        ''' Each reader owns its partition FileStream position, so concurrent
+        ''' REST/RETR ranges do not seek one shared stream back and forth.
+        ''' Nothing is returned when the image is held exclusively by an older
+        ''' process; callers then use the shared-handle fallback below.
+        ''' </summary>
+        Public Function OpenReader() As TapeImage
+            If Volatile.Read(_disposed) <> 0 Then
+                Throw New ObjectDisposedException(NameOf(TapeStreamReadSession))
+            End If
+
+            Dim reader As New TapeImage()
+            Try
+                reader.OpenReadOnlyFile(_tapeDrive)
+                SyncLock _readerSync
+                    If Volatile.Read(_disposed) <> 0 Then
+                        reader.CloseFile()
+                        Return Nothing
+                    End If
+                    _readers.Add(reader)
+                End SyncLock
+                Return reader
+            Catch
+                Try
+                    reader.CloseFile()
+                Catch
+                End Try
+                Return Nothing
+            End Try
+        End Function
+
+        Public Sub CloseReader(reader As TapeImage)
+            If reader Is Nothing Then Return
+            SyncLock _readerSync
+                _readers.Remove(reader)
+            End SyncLock
+            Try
+                reader.CloseFile()
+            Catch
+            End Try
+        End Sub
+
+        Public Function ReadBlock(partition As Integer,
+                                  block As Long,
+                                  readLimit As Integer) As Byte()
+            If Volatile.Read(_disposed) <> 0 Then
+                Throw New ObjectDisposedException(NameOf(TapeStreamReadSession))
+            End If
+            If block < 0 Then Throw New ArgumentOutOfRangeException(NameOf(block))
+            If Not EnsureSharedHandle() Then
+                Throw New IOException($"Cannot open TapeStream image '{_tapeDrive}'.")
+            End If
+
+            Dim position As TapeUtils.PositionData = TapeUtils.ReadPosition(_handle, TapeUtils.DriverType.TapeStream)
+            If position.PartitionNumber <> CByte(partition) OrElse
+               position.BlockNumber <> CULng(block) Then
+                Interlocked.Increment(_locateCount)
+                TapeUtils.Locate(_handle, CULng(block), CByte(partition))
+            End If
+
+            Dim sense() As Byte = Nothing
+            Dim result As Byte() = TapeUtils.ReadBlock(_handle,
+                                                        sense,
+                                                        CUInt(Math.Max(1, readLimit)),
+                                                        False)
+            Interlocked.Increment(_readCount)
+            Return result
+        End Function
+
+        Public Function ReadBlock(reader As TapeImage,
+                                  partition As Integer,
+                                  block As Long,
+                                  readLimit As Integer) As Byte()
+            If reader Is Nothing Then Return ReadBlock(partition, block, readLimit)
+            If Volatile.Read(_disposed) <> 0 Then
+                Throw New ObjectDisposedException(NameOf(TapeStreamReadSession))
+            End If
+            If block < 0 Then Throw New ArgumentOutOfRangeException(NameOf(block))
+
+            Dim position As TapeUtils.PositionData = reader.ReadPosition()
+            Dim sense() As Byte = Nothing
+            If position.PartitionNumber <> CByte(partition) OrElse
+               position.BlockNumber <> CULng(block) Then
+                Interlocked.Increment(_locateCount)
+                If position.PartitionNumber <> CByte(partition) Then
+                    reader.ChangePartition(CByte(partition), sense)
+                End If
+                reader.LocateByBlock(block, sense)
+            End If
+
+            Dim result As Byte() = reader.ReadBlock(sense)
+            Interlocked.Increment(_readCount)
+            Return result
+        End Function
+
+        Public Sub Dispose() Implements IDisposable.Dispose
+            If Interlocked.Exchange(_disposed, 1) <> 0 Then Return
+
+            Dim readersToClose As List(Of TapeImage)
+            SyncLock _readerSync
+                readersToClose = New List(Of TapeImage)(_readers)
+                _readers.Clear()
+            End SyncLock
+            For Each reader As TapeImage In readersToClose
+                Try
+                    reader.CloseFile()
+                Catch
+                End Try
+            Next
+
+            Dim handleToClose As IntPtr
+            SyncLock _handleSync
+                handleToClose = _handle
+                _handle = IntPtr.Zero
+            End SyncLock
+            If handleToClose <> IntPtr.Zero AndAlso handleToClose <> New IntPtr(-1) Then
+                TapeUtils.CloseTapeDrive(handleToClose)
+            End If
+        End Sub
+    End Class
+
     <TypeConverter(GetType(ExpandableObjectConverter))>
     Public Class LTFSFileStream
         Inherits Stream
@@ -1339,13 +1627,31 @@ Public Class IOManager
         Public Property BlockSize As Integer
         Public Property ExtraPartitionCount As Integer
         Public Shared OperationLock As New Object
+        Private ReadOnly _readCache As LTFSReadBlockCache
+        Private ReadOnly _tapeStreamSession As TapeStreamReadSession
+        Private ReadOnly _tapeStreamReader As TapeImage
+        Private ReadOnly _extents As List(Of ltfsindex.file.extent)
+        Private ReadOnly _positionLock As New Object
 
-        Public Sub New(file As ltfsindex.file, drive As String, blksize As Integer, xtrPCount As Integer)
+        Public Sub New(file As ltfsindex.file,
+                       drive As String,
+                       blksize As Integer,
+                       xtrPCount As Integer,
+                       Optional readCache As LTFSReadBlockCache = Nothing,
+                       Optional tapeStreamSession As TapeStreamReadSession = Nothing)
             FileInfo = file
             TapeDrive = drive
             BlockSize = blksize
             ExtraPartitionCount = xtrPCount
-            FileInfo.extentinfo.Sort(
+            _readCache = readCache
+            _tapeStreamSession = tapeStreamSession
+            If _tapeStreamSession IsNot Nothing Then
+                _tapeStreamReader = _tapeStreamSession.OpenReader()
+            End If
+            _extents = If(FileInfo.extentinfo Is Nothing,
+                          New List(Of ltfsindex.file.extent),
+                          New List(Of ltfsindex.file.extent)(FileInfo.extentinfo))
+            _extents.Sort(
                 New Comparison(Of ltfsindex.file.extent)(
                     Function(a As ltfsindex.file.extent, b As ltfsindex.file.extent)
                         Return a.fileoffset.CompareTo(b.fileoffset)
@@ -1379,15 +1685,13 @@ Public Class IOManager
         Private _Position As Long
 
         Public Function GetExtent(offset As Long) As ltfsindex.file.extent
-            SyncLock OperationLock
-                For i As Integer = 0 To FileInfo.extentinfo.Count - 1
-                    With FileInfo.extentinfo(i)
-                        If .fileoffset <= offset AndAlso .fileoffset + .bytecount > offset Then
-                            Return FileInfo.extentinfo(i)
-                        End If
-                    End With
-                Next
-            End SyncLock
+            For i As Integer = 0 To _extents.Count - 1
+                With _extents(i)
+                    If .fileoffset <= offset AndAlso .fileoffset + .bytecount > offset Then
+                        Return _extents(i)
+                    End If
+                End With
+            Next
 
             Return Nothing
         End Function
@@ -1403,22 +1707,14 @@ Public Class IOManager
 
         Public Overrides Property Position As Long
             Get
-                Return _Position
+                SyncLock _positionLock
+                    Return _Position
+                End SyncLock
             End Get
             Set(value As Long)
-                SyncLock OperationLock
+                SyncLock _positionLock
                     If value < 0 Then value = 0
-                    If value >= FileInfo.length Then value = FileInfo.length - 1
-                    Dim ext As ltfsindex.file.extent = GetExtent(value)
-                    Dim p As New TapeUtils.PositionData(TapeDrive)
-                    Dim targetBlock As ULong = CULng(ext.startblock + (value - ext.fileoffset) \ BlockSize)
-                    Dim targetPartition As Byte = CByte(Math.Min(ExtraPartitionCount, ext.partition))
-                    If p.BlockNumber <> targetBlock OrElse p.PartitionNumber <> targetPartition Then
-                        RaiseEvent _
-                            LogPrint($"LOCATE {TapeDrive} B{targetBlock}P{targetPartition} (File position {value})")
-                        TapeUtils.Locate(TapeDrive, targetBlock, targetPartition)
-                    End If
-                    _Position = value
+                    _Position = Math.Min(value, FileInfo.length)
                 End SyncLock
             End Set
         End Property
@@ -1434,51 +1730,215 @@ Public Class IOManager
             Throw New NotImplementedException()
         End Sub
 
+        Protected Overrides Sub Dispose(disposing As Boolean)
+            If disposing AndAlso _tapeStreamSession IsNot Nothing AndAlso _tapeStreamReader IsNot Nothing Then
+                _tapeStreamSession.CloseReader(_tapeStreamReader)
+            End If
+            MyBase.Dispose(disposing)
+        End Sub
+
         Public Overrides Function Seek(offset As Long, origin As SeekOrigin) As Long
-            SyncLock ReadLock
-                RaiseEvent LogPrint($"Seek Offset {offset} Origin {origin}")
-                Select Case origin
-                    Case SeekOrigin.Begin
-                        Position = offset
-                    Case SeekOrigin.Current
-                        Position = Position + offset
-                    Case SeekOrigin.End
-                        Position = Length + offset
-                End Select
-                Return Position
+            ' Seeking only changes this stream's logical position.  Physical tape
+            ' positioning is deliberately deferred until ReadCore, where the
+            ' device lock is held.  Waiting on the global read semaphore here
+            ' blocks a thread-pool thread for every concurrent FTP range request.
+            RaiseEvent LogPrint($"Seek Offset {offset} Origin {origin}")
+            Select Case origin
+                Case SeekOrigin.Begin
+                    Position = offset
+                Case SeekOrigin.Current
+                    Position = Position + offset
+                Case SeekOrigin.End
+                    Position = Length + offset
+            End Select
+            Return Position
+        End Function
+
+        Public Shared ReadLock As New SemaphoreSlim(1, 1)
+
+        Public Overrides Function Read(buffer() As Byte, offset As Integer, count As Integer) As Integer
+            If _tapeStreamSession IsNot Nothing Then
+                Return ReadCore(buffer, offset, count)
+            End If
+
+            ReadLock.Wait()
+            Try
+                Return ReadCore(buffer, offset, count)
+            Finally
+                ReadLock.Release()
+            End Try
+        End Function
+
+        Public Overrides Async Function ReadAsync(buffer() As Byte,
+                                                  offset As Integer,
+                                                  count As Integer,
+                                                  cancellationToken As CancellationToken) As Task(Of Integer)
+            If _tapeStreamSession IsNot Nothing Then
+                cancellationToken.ThrowIfCancellationRequested()
+                Return ReadCore(buffer, offset, count)
+            End If
+
+            Await ReadLock.WaitAsync(cancellationToken).ConfigureAwait(False)
+            Try
+                Return ReadCore(buffer, offset, count)
+            Finally
+                ReadLock.Release()
+            End Try
+        End Function
+
+        Private Function ReadCore(buffer() As Byte, offset As Integer, count As Integer) As Integer
+            RaiseEvent LogPrint($"ReadFile: Offset {offset} Count{count}")
+            If _tapeStreamSession IsNot Nothing Then
+                Return ReadCoreTapeStream(buffer, offset, count)
+            End If
+
+            SyncLock TapeUtils.GetSCSIOperationLock(TapeDrive)
+                Return ReadCoreLocked(buffer, offset, count)
             End SyncLock
         End Function
 
-        Public Shared ReadLock As New Object
+        ''' <summary>
+        ''' Reads TapeStream data without serializing cache hits behind the
+        ''' stateful image reader.  Only a cache miss enters the device lock;
+        ''' the cache is checked again inside that lock so concurrent misses for
+        ''' the same block collapse to one physical read.
+        ''' </summary>
+        Private Function ReadCoreTapeStream(buffer() As Byte, offset As Integer, count As Integer) As Integer
+            Dim rBytes As Integer = 0
+            Dim fCurrentPos As Long = Position
+            Dim ext As ltfsindex.file.extent = Nothing
+            While rBytes < count
+                If ext Is Nothing OrElse
+                   fCurrentPos < ext.fileoffset OrElse
+                   fCurrentPos >= ext.fileoffset + ext.bytecount Then
+                    ext = GetExtent(fCurrentPos)
+                End If
+                If ext Is Nothing Then Exit While
 
-        Public Overrides Function Read(buffer() As Byte, offset As Integer, count As Integer) As Integer
-            SyncLock ReadLock
-                RaiseEvent LogPrint($"ReadFile: Offset {offset} Count{count}")
-                Dim rBytes As Integer = 0
-                Dim fCurrentPos As Long = Position
-                Dim CUrrentP As Integer = New TapeUtils.PositionData(TapeDrive).PartitionNumber
-                Dim ext As ltfsindex.file.extent = Nothing
-                While rBytes < count
-                    If Not WithinExtent(fCurrentPos, CUrrentP, ext) Then
-                        ext = GetExtent(fCurrentPos)
-                        Position = fCurrentPos
-                        CUrrentP = New TapeUtils.PositionData(TapeDrive).PartitionNumber
+                Dim fStartBlock As Long = ext.startblock + (fCurrentPos - ext.fileoffset + ext.byteoffset) \ BlockSize
+                Dim fByteOffset As Integer = CInt((ext.byteoffset + fCurrentPos - ext.fileoffset) Mod BlockSize)
+                Dim bytesRemaining As Long = ext.bytecount - (fCurrentPos - ext.fileoffset)
+                Dim targetPartition As Integer = Math.Min(ExtraPartitionCount, ext.partition)
+                Dim readLimit As Integer = CInt(Math.Min(BlockSize, bytesRemaining))
+                Dim cacheReadLimit As Integer = BlockSize
+                Dim data As Byte() = Nothing
+
+                Dim cacheHit As Boolean = _readCache IsNot Nothing AndAlso
+                                          _readCache.TryGet(targetPartition, fStartBlock, cacheReadLimit, data)
+                If Not cacheHit Then
+                    Dim sourceLock As Object = If(_tapeStreamReader Is Nothing,
+                                                  TapeUtils.GetSCSIOperationLock(TapeDrive),
+                                                  Nothing)
+                    If sourceLock Is Nothing Then
+                        cacheHit = _readCache IsNot Nothing AndAlso
+                                   _readCache.TryGet(targetPartition, fStartBlock, cacheReadLimit, data)
+                        If Not cacheHit Then
+                            Dim beforeLocateCount As Long = _tapeStreamSession.LocateCount
+                            data = _tapeStreamSession.ReadBlock(_tapeStreamReader,
+                                                                targetPartition,
+                                                                fStartBlock,
+                                                                readLimit)
+                            If _tapeStreamSession.LocateCount <> beforeLocateCount Then
+                                RaiseEvent _
+                                    LogPrint($"LOCATE {TapeDrive} B{fStartBlock}P{targetPartition} (File position {fCurrentPos})")
+                            End If
+                            If _readCache IsNot Nothing Then
+                                _readCache.Store(targetPartition, fStartBlock, cacheReadLimit, data)
+                            End If
+                        End If
+                    Else
+                        SyncLock sourceLock
+                            cacheHit = _readCache IsNot Nothing AndAlso
+                                       _readCache.TryGet(targetPartition, fStartBlock, cacheReadLimit, data)
+                            If Not cacheHit Then
+                                Dim beforeLocateCount As Long = _tapeStreamSession.LocateCount
+                                data = _tapeStreamSession.ReadBlock(targetPartition, fStartBlock, readLimit)
+                                If _tapeStreamSession.LocateCount <> beforeLocateCount Then
+                                    RaiseEvent _
+                                        LogPrint($"LOCATE {TapeDrive} B{fStartBlock}P{targetPartition} (File position {fCurrentPos})")
+                                End If
+                                If _readCache IsNot Nothing Then
+                                    _readCache.Store(targetPartition, fStartBlock, cacheReadLimit, data)
+                                End If
+                            End If
+                        End SyncLock
                     End If
-                    If ext Is Nothing Then Exit While
-                    Dim fStartBlock As Long = ext.startblock + (fCurrentPos - ext.fileoffset + ext.byteoffset) \ BlockSize
-                    Dim fByteOffset As Integer = CInt((ext.byteoffset + fCurrentPos - ext.fileoffset) Mod BlockSize)
-                    Dim BytesRemaining As Long = ext.bytecount - (fCurrentPos - ext.fileoffset)
-                    Dim data As Byte() = TapeUtils.ReadBlock(TapeDrive:=TapeDrive,
-                                                             BlockSizeLimit:=CUInt(Math.Min(BlockSize, BytesRemaining)))
-                    Dim bytesReaded As Integer = data.Length - fByteOffset
-                    Dim destIndex As Integer = offset + rBytes
-                    Array.Copy(data, fByteOffset, buffer, destIndex, Math.Min(bytesReaded, buffer.Length - destIndex))
-                    rBytes += bytesReaded
-                    fCurrentPos += bytesReaded
-                End While
+                End If
+
+                If data Is Nothing Then Exit While
+                Dim bytesAvailable As Integer = Math.Max(0, data.Length - fByteOffset)
+                Dim destIndex As Integer = offset + rBytes
+                Dim bytesToCopy As Integer = Math.Min(bytesAvailable, Math.Min(count - rBytes, buffer.Length - destIndex))
+                If bytesToCopy <= 0 Then Exit While
+                Array.Copy(data, fByteOffset, buffer, destIndex, bytesToCopy)
+                rBytes += bytesToCopy
+                fCurrentPos += bytesToCopy
+            End While
+
+            SyncLock _positionLock
                 _Position = fCurrentPos
-                Return rBytes
             End SyncLock
+            Return rBytes
+        End Function
+
+        Private Function ReadCoreLocked(buffer() As Byte, offset As Integer, count As Integer) As Integer
+            Dim rBytes As Integer = 0
+            Dim fCurrentPos As Long = Position
+            Dim ext As ltfsindex.file.extent = Nothing
+            While rBytes < count
+                If ext Is Nothing OrElse
+                   fCurrentPos < ext.fileoffset OrElse
+                   fCurrentPos >= ext.fileoffset + ext.bytecount Then
+                    ext = GetExtent(fCurrentPos)
+                End If
+                If ext Is Nothing Then Exit While
+                Dim fStartBlock As Long = ext.startblock + (fCurrentPos - ext.fileoffset + ext.byteoffset) \ BlockSize
+                Dim fByteOffset As Integer = CInt((ext.byteoffset + fCurrentPos - ext.fileoffset) Mod BlockSize)
+                Dim BytesRemaining As Long = ext.bytecount - (fCurrentPos - ext.fileoffset)
+                Dim targetPartition As Integer = Math.Min(ExtraPartitionCount, ext.partition)
+                Dim readLimit As Integer = CInt(Math.Min(BlockSize, BytesRemaining))
+                ' TapeStream always returns the complete logical block.  Use a
+                ' stable cache key for its final partial block too, otherwise
+                ' the same block is duplicated when range requests use slightly
+                ' different read limits.
+                Dim cacheReadLimit As Integer = If(_tapeStreamSession Is Nothing, readLimit, BlockSize)
+                Dim data As Byte() = Nothing
+                If _readCache Is Nothing OrElse
+                   Not _readCache.TryGet(targetPartition, fStartBlock, cacheReadLimit, data) Then
+                    If _tapeStreamSession IsNot Nothing Then
+                        Dim beforeLocateCount As Long = _tapeStreamSession.LocateCount
+                        data = _tapeStreamSession.ReadBlock(targetPartition, fStartBlock, readLimit)
+                        If _tapeStreamSession.LocateCount <> beforeLocateCount Then
+                            RaiseEvent _
+                                LogPrint($"LOCATE {TapeDrive} B{fStartBlock}P{targetPartition} (File position {fCurrentPos})")
+                        End If
+                    Else
+                        Dim physicalPosition As New TapeUtils.PositionData(TapeDrive)
+                        If physicalPosition.BlockNumber <> CULng(fStartBlock) OrElse
+                           physicalPosition.PartitionNumber <> CByte(targetPartition) Then
+                            RaiseEvent _
+                                LogPrint($"LOCATE {TapeDrive} B{fStartBlock}P{targetPartition} (File position {fCurrentPos})")
+                            TapeUtils.Locate(TapeDrive, CULng(fStartBlock), CByte(targetPartition))
+                        End If
+                        data = TapeUtils.ReadBlock(TapeDrive:=TapeDrive,
+                                                   BlockSizeLimit:=CUInt(readLimit))
+                    End If
+                    If _readCache IsNot Nothing Then
+                        _readCache.Store(targetPartition, fStartBlock, cacheReadLimit, data)
+                    End If
+                End If
+                Dim bytesAvailable As Integer = Math.Max(0, data.Length - fByteOffset)
+                Dim destIndex As Integer = offset + rBytes
+                Dim bytesToCopy As Integer = Math.Min(bytesAvailable, Math.Min(count - rBytes, buffer.Length - destIndex))
+                If bytesToCopy <= 0 Then Exit While
+                Array.Copy(data, fByteOffset, buffer, destIndex, bytesToCopy)
+                rBytes += bytesToCopy
+                fCurrentPos += bytesToCopy
+            End While
+            SyncLock _positionLock
+                _Position = fCurrentPos
+            End SyncLock
+            Return rBytes
         End Function
     End Class
 
