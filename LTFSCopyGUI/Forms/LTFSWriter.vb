@@ -15904,6 +15904,10 @@ Public Class LTFSWriter
                                             SpeedLimit = Math.Min(160, SpeedLimit + 2)
                                         ElseIf ErrLogRateHistory < -3.8 Then
                                             SpeedLimit = Math.Min(160, SpeedLimit + 1)
+                                        ElseIf ErrLogRateHistory >= -3.1 Then
+                                            SpeedLimit -= 50
+                                        ElseIf ErrLogRateHistory >= -3.2 Then
+                                            SpeedLimit -= 20
                                         ElseIf ErrLogRateHistory >= -3.3 Then
                                             SpeedLimit -= 10
                                         ElseIf ErrLogRateHistory >= -3.4 Then
@@ -15913,6 +15917,7 @@ Public Class LTFSWriter
                                         ElseIf ErrLogRateHistory >= -3.6 Then
                                             SpeedLimit -= 1
                                         End If
+                                        SpeedLimit = Math.Max(SpeedLimit, CInt(My.Settings.LTFSWriter_AutoCleanDownLim))
                                         ToolStripStatusLabelErrLog.Text = $"{ErrLogRateHistory.ToString("f2")}|{SpeedLimit}"
                                     End Sub)
                          End While
