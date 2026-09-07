@@ -1673,6 +1673,7 @@ Public Class LTFSWriter
 
     Private Function GetExistingFilesForAdd(directory As ltfsindex.directory, fileName As String) As List(Of ltfsindex.file)
         If directory Is Nothing Then Return EmptyExistingFilesForAdd
+        If directory.HasUnmaterializedLazyContents Then Return directory.FindFilesByName(fileName)
         If _activeAddFileLookup Is Nothing Then Return directory.FindFilesByName(fileName)
 
         Dim byName As Dictionary(Of String, List(Of ltfsindex.file)) = Nothing
@@ -2582,13 +2583,85 @@ Public Class LTFSWriter
         End Get
     End Property
 
-    Private Function TryGetTarVirtualRoot(source As ltfsindex.file, ByRef root As TarVirtualDirectory) As Boolean
-        root = Nothing
-        If source Is Nothing Then Return False
-        Dim encoded As String = source.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.TarMetadata, True)
-        Dim metadata As TarMetadata = Nothing
-        If Not TarMetadataCodec.TryDecode(encoded, metadata) Then Return False
-        Return TarVirtualTreeBuilder.TryBuild(source, metadata, root)
+    Private NotInheritable Class TreeFileMetadataCacheEntry
+        Public Property MutationVersion As Long
+        Public Property IsArchive As Boolean
+        Public Property TarMetadata As TarMetadata
+    End Class
+
+    Private NotInheritable Class FileRecordComparer
+        Implements IEqualityComparer(Of ltfsindex.file)
+
+        Public Shared ReadOnly Instance As New FileRecordComparer
+
+        Public Overloads Function Equals(left As ltfsindex.file,
+                                          right As ltfsindex.file) As Boolean _
+            Implements IEqualityComparer(Of ltfsindex.file).Equals
+            If Object.ReferenceEquals(left, right) Then Return True
+            If left Is Nothing OrElse right Is Nothing Then Return False
+            Return left.HasLazyRecord AndAlso right.HasLazyRecord AndAlso
+                   left.LazyRecordOffset = right.LazyRecordOffset AndAlso
+                   Object.ReferenceEquals(left.LazyStoreReference, right.LazyStoreReference)
+        End Function
+
+        Public Shadows Function GetHashCode(value As ltfsindex.file) As Integer _
+            Implements IEqualityComparer(Of ltfsindex.file).GetHashCode
+            If value Is Nothing Then Return 0
+            If Not value.HasLazyRecord Then Return RuntimeHelpers.GetHashCode(value)
+            Return RuntimeHelpers.GetHashCode(value.LazyStoreReference) Xor value.LazyRecordOffset.GetHashCode()
+        End Function
+    End Class
+
+    Private NotInheritable Class TreeFileMetadataResult
+        Public Property File As ltfsindex.file
+        Public Property IsArchive As Boolean
+        Public Property TarRoot As TarVirtualDirectory
+    End Class
+
+    Private ReadOnly _treeFileMetadataCacheLock As New Object
+    Private ReadOnly _treeFileMetadataCache As New Dictionary(Of ltfsindex.file, TreeFileMetadataCacheEntry)(FileRecordComparer.Instance)
+    Private ReadOnly _treeFileMetadataCacheOrder As New Queue(Of KeyValuePair(Of ltfsindex.file, TreeFileMetadataCacheEntry))
+    Private Const TreeFileMetadataCacheCapacity As Integer = 65536
+
+    Private Function ReadTreeFileMetadata(source As ltfsindex.file) As TreeFileMetadataResult
+        If source Is Nothing Then Return Nothing
+        Dim version As Long = source.MutationVersion
+        Dim cached As TreeFileMetadataCacheEntry = Nothing
+        SyncLock _treeFileMetadataCacheLock
+            If _treeFileMetadataCache.TryGetValue(source, cached) AndAlso cached.MutationVersion <> version Then cached = Nothing
+        End SyncLock
+
+        If cached Is Nothing Then
+            Do
+                Dim readVersion As Long = source.MutationVersion
+                Dim archive As String = source.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.Archive)
+                Dim metadata As TarMetadata = Nothing
+                TarMetadataCodec.TryDecode(source.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.TarMetadata, True), metadata)
+                cached = New TreeFileMetadataCacheEntry With {
+                    .MutationVersion = source.MutationVersion,
+                    .IsArchive = String.Equals(archive, "true", StringComparison.OrdinalIgnoreCase),
+                    .TarMetadata = metadata}
+                If cached.MutationVersion = readVersion Then Exit Do
+            Loop
+            SyncLock _treeFileMetadataCacheLock
+                _treeFileMetadataCache(source) = cached
+                _treeFileMetadataCacheOrder.Enqueue(New KeyValuePair(Of ltfsindex.file, TreeFileMetadataCacheEntry)(source, cached))
+                While _treeFileMetadataCache.Count > TreeFileMetadataCacheCapacity
+                    Dim oldest As KeyValuePair(Of ltfsindex.file, TreeFileMetadataCacheEntry) = _treeFileMetadataCacheOrder.Dequeue()
+                    Dim current As TreeFileMetadataCacheEntry = Nothing
+                    If _treeFileMetadataCache.TryGetValue(oldest.Key, current) AndAlso Object.ReferenceEquals(current, oldest.Value) Then
+                        _treeFileMetadataCache.Remove(oldest.Key)
+                    End If
+                End While
+            End SyncLock
+        End If
+
+        Dim result As New TreeFileMetadataResult With {.File = source, .IsArchive = cached.IsArchive}
+        If cached.TarMetadata IsNot Nothing Then
+            Dim root As TarVirtualDirectory = Nothing
+            If TarVirtualTreeBuilder.TryBuild(source, cached.TarMetadata, root) Then result.TarRoot = root
+        End If
+        Return result
     End Function
 
     Private NotInheritable Class WriterTreeNode
@@ -2730,22 +2803,70 @@ Public Class LTFSWriter
         If writerNode Is Nothing OrElse directory Is Nothing OrElse writerNode.FileChildrenScanned Then Return
         If Threading.Interlocked.Exchange(writerNode.FileMetadataScanQueued, 1) <> 0 Then Return
 
-        Try
-            BeginInvoke(
-                Sub()
+        Dim fileCount As Integer = directory.GetLazyDirectFileCount()
+        Dim startIndex As Integer = writerNode.NextFileIndex
+        Dim pageCount As Integer = Math.Min(WriterTreePageSize, Math.Max(0, fileCount - startIndex))
+        If pageCount = 0 Then
+            writerNode.FileChildrenScanned = True
+            Threading.Interlocked.Exchange(writerNode.FileMetadataScanQueued, 0)
+            Return
+        End If
+        writerNode.NextFileIndex += pageCount
+
+        Task.Run(
+            Sub()
+                Dim results As New List(Of TreeFileMetadataResult)
+                For index As Integer = startIndex To startIndex + pageCount - 1
+                    Try
+                        Dim result As TreeFileMetadataResult = ReadTreeFileMetadata(directory.GetLazyFileAt(index))
+                        If result IsNot Nothing AndAlso (result.IsArchive OrElse result.TarRoot IsNot Nothing) Then results.Add(result)
+                    Catch
+                        'A concurrent refresh can replace or mutate this directory.
+                    End Try
+                Next
+
+                Try
+                    BeginInvoke(
+                        Sub()
+                            Threading.Interlocked.Exchange(writerNode.FileMetadataScanQueued, 0)
+                            If IsDisposed OrElse Not Object.ReferenceEquals(node.TreeView, TreeView1) Then Return
+                            If Not Object.ReferenceEquals(TreeView1.SelectedNode, node) AndAlso Not node.IsExpanded Then Return
+
+                            TreeView1.BeginUpdate()
+                            Try
+                                For Each result As TreeFileMetadataResult In results
+                                    If result.IsArchive Then
+                                        Dim archiveNode As TreeNode = CreateArchiveTreeNode(result.File)
+                                        If archiveNode IsNot Nothing Then node.Nodes.Add(archiveNode)
+                                    End If
+                                    If result.TarRoot IsNot Nothing Then
+                                        Dim tarNode As WriterTreeNode = CreateTarDirectoryTreeNode(result.TarRoot)
+                                        If tarNode IsNot Nothing Then
+                                            node.Nodes.Add(tarNode)
+                                            AddUnloadedChildMarker(tarNode)
+                                        End If
+                                    End If
+                                Next
+
+                                Dim currentFileCount As Integer = directory.GetLazyDirectFileCount()
+                                writerNode.FileChildrenScanned = writerNode.NextFileIndex >= currentFileCount
+                                writerNode.ChildrenComplete = writerNode.NextDirectoryIndex >= directory.GetLazyDirectDirectoryCount() AndAlso
+                                                              writerNode.FileChildrenScanned
+                                If writerNode.NextDirectoryIndex < directory.GetLazyDirectDirectoryCount() Then AddUnloadedChildMarker(node)
+                            Finally
+                                TreeView1.EndUpdate()
+                            End Try
+                            If Not writerNode.FileChildrenScanned Then QueueDirectoryFileMetadataScan(node)
+                        End Sub)
+                Catch ex As ObjectDisposedException
                     Threading.Interlocked.Exchange(writerNode.FileMetadataScanQueued, 0)
-                    If IsDisposed OrElse Not Object.ReferenceEquals(node.TreeView, TreeView1) Then Return
-                    If Not Object.ReferenceEquals(TreeView1.SelectedNode, node) AndAlso Not node.IsExpanded Then Return
-                    LoadTreeNodeChildren(node, scanFilesOnly:=True)
-                End Sub)
-        Catch ex As ObjectDisposedException
-            Threading.Interlocked.Exchange(writerNode.FileMetadataScanQueued, 0)
-        Catch ex As InvalidOperationException
-            Threading.Interlocked.Exchange(writerNode.FileMetadataScanQueued, 0)
-        End Try
+                Catch ex As InvalidOperationException
+                    Threading.Interlocked.Exchange(writerNode.FileMetadataScanQueued, 0)
+                End Try
+            End Sub)
     End Sub
 
-    Private Sub LoadTreeNodeChildren(node As TreeNode, Optional scanFilesOnly As Boolean = False)
+    Private Sub LoadTreeNodeChildren(node As TreeNode)
         Dim writerNode As WriterTreeNode = TryCast(node, WriterTreeNode)
         If writerNode Is Nothing OrElse writerNode.IsPlaceholder Then Return
         If writerNode.ChildrenComplete AndAlso
@@ -2763,7 +2884,7 @@ Public Class LTFSWriter
                 'Directory rows remain user-paged.  Archive/tarmeta metadata has
                 'an independent file page so it is not delayed by a directory
                 'that also contains more than 1024 subdirectories.
-                Dim remainingDirectories As Integer = If(scanFilesOnly, 0, WriterTreePageSize)
+                Dim remainingDirectories As Integer = WriterTreePageSize
 
                 While remainingDirectories > 0 AndAlso writerNode.NextDirectoryIndex < directoryCount
                     Dim childDirectory As ltfsindex.directory = directory.GetLazyDirectoryAt(writerNode.NextDirectoryIndex)
@@ -2786,34 +2907,6 @@ Public Class LTFSWriter
                         End If
                     End If
                     remainingDirectories -= 1
-                End While
-
-                Dim remainingFiles As Integer = WriterTreePageSize
-                While remainingFiles > 0 AndAlso writerNode.NextFileIndex < fileCount
-                    Dim file As ltfsindex.file = directory.GetLazyFileAt(writerNode.NextFileIndex)
-                    writerNode.NextFileIndex += 1
-                    remainingFiles -= 1
-                    If file Is Nothing Then Continue While
-
-                    Try
-                        Dim archive As String = file.GetXAttr(ltfsindex.file.xattr.ApplicationSpecific.Archive)
-                        If String.Equals(archive, "true", StringComparison.OrdinalIgnoreCase) Then
-                            Dim archiveNode As TreeNode = CreateArchiveTreeNode(file)
-                            If archiveNode IsNot Nothing Then node.Nodes.Add(archiveNode)
-                        End If
-
-                        Dim tarRoot As TarVirtualDirectory = Nothing
-                        If TryGetTarVirtualRoot(file, tarRoot) Then
-                            Dim tarNode As WriterTreeNode = CreateTarDirectoryTreeNode(tarRoot)
-                            If tarNode IsNot Nothing Then
-                                node.Nodes.Add(tarNode)
-                                AddUnloadedChildMarker(tarNode)
-                            End If
-                        End If
-                    Catch
-                        'One malformed metadata record must not prevent later
-                        'files in a large directory from being scanned.
-                    End Try
                 End While
 
                 writerNode.FileChildrenScanned = writerNode.NextFileIndex >= fileCount
@@ -3378,6 +3471,7 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub ClearListViewRows()
+        If ListView1.VirtualListSize <> 0 Then ListView1.VirtualListSize = 0
         ListView1.SelectedIndices.Clear()
         _listRows.Clear()
         _listItemCache.Clear()
@@ -3487,15 +3581,9 @@ Public Class LTFSWriter
         Return result
     End Function
 
-    Private Function GetSelectedListViewFile() As ltfsindex.file
-        If ListView1.SelectedIndices.Count = 0 Then Return Nothing
-
-        Dim index As Integer = ListView1.SelectedIndices(0)
+    Private Function GetListViewFile(index As Integer) As ltfsindex.file
         If index < 0 OrElse index >= GetListViewRowCount() Then Return Nothing
 
-        'Search only needs the record identity.  Do not call
-        'GetListViewItem here because rendering all columns can load every
-        'xattr/checksum for a large lazy file while the user presses F3.
         If index < _listRows.Count Then
             Return TryCast(_listRows(index).Value, ltfsindex.file)
         End If
@@ -3515,6 +3603,22 @@ Public Class LTFSWriter
             End If
         End SyncLock
         Return Nothing
+    End Function
+
+    Private Function GetSelectedListViewFiles() As List(Of ltfsindex.file)
+        Dim result As New List(Of ltfsindex.file)(ListView1.SelectedIndices.Count)
+        For i As Integer = 0 To ListView1.SelectedIndices.Count - 1
+            Dim selectedFile As ltfsindex.file = GetListViewFile(ListView1.SelectedIndices(i))
+            If selectedFile IsNot Nothing Then result.Add(selectedFile)
+        Next
+        Return result
+    End Function
+
+    Private Function GetSelectedListViewFile() As ltfsindex.file
+        If ListView1.SelectedIndices.Count = 0 Then Return Nothing
+        'Search only needs the record identity.  Do not render all columns,
+        'which can load every xattr/checksum for a large lazy file.
+        Return GetListViewFile(ListView1.SelectedIndices(0))
     End Function
 
     Private Sub SelectListViewIndex(index As Integer)
@@ -4752,20 +4856,16 @@ Public Class LTFSWriter
         End If
     End Sub
     Private Sub 删除文件ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 删除文件ToolStripMenuItem.Click
-        Dim selectedItems As List(Of ListViewItem) = GetSelectedListViewItems()
+        Dim selectedFiles As List(Of ltfsindex.file) = GetSelectedListViewFiles()
         If ListView1.Tag IsNot Nothing AndAlso
-        selectedItems.Count > 0 AndAlso
-        MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_DelConfrm}{selectedItems.Count}{My.Resources.ResText_Files_C}", My.Resources.ResText_Warning, MessageBoxButtons.OKCancel) = DialogResult.OK Then
-            Dim filesToRemove As New List(Of ltfsindex.file)
+        selectedFiles.Count > 0 AndAlso
+        MessageBox.Show(New Form With {.TopMost = True}, $"{My.Resources.ResText_DelConfrm}{selectedFiles.Count}{My.Resources.ResText_Files_C}", My.Resources.ResText_Warning, MessageBoxButtons.OKCancel) = DialogResult.OK Then
             Dim d As ltfsindex.directory = DirectCast(ListView1.Tag, ltfsindex.directory)
-            For Each ItemSelected As ListViewItem In selectedItems
-                If ItemSelected.Tag IsNot Nothing AndAlso TypeOf (ItemSelected.Tag) Is ltfsindex.file Then
-                    Dim f As ltfsindex.file = DirectCast(ItemSelected.Tag, ltfsindex.file)
-                    RemovePendingByFile(d, f)
-                    filesToRemove.Add(f)
-                End If
+            ClearListViewRows()
+            For Each selectedFile As ltfsindex.file In selectedFiles
+                RemovePendingByFile(d, selectedFile)
             Next
-            If filesToRemove.Count > 0 AndAlso d.RemoveFiles(filesToRemove) > 0 AndAlso TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
+            If d.RemoveFiles(selectedFiles) > 0 AndAlso TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
             UnwrittenCountOverrideValue = 0
             UnwrittenSizeOverrideValue = 0
             RefreshDisplay()
@@ -13705,20 +13805,22 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub 剪切文件ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 剪切文件ToolStripMenuItem.Click
-        Dim selectedItems As List(Of ListViewItem) = GetSelectedListViewItems()
-        If selectedItems.Count > 0 Then
+        Dim selectedFiles As List(Of ltfsindex.file) = GetSelectedListViewFiles()
+        If selectedFiles.Count > 0 Then
             Dim flist As New List(Of ltfsindex.file)
             Dim filesToRemove As New List(Of ltfsindex.file)
             Dim d As ltfsindex.directory = DirectCast(ListView1.Tag, ltfsindex.directory)
-            For Each SI As ListViewItem In selectedItems
-                If TypeOf SI.Tag Is ltfsindex.file Then
-                    Dim f As ltfsindex.file = CType(SI.Tag, ltfsindex.file)
-                    If Not d.UnwrittenFiles.Contains(f) Then
-                        flist.Add(f)
-                        filesToRemove.Add(f)
-                    End If
+            Dim pendingFiles As HashSet(Of ltfsindex.file)
+            SyncLock d.UnwrittenFiles
+                pendingFiles = New HashSet(Of ltfsindex.file)(d.UnwrittenFiles)
+            End SyncLock
+            For Each selectedFile As ltfsindex.file In selectedFiles
+                If Not pendingFiles.Contains(selectedFile) Then
+                    flist.Add(selectedFile)
+                    filesToRemove.Add(selectedFile)
                 End If
             Next
+            ClearListViewRows()
             If d.RemoveFiles(filesToRemove) > 0 AndAlso TotalBytesUnindexed = 0 Then TotalBytesUnindexed = 1
             MyClipBoard.Add(flist)
             RefreshDisplay()
