@@ -1053,4 +1053,7 @@ P0Size和P1Size如果都不为65535，则两者总和不得超过磁带容量</v
   <data name="ResText_DirectCopy_Title" xml:space="preserve">
     <value>直接磁带复制</value>
   </data>
+  <data name="PropertyDescription_LTFSWriter_WriterTreePageSize" xml:space="preserve">
+    <value>单次展开目录数</value>
+  </data>
 </root>

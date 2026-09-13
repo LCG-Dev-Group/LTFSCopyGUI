@@ -513,6 +513,20 @@ Namespace My
         End Property
 
         <Global.System.Configuration.UserScopedSettingAttribute(),
+         Global.System.Configuration.SettingsDescriptionAttribute("单次展开目录数"),
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),
+         Global.System.Configuration.DefaultSettingValueAttribute("1024"),
+         Category("LTFSWriter"),
+         LocalizedDescription("PropertyDescription_LTFSWriter_WriterTreePageSize")>
+        Public Property LTFSWriter_WriterTreePageSize() As Integer
+            Get
+                Return CType(Me("LTFSWriter_WriterTreePageSize"), Integer)
+            End Get
+            Set
+                Me("LTFSWriter_WriterTreePageSize") = Value
+            End Set
+        End Property
+        <Global.System.Configuration.UserScopedSettingAttribute(),
          Global.System.Configuration.SettingsDescriptionAttribute("预读文件数"),
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),
          Global.System.Configuration.DefaultSettingValueAttribute("0"),

@@ -18,7 +18,6 @@ Imports ZstdSharp
 Imports Newtonsoft.Json
 
 Public Class LTFSWriter
-    Private Const WriterTreePageSize As Integer = 1024
     Private _lastSelectedFolder As String = String.Empty
     Private _deviceLease As SCSIDeviceLockManager.WriterLease
     Private ReadOnly _deviceLeaseLock As New Object()
@@ -2779,7 +2778,7 @@ Public Class LTFSWriter
         If writerNode Is Nothing OrElse writerNode.ChildrenComplete Then Return
 
         Dim directoryCount As Integer = If(directory.Directories Is Nothing, 0, directory.Directories.Count)
-        Dim remaining As Integer = WriterTreePageSize
+        Dim remaining As Integer = My.Settings.LTFSWriter_WriterTreePageSize
         While remaining > 0 AndAlso writerNode.NextDirectoryIndex < directoryCount
             Dim child As TarVirtualDirectory = directory.Directories(writerNode.NextDirectoryIndex)
             writerNode.NextDirectoryIndex += 1
@@ -2805,7 +2804,7 @@ Public Class LTFSWriter
 
         Dim fileCount As Integer = directory.GetLazyDirectFileCount()
         Dim startIndex As Integer = writerNode.NextFileIndex
-        Dim pageCount As Integer = Math.Min(WriterTreePageSize, Math.Max(0, fileCount - startIndex))
+        Dim pageCount As Integer = Math.Min(My.Settings.LTFSWriter_WriterTreePageSize, Math.Max(0, fileCount - startIndex))
         If pageCount = 0 Then
             writerNode.FileChildrenScanned = True
             Threading.Interlocked.Exchange(writerNode.FileMetadataScanQueued, 0)
@@ -2884,7 +2883,7 @@ Public Class LTFSWriter
                 'Directory rows remain user-paged.  Archive/tarmeta metadata has
                 'an independent file page so it is not delayed by a directory
                 'that also contains more than 1024 subdirectories.
-                Dim remainingDirectories As Integer = WriterTreePageSize
+                Dim remainingDirectories As Integer = My.Settings.LTFSWriter_WriterTreePageSize
 
                 While remainingDirectories > 0 AndAlso writerNode.NextDirectoryIndex < directoryCount
                     Dim childDirectory As ltfsindex.directory = directory.GetLazyDirectoryAt(writerNode.NextDirectoryIndex)
@@ -16908,6 +16907,81 @@ Public Class LTFSWriter
         If normalizedPath.Length = 0 Then Return False
         Return schema.GetFile(normalizedPath) IsNot Nothing
     End Function
+
+    Private Sub 删除该路径下的空目录ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 删除该路径下的空目录ToolStripMenuItem.Click
+        If TapeEjectedReadOnly Then Exit Sub
+        Dim Nodes As List(Of TreeNode) = SelectedNodes
+        If Nodes.Count = 0 Then Exit Sub
+        Dim outputDirectory As String = SelectWriterFolder()
+        If String.IsNullOrEmpty(outputDirectory) Then Exit Sub
+        Dim totalFiles As Long = 0
+        For Each node As TreeNode In Nodes
+            Dim selectedDir As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
+            If selectedDir IsNot Nothing Then totalFiles += selectedDir.TotalFiles
+        Next
+        Dim th As New Threading.Thread(
+                Sub()
+                    Dim succeeded As Boolean = False
+                    PrintMsg(My.Resources.ResText_Restoring)
+                    SetStatusLight(LWStatus.Busy)
+                    Try
+                        StopFlag = False
+                        PrintMsg(My.Resources.ResText_PrepFile)
+                        CurrentFilesProcessed = 0
+                        CurrentBytesProcessed = 0
+                        UnwrittenSizeOverrideValue = 0
+                        UnwrittenCountOverrideValue = CULng(Math.Max(0, totalFiles))
+                        StartTime = Now
+                        PrintMsg(My.Resources.ResText_RestFile)
+                        Dim parallelRestore = IOManager.TryGetSparseSupport(outputDirectory)
+                        Dim c As Long = 0
+                        TapeUtils.ReserveUnit(driveHandle)
+                        TapeUtils.PreventMediaRemoval(driveHandle)
+                        RestorePosition = New TapeUtils.PositionData(driveHandle)
+                        For Each node As TreeNode In Nodes
+                            If StopFlag Then Exit For
+                            Dim selectedDir As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
+                            If selectedDir Is Nothing Then Continue For
+                            If selectedDir.contents Is Nothing Then Continue For
+                            If selectedDir.contents._directory Is Nothing Then Continue For
+                            If selectedDir.contents._directory.Count = 0 Then Continue For
+                            For i As Integer = selectedDir.contents._directory.Count - 1 To 0 Step -1
+                                Dim dir = selectedDir.contents._directory(i)
+                                If dir.contents._directory IsNot Nothing AndAlso dir.contents._directory.Count > 0 Then Continue For
+                                If dir.contents._file IsNot Nothing AndAlso dir.contents._file.Count > 0 Then Continue For
+                                selectedDir.contents._directory.RemoveAt(i)
+                            Next
+                        Next
+                        If StopFlag Then
+                            PrintMsg(My.Resources.ResText_OpCancelled)
+                            SetStatusLight(LWStatus.Idle)
+                        Else
+                            succeeded = True
+                            PrintMsg(My.Resources.ResText_RestFin)
+                            SetStatusLight(LWStatus.Succ)
+                        End If
+                    Catch ex As Exception
+                        Invoke(Sub() MessageBox.Show(New Form With {.TopMost = True}, $"{ex.ToString}"))
+                        PrintMsg($"{My.Resources.ResText_RestoreErr}{ex.ToString}", IsWarn:=True)
+                        SetStatusLight(LWStatus.Err)
+                    End Try
+                    SyncLock OperationLock
+                        SyncLock TapeUtils.GetSCSIOperationLock(driveHandle)
+                            TapeUtils.AllowMediumRemoval(driveHandle)
+                            TapeUtils.ReleaseUnit(driveHandle)
+                        End SyncLock
+                    End SyncLock
+
+                    UnwrittenSizeOverrideValue = 0
+                    UnwrittenCountOverrideValue = 0
+                    StopFlag = False
+                    LockGUI(False)
+                    If Not succeeded Then SetStatusLight(LWStatus.Err)
+                End Sub)
+        LockGUI()
+        th.Start()
+    End Sub
+
     Public CurrentFocus As Object
     Private Sub TreeView1_GotFocus(sender As Object, e As EventArgs) Handles TreeView1.GotFocus
         CurrentFocus = TreeView1

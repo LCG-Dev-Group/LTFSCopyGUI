@@ -1012,4 +1012,7 @@ Disable when file fragment is intended to restore</value>
   <data name="ResText_DirectCopy_Title" xml:space="preserve">
     <value>Direct Tape Copy</value>
   </data>
+  <data name="PropertyDescription_LTFSWriter_WriterTreePageSize" xml:space="preserve">
+    <value>Directory count on expansion</value>
+  </data>
 </root>
