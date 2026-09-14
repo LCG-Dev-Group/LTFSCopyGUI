@@ -231,10 +231,10 @@ Public Class LTFSWriter
         Set(value As Boolean)
             Dim previous = Interlocked.Exchange(_stopFlagValue, If(value, 1, 0))
             If value AndAlso previous = 0 Then
-                Dim fastProviderSnapshot = Volatile.Read(_activeFastReaderProvider)
-                If fastProviderSnapshot IsNot Nothing Then
+                Dim writerCancellationSnapshot = Volatile.Read(_activeWriterCancellation)
+                If writerCancellationSnapshot IsNot Nothing Then
                     Try
-                        fastProviderSnapshot.Cancel()
+                        writerCancellationSnapshot.Cancel()
                     Catch
                     End Try
                 End If
@@ -6890,6 +6890,7 @@ Public Class LTFSWriter
     Private _PipeBufferLength As Long = 0
     Private _stopFlagValue As Integer = 0
     Private _activeFastReaderProvider As IFastReaderConsumer = Nothing
+    Private _activeWriterCancellation As CancellationTokenSource = Nothing
     Private _directCopySourceOffer As DirectTapeCopySourceOffer = Nothing
     Private _directCopyTargetSession As DirectTapeCopyTargetSession = Nothing
     Private _directCopyManifest As DirectTapeCopyManifest = Nothing
@@ -7625,7 +7626,13 @@ Public Class LTFSWriter
         End If
 
         PipePause = True
-        Dim waitCancellation As New CancellationTokenSource()
+        Dim writerCancellationSnapshot = Threading.Volatile.Read(_activeWriterCancellation)
+        Dim waitCancellation As CancellationTokenSource
+        If writerCancellationSnapshot Is Nothing Then
+            waitCancellation = New CancellationTokenSource()
+        Else
+            waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(writerCancellationSnapshot.Token)
+        End If
         Dim previousWaitCancellation = Threading.Interlocked.Exchange(_fastReaderWaitCancellation, waitCancellation)
         If previousWaitCancellation IsNot Nothing Then
             Try
@@ -7746,7 +7753,8 @@ Public Class LTFSWriter
                                              driveHandle As IntPtr,
                                              p As TapeUtils.PositionData,
                                              Optional expectedDedupeHash As String = "",
-                                             Optional tarScanner As TarMetadataScanner = Nothing) As Boolean
+                                             Optional tarScanner As TarMetadataScanner = Nothing,
+                                             Optional cancellationToken As CancellationToken = Nothing) As Boolean
         Dim remainingInFile As Long = fr.File.length
         Dim eofSeen As Boolean = False
         Dim writeCallCount As Long = 0
@@ -7800,7 +7808,7 @@ Public Class LTFSWriter
         While Not StopFlag AndAlso remainingInFile > 0
             WaitForFastReaderRefill(fastProvider)
 
-            Dim slot As RustFastReaderProvider.Slot = fastProvider.ReadSlot(fileIndex, Threading.CancellationToken.None)
+            Dim slot As RustFastReaderProvider.Slot = fastProvider.ReadSlot(fileIndex, cancellationToken)
             Dim expectedOffset = fr.File.length - remainingInFile
             If slot.FileIndex <> fileIndex OrElse slot.FileOffset <> expectedOffset Then
                 fastProvider.AdvanceSlot(slot)
@@ -8068,7 +8076,7 @@ Public Class LTFSWriter
                     End Using
                 End Using
             End Using
-            Dim eofSlot = fastProvider.ReadSlot(fileIndex, Threading.CancellationToken.None)
+            Dim eofSlot = fastProvider.ReadSlot(fileIndex, cancellationToken)
             Dim validEof = eofSlot.FileIndex = fileIndex AndAlso
                            eofSlot.FileOffset = fr.File.length AndAlso
                            eofSlot.Length = 0 AndAlso
@@ -8136,6 +8144,7 @@ Public Class LTFSWriter
         Dim th As New Threading.Thread(
             Sub()
                 Dim OnWriteFinishMessage As String = ""
+                Dim writerCancellation As CancellationTokenSource = Nothing
                 Dim provider As FileDataProvider = Nothing
                 Dim fastProvider As IFastReaderConsumer = Nothing
                 Dim diskFastProvider As RustFastReaderProvider = Nothing
@@ -8153,6 +8162,9 @@ Public Class LTFSWriter
                 Dim directManifest As DirectTapeCopyManifest = Nothing
                 Dim isDirectCopy As Boolean = False
                 Try
+                    writerCancellation = New CancellationTokenSource()
+                    Threading.Interlocked.Exchange(_activeWriterCancellation, writerCancellation)
+                    If StopFlag Then writerCancellation.Cancel()
                     ClearWriteCompletionState()
                     PipeBufferLength = 0
                     SetStatusLight(LWStatus.Busy)
@@ -8516,7 +8528,7 @@ Public Class LTFSWriter
                                             TotalBytesUnindexed += fr.File.length
                                         ElseIf useFastReader AndAlso Not IsIndexPartition Then
                                             Dim providerFileIndex = If(fr.IsDirectTapeCopy, CInt(fr.DirectCopyOrdinal), i)
-                                            If Not WriteFileFromFastReader(fastProvider, providerFileIndex, fr, driveHandle, p, currentPlan.ExpectedDedupeHash, tarScanner) Then Exit For
+                                            If Not WriteFileFromFastReader(fastProvider, providerFileIndex, fr, driveHandle, p, currentPlan.ExpectedDedupeHash, tarScanner, writerCancellation.Token) Then Exit For
                                         ElseIf (fr.File.length <= plabel.blocksize) AndAlso (fr.FileOffset = 0) AndAlso (fr.File.length = fr.SegmentLength) Then
                                             Dim succ As Boolean = False
                                             Dim FileData(CInt(fr.File.length - 1)) As Byte
@@ -9273,7 +9285,6 @@ Public Class LTFSWriter
                             End If
                         End Try
                     End If
-                    ResetFastReaderBufferWait()
                     Try
                         If provider IsNot Nothing Then
                             provider.Cancel()
@@ -9340,6 +9351,19 @@ Public Class LTFSWriter
                             Log.Error(cleanupEx, "Power policy restore failed during writer cleanup.")
                         End Try
                     End If
+                    If writerCancellation IsNot Nothing Then
+                        Try
+                            If ReferenceEquals(Threading.Volatile.Read(_activeWriterCancellation), writerCancellation) Then
+                                Threading.Interlocked.CompareExchange(_activeWriterCancellation, Nothing, writerCancellation)
+                            End If
+                            writerCancellation.Dispose()
+                        Catch cleanupEx As Exception
+                            Log.Error(cleanupEx, "Writer cancellation cleanup failed.")
+                        Finally
+                            writerCancellation = Nothing
+                        End Try
+                    End If
+                    ResetFastReaderBufferWait()
                     Try
                         LockGUI(False)
                     Catch cleanupEx As Exception
