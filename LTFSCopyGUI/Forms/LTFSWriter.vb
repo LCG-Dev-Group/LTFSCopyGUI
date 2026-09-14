@@ -16912,8 +16912,6 @@ Public Class LTFSWriter
         If TapeEjectedReadOnly Then Exit Sub
         Dim Nodes As List(Of TreeNode) = SelectedNodes
         If Nodes.Count = 0 Then Exit Sub
-        Dim outputDirectory As String = SelectWriterFolder()
-        If String.IsNullOrEmpty(outputDirectory) Then Exit Sub
         Dim totalFiles As Long = 0
         For Each node As TreeNode In Nodes
             Dim selectedDir As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
@@ -16932,8 +16930,7 @@ Public Class LTFSWriter
                         UnwrittenSizeOverrideValue = 0
                         UnwrittenCountOverrideValue = CULng(Math.Max(0, totalFiles))
                         StartTime = Now
-                        PrintMsg(My.Resources.ResText_RestFile)
-                        Dim parallelRestore = IOManager.TryGetSparseSupport(outputDirectory)
+                        PrintMsg(My.Resources.ResText_Busy)
                         Dim c As Long = 0
                         TapeUtils.ReserveUnit(driveHandle)
                         TapeUtils.PreventMediaRemoval(driveHandle)
