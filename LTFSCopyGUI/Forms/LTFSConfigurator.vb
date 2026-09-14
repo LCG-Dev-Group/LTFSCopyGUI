@@ -4,7 +4,6 @@ Imports System.ComponentModel
 Imports System.IO
 Imports System.Runtime.InteropServices
 Imports System.Text
-Imports LTFSCopyGUI.TapeImage
 Imports LTFSCopyGUI.Native
 Imports NAudio.Wave
 Imports Serilog
@@ -3526,5 +3525,62 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
             ButtonTest.Text = "Stop"
             th.Start()
         End If
+    End Sub
+
+    Private Sub ButtonResetAllZones_Click(sender As Object, e As EventArgs) Handles ButtonResetAllZones.Click
+        If MessageBox.Show(My.Resources.ResText_DataLossWarning, My.Resources.ResText_Warning, MessageBoxButtons.OKCancel) = DialogResult.Cancel Then Exit Sub
+        Enabled = False
+        TextBoxDebugOutput.Text = $"     #  ZONE_TYPE    ZONE_CONDITION    START_LBA    END_LBA   WP_LBA   WP_VALIDITY  SEQ    RESET "
+        Task.Run(Sub()
+                     Dim senseData(63) As Byte
+                     Dim data As IntPtr = Marshal.AllocHGlobal(1)
+                     Dim handle As IntPtr
+                     Dim cdb As Byte()
+                     SyncLock TapeUtils.GetSCSIOperationLock(ConfTapeDrive)
+                         TapeUtils.OpenTapeDrive(ConfTapeDrive, handle)
+                         Dim disk As New ZBCDeviceHelper With {.handle = handle}
+                         Dim MP03 As Byte() = TapeUtils.ModeSense(handle, 3)
+                         disk.SectorLength = CUShort(BigEndianConverter.ToUInt16(MP03, 12))
+                         Invoke(Sub() NumericUpDownSectorSize.Value = If(disk.SectorLength > 0, disk.SectorLength, NumericUpDownSectorSize.Value))
+                         disk.ReportZones(0)
+                         For i As Integer = 0 To disk.ZoneList.Count - 1
+                             Dim zone = disk.ZoneList(i)
+                             If zone.ZoneCondition = ZBCDeviceHelper.Zone.ZoneConditionDef.NOT_WRITE_POINTER Then Continue For
+                             If zone.ZoneCondition = ZBCDeviceHelper.Zone.ZoneConditionDef.EMPTY Then Continue For
+                             Dim LBA = zone.ZoneStartLBA
+                             Dim zoneIndex = i
+                             Invoke(Sub()
+                                        With zone
+                                            TextBoxDebugOutput.AppendText($"{vbCrLf}{zoneIndex.ToString().PadLeft(6)}{ _
+                                                .ZoneType.ToString().PadLeft(13)}{ _
+                                                .ZoneCondition.ToString().PadLeft(18)}{ _
+                                                .ZoneStartLBA.ToString().PadLeft(11)}{ _
+                                                .ZoneEndLBA.ToString().PadLeft(11)}{ _
+                                                .ZoneWritePointerLBA.ToString().PadLeft(11)}{ _
+                                                If(.WRITER_POINTER_LBA_INVALID, " WP_Invalid", " WP_Valid  ")}{ _
+                                                If(.NON_SEQ, " NON_SEQ ", "   SEQ   ")}{ _
+                                                If(.RESET, " RESET ", "       ")}")
+                                        End With
+                                    End Sub)
+                             cdb = {&H94, &H1,
+                                    CByte(CLng((LBA >> 56)) And &HFF),
+                                    CByte(CLng((LBA >> 48)) And &HFF),
+                                    CByte(CLng((LBA >> 40)) And &HFF),
+                                    CByte(CLng((LBA >> 32)) And &HFF),
+                                    CByte(CLng((LBA >> 24)) And &HFF),
+                                    CByte(CLng((LBA >> 16)) And &HFF),
+                                    CByte(CLng((LBA >> 8)) And &HFF),
+                                    CByte(CLng((LBA >> 0)) And &HFF),
+                                    0, 0, 0, 0, 0, 0}
+                             TapeUtils.TapeSCSIIOCtlUnmanaged(handle, cdb, data, 0, 1, 30, senseData)
+                         Next
+                         TapeUtils.CloseTapeDrive(handle)
+                     End SyncLock
+                     Marshal.FreeHGlobal(data)
+                     Invoke(Sub()
+                                TextBoxDebugOutput.AppendText($"{vbCrLf} ALL ZONES RESET")
+                                Enabled = True
+                            End Sub)
+                 End Sub)
     End Sub
 End Class

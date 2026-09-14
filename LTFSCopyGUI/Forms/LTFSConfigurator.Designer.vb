@@ -124,26 +124,28 @@ Partial Class LTFSConfigurator
         Me.ComboBox4 = New System.Windows.Forms.ComboBox()
         Me.ButtonResetLogPage = New System.Windows.Forms.Button()
         Me.TabPageTest = New System.Windows.Forms.TabPage()
-        Me.ButtonVerify = New System.Windows.Forms.Button()
-        Me.ButtonEOT = New System.Windows.Forms.Button()
-        Me.ButtonBOT = New System.Windows.Forms.Button()
-        Me.NumericUpDownTestSets = New System.Windows.Forms.NumericUpDown()
-        Me.LabelTestSets = New System.Windows.Forms.Label()
-        Me.ButtonDiagTest = New System.Windows.Forms.Button()
-        Me.NumericUpDownTestWrap = New System.Windows.Forms.NumericUpDown()
-        Me.LabelTestWrap = New System.Windows.Forms.Label()
-        Me.NumericUpDownTestStartLen = New System.Windows.Forms.NumericUpDown()
-        Me.NumericUpDownTestSpeed = New System.Windows.Forms.NumericUpDown()
-        Me.LabelTestStartLen = New System.Windows.Forms.Label()
+        Me.GroupBoxDiag = New System.Windows.Forms.GroupBox()
         Me.LabelTestSpeed = New System.Windows.Forms.Label()
-        Me.ButtonRDErrRateLog = New System.Windows.Forms.Button()
-        Me.ButtonTest = New System.Windows.Forms.Button()
-        Me.RadioButtonTest2 = New System.Windows.Forms.RadioButton()
-        Me.RadioButtonTest1 = New System.Windows.Forms.RadioButton()
-        Me.NumericUpDownTestBlkNum = New System.Windows.Forms.NumericUpDown()
-        Me.LabelTestBlockCount = New System.Windows.Forms.Label()
-        Me.NumericUpDownTestBlkSize = New System.Windows.Forms.NumericUpDown()
+        Me.LabelTestStartLen = New System.Windows.Forms.Label()
+        Me.ButtonEOT = New System.Windows.Forms.Button()
+        Me.NumericUpDownTestSpeed = New System.Windows.Forms.NumericUpDown()
+        Me.ButtonBOT = New System.Windows.Forms.Button()
+        Me.NumericUpDownTestStartLen = New System.Windows.Forms.NumericUpDown()
+        Me.NumericUpDownTestSets = New System.Windows.Forms.NumericUpDown()
+        Me.LabelTestWrap = New System.Windows.Forms.Label()
+        Me.LabelTestSets = New System.Windows.Forms.Label()
+        Me.NumericUpDownTestWrap = New System.Windows.Forms.NumericUpDown()
+        Me.ButtonDiagTest = New System.Windows.Forms.Button()
+        Me.GroupBoxRWTest = New System.Windows.Forms.GroupBox()
         Me.LabelTestBlocksize = New System.Windows.Forms.Label()
+        Me.ButtonVerify = New System.Windows.Forms.Button()
+        Me.NumericUpDownTestBlkSize = New System.Windows.Forms.NumericUpDown()
+        Me.LabelTestBlockCount = New System.Windows.Forms.Label()
+        Me.NumericUpDownTestBlkNum = New System.Windows.Forms.NumericUpDown()
+        Me.RadioButtonTest1 = New System.Windows.Forms.RadioButton()
+        Me.RadioButtonTest2 = New System.Windows.Forms.RadioButton()
+        Me.ButtonTest = New System.Windows.Forms.Button()
+        Me.ButtonRDErrRateLog = New System.Windows.Forms.Button()
         Me.TabPageZBC = New System.Windows.Forms.TabPage()
         Me.ButtonRestoreLBA = New System.Windows.Forms.Button()
         Me.ButtonDumpLBA = New System.Windows.Forms.Button()
@@ -183,8 +185,7 @@ Partial Class LTFSConfigurator
         Me.SaveFileDialog1 = New System.Windows.Forms.SaveFileDialog()
         Me.SaveFileDialog2 = New System.Windows.Forms.SaveFileDialog()
         Me.OpenFileDialog1 = New System.Windows.Forms.OpenFileDialog()
-        Me.GroupBoxRWTest = New System.Windows.Forms.GroupBox()
-        Me.GroupBoxDiag = New System.Windows.Forms.GroupBox()
+        Me.ButtonResetAllZones = New System.Windows.Forms.Button()
         Me.ContextMenuStripRefreshDeviceList.SuspendLayout()
         Me.Panel1.SuspendLayout()
         Me.ContextMenuStripLTFSWriter.SuspendLayout()
@@ -206,19 +207,19 @@ Partial Class LTFSConfigurator
         CType(Me.NumericUpDownPCLow, System.ComponentModel.ISupportInitialize).BeginInit()
         Me.TabPageLog.SuspendLayout()
         Me.TabPageTest.SuspendLayout()
+        Me.GroupBoxDiag.SuspendLayout()
+        CType(Me.NumericUpDownTestSpeed, System.ComponentModel.ISupportInitialize).BeginInit()
+        CType(Me.NumericUpDownTestStartLen, System.ComponentModel.ISupportInitialize).BeginInit()
         CType(Me.NumericUpDownTestSets, System.ComponentModel.ISupportInitialize).BeginInit()
         CType(Me.NumericUpDownTestWrap, System.ComponentModel.ISupportInitialize).BeginInit()
-        CType(Me.NumericUpDownTestStartLen, System.ComponentModel.ISupportInitialize).BeginInit()
-        CType(Me.NumericUpDownTestSpeed, System.ComponentModel.ISupportInitialize).BeginInit()
-        CType(Me.NumericUpDownTestBlkNum, System.ComponentModel.ISupportInitialize).BeginInit()
+        Me.GroupBoxRWTest.SuspendLayout()
         CType(Me.NumericUpDownTestBlkSize, System.ComponentModel.ISupportInitialize).BeginInit()
+        CType(Me.NumericUpDownTestBlkNum, System.ComponentModel.ISupportInitialize).BeginInit()
         Me.TabPageZBC.SuspendLayout()
         CType(Me.NumericUpDownWriteLBACount, System.ComponentModel.ISupportInitialize).BeginInit()
         CType(Me.NumericUpDownSectorSize, System.ComponentModel.ISupportInitialize).BeginInit()
         CType(Me.NumericUpDownLBA, System.ComponentModel.ISupportInitialize).BeginInit()
         Me.ContextMenuStripSend.SuspendLayout()
-        Me.GroupBoxRWTest.SuspendLayout()
-        Me.GroupBoxDiag.SuspendLayout()
         Me.SuspendLayout()
         '
         'ButtonRefresh
@@ -910,60 +911,38 @@ Partial Class LTFSConfigurator
         Me.TabPageTest.Name = "TabPageTest"
         Me.TabPageTest.UseVisualStyleBackColor = True
         '
-        'ButtonVerify
+        'GroupBoxDiag
         '
-        resources.ApplyResources(Me.ButtonVerify, "ButtonVerify")
-        Me.ButtonVerify.Name = "ButtonVerify"
-        Me.ButtonVerify.UseVisualStyleBackColor = True
+        Me.GroupBoxDiag.Controls.Add(Me.LabelTestSpeed)
+        Me.GroupBoxDiag.Controls.Add(Me.LabelTestStartLen)
+        Me.GroupBoxDiag.Controls.Add(Me.ButtonEOT)
+        Me.GroupBoxDiag.Controls.Add(Me.NumericUpDownTestSpeed)
+        Me.GroupBoxDiag.Controls.Add(Me.ButtonBOT)
+        Me.GroupBoxDiag.Controls.Add(Me.NumericUpDownTestStartLen)
+        Me.GroupBoxDiag.Controls.Add(Me.NumericUpDownTestSets)
+        Me.GroupBoxDiag.Controls.Add(Me.LabelTestWrap)
+        Me.GroupBoxDiag.Controls.Add(Me.LabelTestSets)
+        Me.GroupBoxDiag.Controls.Add(Me.NumericUpDownTestWrap)
+        Me.GroupBoxDiag.Controls.Add(Me.ButtonDiagTest)
+        resources.ApplyResources(Me.GroupBoxDiag, "GroupBoxDiag")
+        Me.GroupBoxDiag.Name = "GroupBoxDiag"
+        Me.GroupBoxDiag.TabStop = False
+        '
+        'LabelTestSpeed
+        '
+        resources.ApplyResources(Me.LabelTestSpeed, "LabelTestSpeed")
+        Me.LabelTestSpeed.Name = "LabelTestSpeed"
+        '
+        'LabelTestStartLen
+        '
+        resources.ApplyResources(Me.LabelTestStartLen, "LabelTestStartLen")
+        Me.LabelTestStartLen.Name = "LabelTestStartLen"
         '
         'ButtonEOT
         '
         resources.ApplyResources(Me.ButtonEOT, "ButtonEOT")
         Me.ButtonEOT.Name = "ButtonEOT"
         Me.ButtonEOT.UseVisualStyleBackColor = True
-        '
-        'ButtonBOT
-        '
-        resources.ApplyResources(Me.ButtonBOT, "ButtonBOT")
-        Me.ButtonBOT.Name = "ButtonBOT"
-        Me.ButtonBOT.UseVisualStyleBackColor = True
-        '
-        'NumericUpDownTestSets
-        '
-        resources.ApplyResources(Me.NumericUpDownTestSets, "NumericUpDownTestSets")
-        Me.NumericUpDownTestSets.Maximum = New Decimal(New Integer() {-1, 0, 0, 0})
-        Me.NumericUpDownTestSets.Name = "NumericUpDownTestSets"
-        Me.NumericUpDownTestSets.Value = New Decimal(New Integer() {250, 0, 0, 0})
-        '
-        'LabelTestSets
-        '
-        resources.ApplyResources(Me.LabelTestSets, "LabelTestSets")
-        Me.LabelTestSets.Name = "LabelTestSets"
-        '
-        'ButtonDiagTest
-        '
-        resources.ApplyResources(Me.ButtonDiagTest, "ButtonDiagTest")
-        Me.ButtonDiagTest.Name = "ButtonDiagTest"
-        Me.ButtonDiagTest.UseVisualStyleBackColor = True
-        '
-        'NumericUpDownTestWrap
-        '
-        resources.ApplyResources(Me.NumericUpDownTestWrap, "NumericUpDownTestWrap")
-        Me.NumericUpDownTestWrap.Maximum = New Decimal(New Integer() {-1, 0, 0, 0})
-        Me.NumericUpDownTestWrap.Name = "NumericUpDownTestWrap"
-        Me.NumericUpDownTestWrap.Value = New Decimal(New Integer() {1, 0, 0, 0})
-        '
-        'LabelTestWrap
-        '
-        resources.ApplyResources(Me.LabelTestWrap, "LabelTestWrap")
-        Me.LabelTestWrap.Name = "LabelTestWrap"
-        '
-        'NumericUpDownTestStartLen
-        '
-        resources.ApplyResources(Me.NumericUpDownTestStartLen, "NumericUpDownTestStartLen")
-        Me.NumericUpDownTestStartLen.Maximum = New Decimal(New Integer() {-1, 0, 0, 0})
-        Me.NumericUpDownTestStartLen.Name = "NumericUpDownTestStartLen"
-        Me.NumericUpDownTestStartLen.Value = New Decimal(New Integer() {832584, 0, 0, 0})
         '
         'NumericUpDownTestSpeed
         '
@@ -972,41 +951,85 @@ Partial Class LTFSConfigurator
         Me.NumericUpDownTestSpeed.Name = "NumericUpDownTestSpeed"
         Me.NumericUpDownTestSpeed.Value = New Decimal(New Integer() {7120, 0, 0, 0})
         '
-        'LabelTestStartLen
+        'ButtonBOT
         '
-        resources.ApplyResources(Me.LabelTestStartLen, "LabelTestStartLen")
-        Me.LabelTestStartLen.Name = "LabelTestStartLen"
+        resources.ApplyResources(Me.ButtonBOT, "ButtonBOT")
+        Me.ButtonBOT.Name = "ButtonBOT"
+        Me.ButtonBOT.UseVisualStyleBackColor = True
         '
-        'LabelTestSpeed
+        'NumericUpDownTestStartLen
         '
-        resources.ApplyResources(Me.LabelTestSpeed, "LabelTestSpeed")
-        Me.LabelTestSpeed.Name = "LabelTestSpeed"
+        resources.ApplyResources(Me.NumericUpDownTestStartLen, "NumericUpDownTestStartLen")
+        Me.NumericUpDownTestStartLen.Maximum = New Decimal(New Integer() {-1, 0, 0, 0})
+        Me.NumericUpDownTestStartLen.Name = "NumericUpDownTestStartLen"
+        Me.NumericUpDownTestStartLen.Value = New Decimal(New Integer() {832584, 0, 0, 0})
         '
-        'ButtonRDErrRateLog
+        'NumericUpDownTestSets
         '
-        resources.ApplyResources(Me.ButtonRDErrRateLog, "ButtonRDErrRateLog")
-        Me.ButtonRDErrRateLog.Name = "ButtonRDErrRateLog"
-        Me.ButtonRDErrRateLog.UseVisualStyleBackColor = True
+        resources.ApplyResources(Me.NumericUpDownTestSets, "NumericUpDownTestSets")
+        Me.NumericUpDownTestSets.Maximum = New Decimal(New Integer() {-1, 0, 0, 0})
+        Me.NumericUpDownTestSets.Name = "NumericUpDownTestSets"
+        Me.NumericUpDownTestSets.Value = New Decimal(New Integer() {250, 0, 0, 0})
         '
-        'ButtonTest
+        'LabelTestWrap
         '
-        resources.ApplyResources(Me.ButtonTest, "ButtonTest")
-        Me.ButtonTest.Name = "ButtonTest"
-        Me.ButtonTest.UseVisualStyleBackColor = True
+        resources.ApplyResources(Me.LabelTestWrap, "LabelTestWrap")
+        Me.LabelTestWrap.Name = "LabelTestWrap"
         '
-        'RadioButtonTest2
+        'LabelTestSets
         '
-        resources.ApplyResources(Me.RadioButtonTest2, "RadioButtonTest2")
-        Me.RadioButtonTest2.Name = "RadioButtonTest2"
-        Me.RadioButtonTest2.UseVisualStyleBackColor = True
+        resources.ApplyResources(Me.LabelTestSets, "LabelTestSets")
+        Me.LabelTestSets.Name = "LabelTestSets"
         '
-        'RadioButtonTest1
+        'NumericUpDownTestWrap
         '
-        resources.ApplyResources(Me.RadioButtonTest1, "RadioButtonTest1")
-        Me.RadioButtonTest1.Checked = True
-        Me.RadioButtonTest1.Name = "RadioButtonTest1"
-        Me.RadioButtonTest1.TabStop = True
-        Me.RadioButtonTest1.UseVisualStyleBackColor = True
+        resources.ApplyResources(Me.NumericUpDownTestWrap, "NumericUpDownTestWrap")
+        Me.NumericUpDownTestWrap.Maximum = New Decimal(New Integer() {-1, 0, 0, 0})
+        Me.NumericUpDownTestWrap.Name = "NumericUpDownTestWrap"
+        Me.NumericUpDownTestWrap.Value = New Decimal(New Integer() {1, 0, 0, 0})
+        '
+        'ButtonDiagTest
+        '
+        resources.ApplyResources(Me.ButtonDiagTest, "ButtonDiagTest")
+        Me.ButtonDiagTest.Name = "ButtonDiagTest"
+        Me.ButtonDiagTest.UseVisualStyleBackColor = True
+        '
+        'GroupBoxRWTest
+        '
+        Me.GroupBoxRWTest.Controls.Add(Me.LabelTestBlocksize)
+        Me.GroupBoxRWTest.Controls.Add(Me.ButtonVerify)
+        Me.GroupBoxRWTest.Controls.Add(Me.NumericUpDownTestBlkSize)
+        Me.GroupBoxRWTest.Controls.Add(Me.LabelTestBlockCount)
+        Me.GroupBoxRWTest.Controls.Add(Me.NumericUpDownTestBlkNum)
+        Me.GroupBoxRWTest.Controls.Add(Me.RadioButtonTest1)
+        Me.GroupBoxRWTest.Controls.Add(Me.RadioButtonTest2)
+        Me.GroupBoxRWTest.Controls.Add(Me.ButtonTest)
+        resources.ApplyResources(Me.GroupBoxRWTest, "GroupBoxRWTest")
+        Me.GroupBoxRWTest.Name = "GroupBoxRWTest"
+        Me.GroupBoxRWTest.TabStop = False
+        '
+        'LabelTestBlocksize
+        '
+        resources.ApplyResources(Me.LabelTestBlocksize, "LabelTestBlocksize")
+        Me.LabelTestBlocksize.Name = "LabelTestBlocksize"
+        '
+        'ButtonVerify
+        '
+        resources.ApplyResources(Me.ButtonVerify, "ButtonVerify")
+        Me.ButtonVerify.Name = "ButtonVerify"
+        Me.ButtonVerify.UseVisualStyleBackColor = True
+        '
+        'NumericUpDownTestBlkSize
+        '
+        resources.ApplyResources(Me.NumericUpDownTestBlkSize, "NumericUpDownTestBlkSize")
+        Me.NumericUpDownTestBlkSize.Maximum = New Decimal(New Integer() {2097152, 0, 0, 0})
+        Me.NumericUpDownTestBlkSize.Name = "NumericUpDownTestBlkSize"
+        Me.NumericUpDownTestBlkSize.Value = New Decimal(New Integer() {524288, 0, 0, 0})
+        '
+        'LabelTestBlockCount
+        '
+        resources.ApplyResources(Me.LabelTestBlockCount, "LabelTestBlockCount")
+        Me.LabelTestBlockCount.Name = "LabelTestBlockCount"
         '
         'NumericUpDownTestBlkNum
         '
@@ -1016,25 +1039,35 @@ Partial Class LTFSConfigurator
         Me.NumericUpDownTestBlkNum.Name = "NumericUpDownTestBlkNum"
         Me.NumericUpDownTestBlkNum.Value = New Decimal(New Integer() {1024, 0, 0, 0})
         '
-        'LabelTestBlockCount
+        'RadioButtonTest1
         '
-        resources.ApplyResources(Me.LabelTestBlockCount, "LabelTestBlockCount")
-        Me.LabelTestBlockCount.Name = "LabelTestBlockCount"
+        resources.ApplyResources(Me.RadioButtonTest1, "RadioButtonTest1")
+        Me.RadioButtonTest1.Checked = True
+        Me.RadioButtonTest1.Name = "RadioButtonTest1"
+        Me.RadioButtonTest1.TabStop = True
+        Me.RadioButtonTest1.UseVisualStyleBackColor = True
         '
-        'NumericUpDownTestBlkSize
+        'RadioButtonTest2
         '
-        resources.ApplyResources(Me.NumericUpDownTestBlkSize, "NumericUpDownTestBlkSize")
-        Me.NumericUpDownTestBlkSize.Maximum = New Decimal(New Integer() {2097152, 0, 0, 0})
-        Me.NumericUpDownTestBlkSize.Name = "NumericUpDownTestBlkSize"
-        Me.NumericUpDownTestBlkSize.Value = New Decimal(New Integer() {524288, 0, 0, 0})
+        resources.ApplyResources(Me.RadioButtonTest2, "RadioButtonTest2")
+        Me.RadioButtonTest2.Name = "RadioButtonTest2"
+        Me.RadioButtonTest2.UseVisualStyleBackColor = True
         '
-        'LabelTestBlocksize
+        'ButtonTest
         '
-        resources.ApplyResources(Me.LabelTestBlocksize, "LabelTestBlocksize")
-        Me.LabelTestBlocksize.Name = "LabelTestBlocksize"
+        resources.ApplyResources(Me.ButtonTest, "ButtonTest")
+        Me.ButtonTest.Name = "ButtonTest"
+        Me.ButtonTest.UseVisualStyleBackColor = True
+        '
+        'ButtonRDErrRateLog
+        '
+        resources.ApplyResources(Me.ButtonRDErrRateLog, "ButtonRDErrRateLog")
+        Me.ButtonRDErrRateLog.Name = "ButtonRDErrRateLog"
+        Me.ButtonRDErrRateLog.UseVisualStyleBackColor = True
         '
         'TabPageZBC
         '
+        Me.TabPageZBC.Controls.Add(Me.ButtonResetAllZones)
         Me.TabPageZBC.Controls.Add(Me.ButtonRestoreLBA)
         Me.TabPageZBC.Controls.Add(Me.ButtonDumpLBA)
         Me.TabPageZBC.Controls.Add(Me.Label1)
@@ -1271,36 +1304,11 @@ Partial Class LTFSConfigurator
         '
         Me.OpenFileDialog1.FileName = "OpenFileDialog1"
         '
-        'GroupBoxRWTest
+        'ButtonResetAllZones
         '
-        Me.GroupBoxRWTest.Controls.Add(Me.LabelTestBlocksize)
-        Me.GroupBoxRWTest.Controls.Add(Me.ButtonVerify)
-        Me.GroupBoxRWTest.Controls.Add(Me.NumericUpDownTestBlkSize)
-        Me.GroupBoxRWTest.Controls.Add(Me.LabelTestBlockCount)
-        Me.GroupBoxRWTest.Controls.Add(Me.NumericUpDownTestBlkNum)
-        Me.GroupBoxRWTest.Controls.Add(Me.RadioButtonTest1)
-        Me.GroupBoxRWTest.Controls.Add(Me.RadioButtonTest2)
-        Me.GroupBoxRWTest.Controls.Add(Me.ButtonTest)
-        resources.ApplyResources(Me.GroupBoxRWTest, "GroupBoxRWTest")
-        Me.GroupBoxRWTest.Name = "GroupBoxRWTest"
-        Me.GroupBoxRWTest.TabStop = False
-        '
-        'GroupBoxDiag
-        '
-        Me.GroupBoxDiag.Controls.Add(Me.LabelTestSpeed)
-        Me.GroupBoxDiag.Controls.Add(Me.LabelTestStartLen)
-        Me.GroupBoxDiag.Controls.Add(Me.ButtonEOT)
-        Me.GroupBoxDiag.Controls.Add(Me.NumericUpDownTestSpeed)
-        Me.GroupBoxDiag.Controls.Add(Me.ButtonBOT)
-        Me.GroupBoxDiag.Controls.Add(Me.NumericUpDownTestStartLen)
-        Me.GroupBoxDiag.Controls.Add(Me.NumericUpDownTestSets)
-        Me.GroupBoxDiag.Controls.Add(Me.LabelTestWrap)
-        Me.GroupBoxDiag.Controls.Add(Me.LabelTestSets)
-        Me.GroupBoxDiag.Controls.Add(Me.NumericUpDownTestWrap)
-        Me.GroupBoxDiag.Controls.Add(Me.ButtonDiagTest)
-        resources.ApplyResources(Me.GroupBoxDiag, "GroupBoxDiag")
-        Me.GroupBoxDiag.Name = "GroupBoxDiag"
-        Me.GroupBoxDiag.TabStop = False
+        resources.ApplyResources(Me.ButtonResetAllZones, "ButtonResetAllZones")
+        Me.ButtonResetAllZones.Name = "ButtonResetAllZones"
+        Me.ButtonResetAllZones.UseVisualStyleBackColor = True
         '
         'LTFSConfigurator
         '
@@ -1337,22 +1345,22 @@ Partial Class LTFSConfigurator
         Me.TabPageLog.ResumeLayout(False)
         Me.TabPageLog.PerformLayout()
         Me.TabPageTest.ResumeLayout(False)
+        Me.GroupBoxDiag.ResumeLayout(False)
+        Me.GroupBoxDiag.PerformLayout()
+        CType(Me.NumericUpDownTestSpeed, System.ComponentModel.ISupportInitialize).EndInit()
+        CType(Me.NumericUpDownTestStartLen, System.ComponentModel.ISupportInitialize).EndInit()
         CType(Me.NumericUpDownTestSets, System.ComponentModel.ISupportInitialize).EndInit()
         CType(Me.NumericUpDownTestWrap, System.ComponentModel.ISupportInitialize).EndInit()
-        CType(Me.NumericUpDownTestStartLen, System.ComponentModel.ISupportInitialize).EndInit()
-        CType(Me.NumericUpDownTestSpeed, System.ComponentModel.ISupportInitialize).EndInit()
-        CType(Me.NumericUpDownTestBlkNum, System.ComponentModel.ISupportInitialize).EndInit()
+        Me.GroupBoxRWTest.ResumeLayout(False)
+        Me.GroupBoxRWTest.PerformLayout()
         CType(Me.NumericUpDownTestBlkSize, System.ComponentModel.ISupportInitialize).EndInit()
+        CType(Me.NumericUpDownTestBlkNum, System.ComponentModel.ISupportInitialize).EndInit()
         Me.TabPageZBC.ResumeLayout(False)
         Me.TabPageZBC.PerformLayout()
         CType(Me.NumericUpDownWriteLBACount, System.ComponentModel.ISupportInitialize).EndInit()
         CType(Me.NumericUpDownSectorSize, System.ComponentModel.ISupportInitialize).EndInit()
         CType(Me.NumericUpDownLBA, System.ComponentModel.ISupportInitialize).EndInit()
         Me.ContextMenuStripSend.ResumeLayout(False)
-        Me.GroupBoxRWTest.ResumeLayout(False)
-        Me.GroupBoxRWTest.PerformLayout()
-        Me.GroupBoxDiag.ResumeLayout(False)
-        Me.GroupBoxDiag.PerformLayout()
         Me.ResumeLayout(False)
 
     End Sub
@@ -1527,4 +1535,5 @@ Partial Class LTFSConfigurator
     Friend WithEvents ButtonVerify As Button
     Friend WithEvents GroupBoxDiag As GroupBox
     Friend WithEvents GroupBoxRWTest As GroupBox
+    Friend WithEvents ButtonResetAllZones As Button
 End Class

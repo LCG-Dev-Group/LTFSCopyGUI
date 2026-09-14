@@ -1602,303 +1602,6 @@
   <data name="&gt;&gt;TabPageLog.ZOrder" xml:space="preserve">
     <value>3</value>
   </data>
-  <data name="LabelTestSpeed.AutoSize" type="System.Boolean, mscorlib">
-    <value>True</value>
-  </data>
-  <data name="LabelTestSpeed.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="LabelTestSpeed.Location" type="System.Drawing.Point, System.Drawing">
-    <value>6, 17</value>
-  </data>
-  <data name="LabelTestSpeed.Size" type="System.Drawing.Size, System.Drawing">
-    <value>77, 12</value>
-  </data>
-  <data name="LabelTestSpeed.TabIndex" type="System.Int32, mscorlib">
-    <value>8</value>
-  </data>
-  <data name="LabelTestSpeed.Text" xml:space="preserve">
-    <value>Speed (mm/s)</value>
-  </data>
-  <data name="&gt;&gt;LabelTestSpeed.Name" xml:space="preserve">
-    <value>LabelTestSpeed</value>
-  </data>
-  <data name="&gt;&gt;LabelTestSpeed.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;LabelTestSpeed.Parent" xml:space="preserve">
-    <value>GroupBoxDiag</value>
-  </data>
-  <data name="&gt;&gt;LabelTestSpeed.ZOrder" xml:space="preserve">
-    <value>0</value>
-  </data>
-  <data name="LabelTestStartLen.AutoSize" type="System.Boolean, mscorlib">
-    <value>True</value>
-  </data>
-  <data name="LabelTestStartLen.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="LabelTestStartLen.Location" type="System.Drawing.Point, System.Drawing">
-    <value>6, 45</value>
-  </data>
-  <data name="LabelTestStartLen.Size" type="System.Drawing.Size, System.Drawing">
-    <value>83, 12</value>
-  </data>
-  <data name="LabelTestStartLen.TabIndex" type="System.Int32, mscorlib">
-    <value>9</value>
-  </data>
-  <data name="LabelTestStartLen.Text" xml:space="preserve">
-    <value>StartLen (mm)</value>
-  </data>
-  <data name="&gt;&gt;LabelTestStartLen.Name" xml:space="preserve">
-    <value>LabelTestStartLen</value>
-  </data>
-  <data name="&gt;&gt;LabelTestStartLen.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;LabelTestStartLen.Parent" xml:space="preserve">
-    <value>GroupBoxDiag</value>
-  </data>
-  <data name="&gt;&gt;LabelTestStartLen.ZOrder" xml:space="preserve">
-    <value>1</value>
-  </data>
-  <data name="ButtonEOT.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="ButtonEOT.Location" type="System.Drawing.Point, System.Drawing">
-    <value>348, 15</value>
-  </data>
-  <data name="ButtonEOT.Size" type="System.Drawing.Size, System.Drawing">
-    <value>48, 23</value>
-  </data>
-  <data name="ButtonEOT.TabIndex" type="System.Int32, mscorlib">
-    <value>18</value>
-  </data>
-  <data name="ButtonEOT.Text" xml:space="preserve">
-    <value>EOT</value>
-  </data>
-  <data name="&gt;&gt;ButtonEOT.Name" xml:space="preserve">
-    <value>ButtonEOT</value>
-  </data>
-  <data name="&gt;&gt;ButtonEOT.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonEOT.Parent" xml:space="preserve">
-    <value>GroupBoxDiag</value>
-  </data>
-  <data name="&gt;&gt;ButtonEOT.ZOrder" xml:space="preserve">
-    <value>2</value>
-  </data>
-  <data name="NumericUpDownTestSpeed.Location" type="System.Drawing.Point, System.Drawing">
-    <value>95, 15</value>
-  </data>
-  <data name="NumericUpDownTestSpeed.Size" type="System.Drawing.Size, System.Drawing">
-    <value>72, 21</value>
-  </data>
-  <data name="NumericUpDownTestSpeed.TabIndex" type="System.Int32, mscorlib">
-    <value>10</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestSpeed.Name" xml:space="preserve">
-    <value>NumericUpDownTestSpeed</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestSpeed.Type" xml:space="preserve">
-    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestSpeed.Parent" xml:space="preserve">
-    <value>GroupBoxDiag</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestSpeed.ZOrder" xml:space="preserve">
-    <value>3</value>
-  </data>
-  <data name="ButtonBOT.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="ButtonBOT.Location" type="System.Drawing.Point, System.Drawing">
-    <value>294, 15</value>
-  </data>
-  <data name="ButtonBOT.Size" type="System.Drawing.Size, System.Drawing">
-    <value>48, 23</value>
-  </data>
-  <data name="ButtonBOT.TabIndex" type="System.Int32, mscorlib">
-    <value>17</value>
-  </data>
-  <data name="ButtonBOT.Text" xml:space="preserve">
-    <value>BOT</value>
-  </data>
-  <data name="&gt;&gt;ButtonBOT.Name" xml:space="preserve">
-    <value>ButtonBOT</value>
-  </data>
-  <data name="&gt;&gt;ButtonBOT.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonBOT.Parent" xml:space="preserve">
-    <value>GroupBoxDiag</value>
-  </data>
-  <data name="&gt;&gt;ButtonBOT.ZOrder" xml:space="preserve">
-    <value>4</value>
-  </data>
-  <data name="NumericUpDownTestStartLen.Location" type="System.Drawing.Point, System.Drawing">
-    <value>95, 42</value>
-  </data>
-  <data name="NumericUpDownTestStartLen.Size" type="System.Drawing.Size, System.Drawing">
-    <value>72, 21</value>
-  </data>
-  <data name="NumericUpDownTestStartLen.TabIndex" type="System.Int32, mscorlib">
-    <value>11</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestStartLen.Name" xml:space="preserve">
-    <value>NumericUpDownTestStartLen</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestStartLen.Type" xml:space="preserve">
-    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestStartLen.Parent" xml:space="preserve">
-    <value>GroupBoxDiag</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestStartLen.ZOrder" xml:space="preserve">
-    <value>5</value>
-  </data>
-  <data name="NumericUpDownTestSets.Location" type="System.Drawing.Point, System.Drawing">
-    <value>208, 42</value>
-  </data>
-  <data name="NumericUpDownTestSets.Size" type="System.Drawing.Size, System.Drawing">
-    <value>80, 21</value>
-  </data>
-  <data name="NumericUpDownTestSets.TabIndex" type="System.Int32, mscorlib">
-    <value>16</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestSets.Name" xml:space="preserve">
-    <value>NumericUpDownTestSets</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestSets.Type" xml:space="preserve">
-    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestSets.Parent" xml:space="preserve">
-    <value>GroupBoxDiag</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestSets.ZOrder" xml:space="preserve">
-    <value>6</value>
-  </data>
-  <data name="LabelTestWrap.AutoSize" type="System.Boolean, mscorlib">
-    <value>True</value>
-  </data>
-  <data name="LabelTestWrap.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="LabelTestWrap.Location" type="System.Drawing.Point, System.Drawing">
-    <value>173, 17</value>
-  </data>
-  <data name="LabelTestWrap.Size" type="System.Drawing.Size, System.Drawing">
-    <value>29, 12</value>
-  </data>
-  <data name="LabelTestWrap.TabIndex" type="System.Int32, mscorlib">
-    <value>12</value>
-  </data>
-  <data name="LabelTestWrap.Text" xml:space="preserve">
-    <value>Wrap</value>
-  </data>
-  <data name="&gt;&gt;LabelTestWrap.Name" xml:space="preserve">
-    <value>LabelTestWrap</value>
-  </data>
-  <data name="&gt;&gt;LabelTestWrap.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;LabelTestWrap.Parent" xml:space="preserve">
-    <value>GroupBoxDiag</value>
-  </data>
-  <data name="&gt;&gt;LabelTestWrap.ZOrder" xml:space="preserve">
-    <value>7</value>
-  </data>
-  <data name="LabelTestSets.AutoSize" type="System.Boolean, mscorlib">
-    <value>True</value>
-  </data>
-  <data name="LabelTestSets.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="LabelTestSets.Location" type="System.Drawing.Point, System.Drawing">
-    <value>173, 45</value>
-  </data>
-  <data name="LabelTestSets.Size" type="System.Drawing.Size, System.Drawing">
-    <value>29, 12</value>
-  </data>
-  <data name="LabelTestSets.TabIndex" type="System.Int32, mscorlib">
-    <value>15</value>
-  </data>
-  <data name="LabelTestSets.Text" xml:space="preserve">
-    <value>Sets</value>
-  </data>
-  <data name="&gt;&gt;LabelTestSets.Name" xml:space="preserve">
-    <value>LabelTestSets</value>
-  </data>
-  <data name="&gt;&gt;LabelTestSets.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;LabelTestSets.Parent" xml:space="preserve">
-    <value>GroupBoxDiag</value>
-  </data>
-  <data name="&gt;&gt;LabelTestSets.ZOrder" xml:space="preserve">
-    <value>8</value>
-  </data>
-  <data name="NumericUpDownTestWrap.Location" type="System.Drawing.Point, System.Drawing">
-    <value>208, 15</value>
-  </data>
-  <data name="NumericUpDownTestWrap.Size" type="System.Drawing.Size, System.Drawing">
-    <value>80, 21</value>
-  </data>
-  <data name="NumericUpDownTestWrap.TabIndex" type="System.Int32, mscorlib">
-    <value>13</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestWrap.Name" xml:space="preserve">
-    <value>NumericUpDownTestWrap</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestWrap.Type" xml:space="preserve">
-    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestWrap.Parent" xml:space="preserve">
-    <value>GroupBoxDiag</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestWrap.ZOrder" xml:space="preserve">
-    <value>9</value>
-  </data>
-  <data name="ButtonDiagTest.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="ButtonDiagTest.Location" type="System.Drawing.Point, System.Drawing">
-    <value>294, 41</value>
-  </data>
-  <data name="ButtonDiagTest.Size" type="System.Drawing.Size, System.Drawing">
-    <value>115, 23</value>
-  </data>
-  <data name="ButtonDiagTest.TabIndex" type="System.Int32, mscorlib">
-    <value>14</value>
-  </data>
-  <data name="ButtonDiagTest.Text" xml:space="preserve">
-    <value>Diagnostic Write</value>
-  </data>
-  <data name="&gt;&gt;ButtonDiagTest.Name" xml:space="preserve">
-    <value>ButtonDiagTest</value>
-  </data>
-  <data name="&gt;&gt;ButtonDiagTest.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonDiagTest.Parent" xml:space="preserve">
-    <value>GroupBoxDiag</value>
-  </data>
-  <data name="&gt;&gt;ButtonDiagTest.ZOrder" xml:space="preserve">
-    <value>10</value>
-  </data>
-  <data name="GroupBoxDiag.Location" type="System.Drawing.Point, System.Drawing">
-    <value>363, 6</value>
-  </data>
-  <data name="GroupBoxDiag.Size" type="System.Drawing.Size, System.Drawing">
-    <value>419, 74</value>
-  </data>
-  <data name="GroupBoxDiag.TabIndex" type="System.Int32, mscorlib">
-    <value>21</value>
-  </data>
-  <data name="GroupBoxDiag.Text" xml:space="preserve">
-    <value>Drive Assessment Test - Diag Write</value>
-  </data>
   <data name="&gt;&gt;GroupBoxDiag.Name" xml:space="preserve">
     <value>GroupBoxDiag</value>
   </data>
@@ -1911,114 +1614,6 @@
   <data name="&gt;&gt;GroupBoxDiag.ZOrder" xml:space="preserve">
     <value>0</value>
   </data>
-  <data name="&gt;&gt;LabelTestBlocksize.Name" xml:space="preserve">
-    <value>LabelTestBlocksize</value>
-  </data>
-  <data name="&gt;&gt;LabelTestBlocksize.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;LabelTestBlocksize.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;LabelTestBlocksize.ZOrder" xml:space="preserve">
-    <value>0</value>
-  </data>
-  <data name="&gt;&gt;ButtonVerify.Name" xml:space="preserve">
-    <value>ButtonVerify</value>
-  </data>
-  <data name="&gt;&gt;ButtonVerify.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonVerify.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;ButtonVerify.ZOrder" xml:space="preserve">
-    <value>1</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkSize.Name" xml:space="preserve">
-    <value>NumericUpDownTestBlkSize</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkSize.Type" xml:space="preserve">
-    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkSize.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkSize.ZOrder" xml:space="preserve">
-    <value>2</value>
-  </data>
-  <data name="&gt;&gt;LabelTestBlockCount.Name" xml:space="preserve">
-    <value>LabelTestBlockCount</value>
-  </data>
-  <data name="&gt;&gt;LabelTestBlockCount.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;LabelTestBlockCount.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;LabelTestBlockCount.ZOrder" xml:space="preserve">
-    <value>3</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkNum.Name" xml:space="preserve">
-    <value>NumericUpDownTestBlkNum</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkNum.Type" xml:space="preserve">
-    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkNum.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkNum.ZOrder" xml:space="preserve">
-    <value>4</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest1.Name" xml:space="preserve">
-    <value>RadioButtonTest1</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest1.Type" xml:space="preserve">
-    <value>System.Windows.Forms.RadioButton, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest1.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest1.ZOrder" xml:space="preserve">
-    <value>5</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest2.Name" xml:space="preserve">
-    <value>RadioButtonTest2</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest2.Type" xml:space="preserve">
-    <value>System.Windows.Forms.RadioButton, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest2.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest2.ZOrder" xml:space="preserve">
-    <value>6</value>
-  </data>
-  <data name="&gt;&gt;ButtonTest.Name" xml:space="preserve">
-    <value>ButtonTest</value>
-  </data>
-  <data name="&gt;&gt;ButtonTest.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonTest.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;ButtonTest.ZOrder" xml:space="preserve">
-    <value>7</value>
-  </data>
-  <data name="GroupBoxRWTest.Location" type="System.Drawing.Point, System.Drawing">
-    <value>7, 6</value>
-  </data>
-  <data name="GroupBoxRWTest.Size" type="System.Drawing.Size, System.Drawing">
-    <value>350, 74</value>
-  </data>
-  <data name="GroupBoxRWTest.TabIndex" type="System.Int32, mscorlib">
-    <value>20</value>
-  </data>
-  <data name="GroupBoxRWTest.Text" xml:space="preserve">
-    <value>RW Test</value>
-  </data>
   <data name="&gt;&gt;GroupBoxRWTest.Name" xml:space="preserve">
     <value>GroupBoxRWTest</value>
   </data>
@@ -2030,24 +1625,6 @@
   </data>
   <data name="&gt;&gt;GroupBoxRWTest.ZOrder" xml:space="preserve">
     <value>1</value>
-  </data>
-  <data name="ButtonRDErrRateLog.Anchor" type="System.Windows.Forms.AnchorStyles, System.Windows.Forms">
-    <value>Bottom, Right</value>
-  </data>
-  <data name="ButtonRDErrRateLog.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="ButtonRDErrRateLog.Location" type="System.Drawing.Point, System.Drawing">
-    <value>1017, 59</value>
-  </data>
-  <data name="ButtonRDErrRateLog.Size" type="System.Drawing.Size, System.Drawing">
-    <value>107, 23</value>
-  </data>
-  <data name="ButtonRDErrRateLog.TabIndex" type="System.Int32, mscorlib">
-    <value>7</value>
-  </data>
-  <data name="ButtonRDErrRateLog.Text" xml:space="preserve">
-    <value>Error rate log</value>
   </data>
   <data name="&gt;&gt;ButtonRDErrRateLog.Name" xml:space="preserve">
     <value>ButtonRDErrRateLog</value>
@@ -2088,6 +1665,48 @@
   <data name="&gt;&gt;TabPageTest.ZOrder" xml:space="preserve">
     <value>4</value>
   </data>
+  <data name="ButtonResetAllZones.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonResetAllZones.Location" type="System.Drawing.Point, System.Drawing">
+    <value>280, 59</value>
+  </data>
+  <data name="ButtonResetAllZones.Size" type="System.Drawing.Size, System.Drawing">
+    <value>93, 23</value>
+  </data>
+  <data name="ButtonResetAllZones.TabIndex" type="System.Int32, mscorlib">
+    <value>61</value>
+  </data>
+  <data name="ButtonResetAllZones.Text" xml:space="preserve">
+    <value>ResetAllZones</value>
+  </data>
+  <data name="&gt;&gt;ButtonResetAllZones.Name" xml:space="preserve">
+    <value>ButtonResetAllZones</value>
+  </data>
+  <data name="&gt;&gt;ButtonResetAllZones.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;ButtonResetAllZones.Parent" xml:space="preserve">
+    <value>TabPageZBC</value>
+  </data>
+  <data name="&gt;&gt;ButtonResetAllZones.ZOrder" xml:space="preserve">
+    <value>0</value>
+  </data>
+  <data name="ButtonRestoreLBA.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonRestoreLBA.Location" type="System.Drawing.Point, System.Drawing">
+    <value>368, 31</value>
+  </data>
+  <data name="ButtonRestoreLBA.Size" type="System.Drawing.Size, System.Drawing">
+    <value>75, 23</value>
+  </data>
+  <data name="ButtonRestoreLBA.TabIndex" type="System.Int32, mscorlib">
+    <value>60</value>
+  </data>
+  <data name="ButtonRestoreLBA.Text" xml:space="preserve">
+    <value>Restore</value>
+  </data>
   <data name="&gt;&gt;ButtonRestoreLBA.Name" xml:space="preserve">
     <value>ButtonRestoreLBA</value>
   </data>
@@ -2098,7 +1717,22 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;ButtonRestoreLBA.ZOrder" xml:space="preserve">
-    <value>0</value>
+    <value>1</value>
+  </data>
+  <data name="ButtonDumpLBA.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonDumpLBA.Location" type="System.Drawing.Point, System.Drawing">
+    <value>287, 31</value>
+  </data>
+  <data name="ButtonDumpLBA.Size" type="System.Drawing.Size, System.Drawing">
+    <value>75, 23</value>
+  </data>
+  <data name="ButtonDumpLBA.TabIndex" type="System.Int32, mscorlib">
+    <value>59</value>
+  </data>
+  <data name="ButtonDumpLBA.Text" xml:space="preserve">
+    <value>Dump</value>
   </data>
   <data name="&gt;&gt;ButtonDumpLBA.Name" xml:space="preserve">
     <value>ButtonDumpLBA</value>
@@ -2110,7 +1744,25 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;ButtonDumpLBA.ZOrder" xml:space="preserve">
-    <value>1</value>
+    <value>2</value>
+  </data>
+  <data name="Label1.AutoSize" type="System.Boolean, mscorlib">
+    <value>True</value>
+  </data>
+  <data name="Label1.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="Label1.Location" type="System.Drawing.Point, System.Drawing">
+    <value>6, 35</value>
+  </data>
+  <data name="Label1.Size" type="System.Drawing.Size, System.Drawing">
+    <value>35, 12</value>
+  </data>
+  <data name="Label1.TabIndex" type="System.Int32, mscorlib">
+    <value>58</value>
+  </data>
+  <data name="Label1.Text" xml:space="preserve">
+    <value>Count</value>
   </data>
   <data name="&gt;&gt;Label1.Name" xml:space="preserve">
     <value>Label1</value>
@@ -2122,7 +1774,43 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;Label1.ZOrder" xml:space="preserve">
-    <value>2</value>
+    <value>3</value>
+  </data>
+  <data name="ComboBoxReportOptions.Items" xml:space="preserve">
+    <value>00h List all of the zones in the zoned block device.</value>
+  </data>
+  <data name="ComboBoxReportOptions.Items1" xml:space="preserve">
+    <value>01h List the zones with a Zone Condition of EMPTY</value>
+  </data>
+  <data name="ComboBoxReportOptions.Items2" xml:space="preserve">
+    <value>02h List the zones with a Zone Condition of IMPLICITLY OPENED.</value>
+  </data>
+  <data name="ComboBoxReportOptions.Items3" xml:space="preserve">
+    <value>03h List the zones with a Zone Condition of EXPLICITLY OPENED.</value>
+  </data>
+  <data name="ComboBoxReportOptions.Items4" xml:space="preserve">
+    <value>04h List the zones with a Zone Condition of CLOSED.</value>
+  </data>
+  <data name="ComboBoxReportOptions.Items5" xml:space="preserve">
+    <value>05h List the zones with a Zone Condition of FULL.</value>
+  </data>
+  <data name="ComboBoxReportOptions.Items6" xml:space="preserve">
+    <value>10h List of the zones with RWP Recommended set to true.</value>
+  </data>
+  <data name="ComboBoxReportOptions.Items7" xml:space="preserve">
+    <value>3Fh List of the zones with a Zone Condition of NOT WRITE POINTER.</value>
+  </data>
+  <data name="ComboBoxReportOptions.Location" type="System.Drawing.Point, System.Drawing">
+    <value>95, 61</value>
+  </data>
+  <data name="ComboBoxReportOptions.Size" type="System.Drawing.Size, System.Drawing">
+    <value>47, 20</value>
+  </data>
+  <data name="ComboBoxReportOptions.TabIndex" type="System.Int32, mscorlib">
+    <value>57</value>
+  </data>
+  <data name="ComboBoxReportOptions.Text" xml:space="preserve">
+    <value>00h List all of the zones in the zoned block device.</value>
   </data>
   <data name="&gt;&gt;ComboBoxReportOptions.Name" xml:space="preserve">
     <value>ComboBoxReportOptions</value>
@@ -2134,7 +1822,16 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;ComboBoxReportOptions.ZOrder" xml:space="preserve">
-    <value>3</value>
+    <value>4</value>
+  </data>
+  <data name="NumericUpDownWriteLBACount.Location" type="System.Drawing.Point, System.Drawing">
+    <value>47, 33</value>
+  </data>
+  <data name="NumericUpDownWriteLBACount.Size" type="System.Drawing.Size, System.Drawing">
+    <value>128, 21</value>
+  </data>
+  <data name="NumericUpDownWriteLBACount.TabIndex" type="System.Int32, mscorlib">
+    <value>56</value>
   </data>
   <data name="&gt;&gt;NumericUpDownWriteLBACount.Name" xml:space="preserve">
     <value>NumericUpDownWriteLBACount</value>
@@ -2146,7 +1843,22 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;NumericUpDownWriteLBACount.ZOrder" xml:space="preserve">
-    <value>4</value>
+    <value>5</value>
+  </data>
+  <data name="ButtonWriteRandom.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonWriteRandom.Location" type="System.Drawing.Point, System.Drawing">
+    <value>181, 31</value>
+  </data>
+  <data name="ButtonWriteRandom.Size" type="System.Drawing.Size, System.Drawing">
+    <value>100, 23</value>
+  </data>
+  <data name="ButtonWriteRandom.TabIndex" type="System.Int32, mscorlib">
+    <value>55</value>
+  </data>
+  <data name="ButtonWriteRandom.Text" xml:space="preserve">
+    <value>Write(Random)</value>
   </data>
   <data name="&gt;&gt;ButtonWriteRandom.Name" xml:space="preserve">
     <value>ButtonWriteRandom</value>
@@ -2158,7 +1870,22 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;ButtonWriteRandom.ZOrder" xml:space="preserve">
-    <value>5</value>
+    <value>6</value>
+  </data>
+  <data name="ButtonReportZone.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonReportZone.Location" type="System.Drawing.Point, System.Drawing">
+    <value>323, 6</value>
+  </data>
+  <data name="ButtonReportZone.Size" type="System.Drawing.Size, System.Drawing">
+    <value>81, 23</value>
+  </data>
+  <data name="ButtonReportZone.TabIndex" type="System.Int32, mscorlib">
+    <value>54</value>
+  </data>
+  <data name="ButtonReportZone.Text" xml:space="preserve">
+    <value>ReportZone</value>
   </data>
   <data name="&gt;&gt;ButtonReportZone.Name" xml:space="preserve">
     <value>ButtonReportZone</value>
@@ -2170,7 +1897,16 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;ButtonReportZone.ZOrder" xml:space="preserve">
-    <value>6</value>
+    <value>7</value>
+  </data>
+  <data name="NumericUpDownSectorSize.Location" type="System.Drawing.Point, System.Drawing">
+    <value>181, 6</value>
+  </data>
+  <data name="NumericUpDownSectorSize.Size" type="System.Drawing.Size, System.Drawing">
+    <value>55, 21</value>
+  </data>
+  <data name="NumericUpDownSectorSize.TabIndex" type="System.Int32, mscorlib">
+    <value>53</value>
   </data>
   <data name="&gt;&gt;NumericUpDownSectorSize.Name" xml:space="preserve">
     <value>NumericUpDownSectorSize</value>
@@ -2182,7 +1918,22 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;NumericUpDownSectorSize.ZOrder" xml:space="preserve">
-    <value>7</value>
+    <value>8</value>
+  </data>
+  <data name="ButtonReadLBA.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonReadLBA.Location" type="System.Drawing.Point, System.Drawing">
+    <value>242, 6</value>
+  </data>
+  <data name="ButtonReadLBA.Size" type="System.Drawing.Size, System.Drawing">
+    <value>75, 23</value>
+  </data>
+  <data name="ButtonReadLBA.TabIndex" type="System.Int32, mscorlib">
+    <value>52</value>
+  </data>
+  <data name="ButtonReadLBA.Text" xml:space="preserve">
+    <value>Read</value>
   </data>
   <data name="&gt;&gt;ButtonReadLBA.Name" xml:space="preserve">
     <value>ButtonReadLBA</value>
@@ -2194,7 +1945,22 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;ButtonReadLBA.ZOrder" xml:space="preserve">
-    <value>8</value>
+    <value>9</value>
+  </data>
+  <data name="ButtonFinishZone.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonFinishZone.Location" type="System.Drawing.Point, System.Drawing">
+    <value>572, 6</value>
+  </data>
+  <data name="ButtonFinishZone.Size" type="System.Drawing.Size, System.Drawing">
+    <value>75, 23</value>
+  </data>
+  <data name="ButtonFinishZone.TabIndex" type="System.Int32, mscorlib">
+    <value>51</value>
+  </data>
+  <data name="ButtonFinishZone.Text" xml:space="preserve">
+    <value>FinishZone</value>
   </data>
   <data name="&gt;&gt;ButtonFinishZone.Name" xml:space="preserve">
     <value>ButtonFinishZone</value>
@@ -2206,7 +1972,22 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;ButtonFinishZone.ZOrder" xml:space="preserve">
-    <value>9</value>
+    <value>10</value>
+  </data>
+  <data name="ButtonResetWritePointer.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonResetWritePointer.Location" type="System.Drawing.Point, System.Drawing">
+    <value>653, 6</value>
+  </data>
+  <data name="ButtonResetWritePointer.Size" type="System.Drawing.Size, System.Drawing">
+    <value>124, 23</value>
+  </data>
+  <data name="ButtonResetWritePointer.TabIndex" type="System.Int32, mscorlib">
+    <value>50</value>
+  </data>
+  <data name="ButtonResetWritePointer.Text" xml:space="preserve">
+    <value>ResetWritePointer</value>
   </data>
   <data name="&gt;&gt;ButtonResetWritePointer.Name" xml:space="preserve">
     <value>ButtonResetWritePointer</value>
@@ -2218,7 +1999,22 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;ButtonResetWritePointer.ZOrder" xml:space="preserve">
-    <value>10</value>
+    <value>11</value>
+  </data>
+  <data name="ButtonCloseZone.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonCloseZone.Location" type="System.Drawing.Point, System.Drawing">
+    <value>491, 6</value>
+  </data>
+  <data name="ButtonCloseZone.Size" type="System.Drawing.Size, System.Drawing">
+    <value>75, 23</value>
+  </data>
+  <data name="ButtonCloseZone.TabIndex" type="System.Int32, mscorlib">
+    <value>49</value>
+  </data>
+  <data name="ButtonCloseZone.Text" xml:space="preserve">
+    <value>CloseZone</value>
   </data>
   <data name="&gt;&gt;ButtonCloseZone.Name" xml:space="preserve">
     <value>ButtonCloseZone</value>
@@ -2230,7 +2026,19 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;ButtonCloseZone.ZOrder" xml:space="preserve">
-    <value>11</value>
+    <value>12</value>
+  </data>
+  <data name="ButtonOpenZone.Location" type="System.Drawing.Point, System.Drawing">
+    <value>410, 6</value>
+  </data>
+  <data name="ButtonOpenZone.Size" type="System.Drawing.Size, System.Drawing">
+    <value>75, 23</value>
+  </data>
+  <data name="ButtonOpenZone.TabIndex" type="System.Int32, mscorlib">
+    <value>48</value>
+  </data>
+  <data name="ButtonOpenZone.Text" xml:space="preserve">
+    <value>OpenZone</value>
   </data>
   <data name="&gt;&gt;ButtonOpenZone.Name" xml:space="preserve">
     <value>ButtonOpenZone</value>
@@ -2242,7 +2050,22 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;ButtonOpenZone.ZOrder" xml:space="preserve">
-    <value>12</value>
+    <value>13</value>
+  </data>
+  <data name="LabelLBA.AutoSize" type="System.Boolean, mscorlib">
+    <value>True</value>
+  </data>
+  <data name="LabelLBA.Location" type="System.Drawing.Point, System.Drawing">
+    <value>6, 8</value>
+  </data>
+  <data name="LabelLBA.Size" type="System.Drawing.Size, System.Drawing">
+    <value>23, 12</value>
+  </data>
+  <data name="LabelLBA.TabIndex" type="System.Int32, mscorlib">
+    <value>47</value>
+  </data>
+  <data name="LabelLBA.Text" xml:space="preserve">
+    <value>LBA</value>
   </data>
   <data name="&gt;&gt;LabelLBA.Name" xml:space="preserve">
     <value>LabelLBA</value>
@@ -2254,7 +2077,16 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;LabelLBA.ZOrder" xml:space="preserve">
-    <value>13</value>
+    <value>14</value>
+  </data>
+  <data name="NumericUpDownLBA.Location" type="System.Drawing.Point, System.Drawing">
+    <value>48, 6</value>
+  </data>
+  <data name="NumericUpDownLBA.Size" type="System.Drawing.Size, System.Drawing">
+    <value>127, 21</value>
+  </data>
+  <data name="NumericUpDownLBA.TabIndex" type="System.Int32, mscorlib">
+    <value>46</value>
   </data>
   <data name="&gt;&gt;NumericUpDownLBA.Name" xml:space="preserve">
     <value>NumericUpDownLBA</value>
@@ -2266,7 +2098,22 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;NumericUpDownLBA.ZOrder" xml:space="preserve">
-    <value>14</value>
+    <value>15</value>
+  </data>
+  <data name="ButtonCloseAllZones.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonCloseAllZones.Location" type="System.Drawing.Point, System.Drawing">
+    <value>181, 59</value>
+  </data>
+  <data name="ButtonCloseAllZones.Size" type="System.Drawing.Size, System.Drawing">
+    <value>93, 23</value>
+  </data>
+  <data name="ButtonCloseAllZones.TabIndex" type="System.Int32, mscorlib">
+    <value>1</value>
+  </data>
+  <data name="ButtonCloseAllZones.Text" xml:space="preserve">
+    <value>CloseAllZones</value>
   </data>
   <data name="&gt;&gt;ButtonCloseAllZones.Name" xml:space="preserve">
     <value>ButtonCloseAllZones</value>
@@ -2278,7 +2125,19 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;ButtonCloseAllZones.ZOrder" xml:space="preserve">
-    <value>15</value>
+    <value>16</value>
+  </data>
+  <data name="ButtonReportZones.Location" type="System.Drawing.Point, System.Drawing">
+    <value>6, 59</value>
+  </data>
+  <data name="ButtonReportZones.Size" type="System.Drawing.Size, System.Drawing">
+    <value>87, 23</value>
+  </data>
+  <data name="ButtonReportZones.TabIndex" type="System.Int32, mscorlib">
+    <value>0</value>
+  </data>
+  <data name="ButtonReportZones.Text" xml:space="preserve">
+    <value>ReportZones</value>
   </data>
   <data name="&gt;&gt;ButtonReportZones.Name" xml:space="preserve">
     <value>ButtonReportZones</value>
@@ -2290,7 +2149,7 @@
     <value>TabPageZBC</value>
   </data>
   <data name="&gt;&gt;ButtonReportZones.ZOrder" xml:space="preserve">
-    <value>16</value>
+    <value>17</value>
   </data>
   <data name="TabPageZBC.Location" type="System.Drawing.Point, System.Drawing">
     <value>4, 22</value>
@@ -4365,6 +4224,594 @@
   <data name="&gt;&gt;ButtonResetLogPage.ZOrder" xml:space="preserve">
     <value>6</value>
   </data>
+  <data name="&gt;&gt;LabelTestSpeed.Name" xml:space="preserve">
+    <value>LabelTestSpeed</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSpeed.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSpeed.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSpeed.ZOrder" xml:space="preserve">
+    <value>0</value>
+  </data>
+  <data name="&gt;&gt;LabelTestStartLen.Name" xml:space="preserve">
+    <value>LabelTestStartLen</value>
+  </data>
+  <data name="&gt;&gt;LabelTestStartLen.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;LabelTestStartLen.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;LabelTestStartLen.ZOrder" xml:space="preserve">
+    <value>1</value>
+  </data>
+  <data name="&gt;&gt;ButtonEOT.Name" xml:space="preserve">
+    <value>ButtonEOT</value>
+  </data>
+  <data name="&gt;&gt;ButtonEOT.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;ButtonEOT.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;ButtonEOT.ZOrder" xml:space="preserve">
+    <value>2</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSpeed.Name" xml:space="preserve">
+    <value>NumericUpDownTestSpeed</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSpeed.Type" xml:space="preserve">
+    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSpeed.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSpeed.ZOrder" xml:space="preserve">
+    <value>3</value>
+  </data>
+  <data name="&gt;&gt;ButtonBOT.Name" xml:space="preserve">
+    <value>ButtonBOT</value>
+  </data>
+  <data name="&gt;&gt;ButtonBOT.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;ButtonBOT.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;ButtonBOT.ZOrder" xml:space="preserve">
+    <value>4</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestStartLen.Name" xml:space="preserve">
+    <value>NumericUpDownTestStartLen</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestStartLen.Type" xml:space="preserve">
+    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestStartLen.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestStartLen.ZOrder" xml:space="preserve">
+    <value>5</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSets.Name" xml:space="preserve">
+    <value>NumericUpDownTestSets</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSets.Type" xml:space="preserve">
+    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSets.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSets.ZOrder" xml:space="preserve">
+    <value>6</value>
+  </data>
+  <data name="&gt;&gt;LabelTestWrap.Name" xml:space="preserve">
+    <value>LabelTestWrap</value>
+  </data>
+  <data name="&gt;&gt;LabelTestWrap.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;LabelTestWrap.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;LabelTestWrap.ZOrder" xml:space="preserve">
+    <value>7</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSets.Name" xml:space="preserve">
+    <value>LabelTestSets</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSets.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSets.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSets.ZOrder" xml:space="preserve">
+    <value>8</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestWrap.Name" xml:space="preserve">
+    <value>NumericUpDownTestWrap</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestWrap.Type" xml:space="preserve">
+    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestWrap.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestWrap.ZOrder" xml:space="preserve">
+    <value>9</value>
+  </data>
+  <data name="&gt;&gt;ButtonDiagTest.Name" xml:space="preserve">
+    <value>ButtonDiagTest</value>
+  </data>
+  <data name="&gt;&gt;ButtonDiagTest.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;ButtonDiagTest.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;ButtonDiagTest.ZOrder" xml:space="preserve">
+    <value>10</value>
+  </data>
+  <data name="GroupBoxDiag.Location" type="System.Drawing.Point, System.Drawing">
+    <value>363, 6</value>
+  </data>
+  <data name="GroupBoxDiag.Size" type="System.Drawing.Size, System.Drawing">
+    <value>419, 74</value>
+  </data>
+  <data name="GroupBoxDiag.TabIndex" type="System.Int32, mscorlib">
+    <value>21</value>
+  </data>
+  <data name="GroupBoxDiag.Text" xml:space="preserve">
+    <value>Drive Assessment Test - Diag Write</value>
+  </data>
+  <data name="&gt;&gt;GroupBoxDiag.Name" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;GroupBoxDiag.Type" xml:space="preserve">
+    <value>System.Windows.Forms.GroupBox, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;GroupBoxDiag.Parent" xml:space="preserve">
+    <value>TabPageTest</value>
+  </data>
+  <data name="&gt;&gt;GroupBoxDiag.ZOrder" xml:space="preserve">
+    <value>0</value>
+  </data>
+  <data name="LabelTestSpeed.AutoSize" type="System.Boolean, mscorlib">
+    <value>True</value>
+  </data>
+  <data name="LabelTestSpeed.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="LabelTestSpeed.Location" type="System.Drawing.Point, System.Drawing">
+    <value>6, 17</value>
+  </data>
+  <data name="LabelTestSpeed.Size" type="System.Drawing.Size, System.Drawing">
+    <value>77, 12</value>
+  </data>
+  <data name="LabelTestSpeed.TabIndex" type="System.Int32, mscorlib">
+    <value>8</value>
+  </data>
+  <data name="LabelTestSpeed.Text" xml:space="preserve">
+    <value>Speed (mm/s)</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSpeed.Name" xml:space="preserve">
+    <value>LabelTestSpeed</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSpeed.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSpeed.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSpeed.ZOrder" xml:space="preserve">
+    <value>0</value>
+  </data>
+  <data name="LabelTestStartLen.AutoSize" type="System.Boolean, mscorlib">
+    <value>True</value>
+  </data>
+  <data name="LabelTestStartLen.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="LabelTestStartLen.Location" type="System.Drawing.Point, System.Drawing">
+    <value>6, 45</value>
+  </data>
+  <data name="LabelTestStartLen.Size" type="System.Drawing.Size, System.Drawing">
+    <value>83, 12</value>
+  </data>
+  <data name="LabelTestStartLen.TabIndex" type="System.Int32, mscorlib">
+    <value>9</value>
+  </data>
+  <data name="LabelTestStartLen.Text" xml:space="preserve">
+    <value>StartLen (mm)</value>
+  </data>
+  <data name="&gt;&gt;LabelTestStartLen.Name" xml:space="preserve">
+    <value>LabelTestStartLen</value>
+  </data>
+  <data name="&gt;&gt;LabelTestStartLen.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;LabelTestStartLen.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;LabelTestStartLen.ZOrder" xml:space="preserve">
+    <value>1</value>
+  </data>
+  <data name="ButtonEOT.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonEOT.Location" type="System.Drawing.Point, System.Drawing">
+    <value>348, 15</value>
+  </data>
+  <data name="ButtonEOT.Size" type="System.Drawing.Size, System.Drawing">
+    <value>48, 23</value>
+  </data>
+  <data name="ButtonEOT.TabIndex" type="System.Int32, mscorlib">
+    <value>18</value>
+  </data>
+  <data name="ButtonEOT.Text" xml:space="preserve">
+    <value>EOT</value>
+  </data>
+  <data name="&gt;&gt;ButtonEOT.Name" xml:space="preserve">
+    <value>ButtonEOT</value>
+  </data>
+  <data name="&gt;&gt;ButtonEOT.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;ButtonEOT.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;ButtonEOT.ZOrder" xml:space="preserve">
+    <value>2</value>
+  </data>
+  <data name="NumericUpDownTestSpeed.Location" type="System.Drawing.Point, System.Drawing">
+    <value>95, 15</value>
+  </data>
+  <data name="NumericUpDownTestSpeed.Size" type="System.Drawing.Size, System.Drawing">
+    <value>72, 21</value>
+  </data>
+  <data name="NumericUpDownTestSpeed.TabIndex" type="System.Int32, mscorlib">
+    <value>10</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSpeed.Name" xml:space="preserve">
+    <value>NumericUpDownTestSpeed</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSpeed.Type" xml:space="preserve">
+    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSpeed.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSpeed.ZOrder" xml:space="preserve">
+    <value>3</value>
+  </data>
+  <data name="ButtonBOT.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonBOT.Location" type="System.Drawing.Point, System.Drawing">
+    <value>294, 15</value>
+  </data>
+  <data name="ButtonBOT.Size" type="System.Drawing.Size, System.Drawing">
+    <value>48, 23</value>
+  </data>
+  <data name="ButtonBOT.TabIndex" type="System.Int32, mscorlib">
+    <value>17</value>
+  </data>
+  <data name="ButtonBOT.Text" xml:space="preserve">
+    <value>BOT</value>
+  </data>
+  <data name="&gt;&gt;ButtonBOT.Name" xml:space="preserve">
+    <value>ButtonBOT</value>
+  </data>
+  <data name="&gt;&gt;ButtonBOT.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;ButtonBOT.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;ButtonBOT.ZOrder" xml:space="preserve">
+    <value>4</value>
+  </data>
+  <data name="NumericUpDownTestStartLen.Location" type="System.Drawing.Point, System.Drawing">
+    <value>95, 42</value>
+  </data>
+  <data name="NumericUpDownTestStartLen.Size" type="System.Drawing.Size, System.Drawing">
+    <value>72, 21</value>
+  </data>
+  <data name="NumericUpDownTestStartLen.TabIndex" type="System.Int32, mscorlib">
+    <value>11</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestStartLen.Name" xml:space="preserve">
+    <value>NumericUpDownTestStartLen</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestStartLen.Type" xml:space="preserve">
+    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestStartLen.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestStartLen.ZOrder" xml:space="preserve">
+    <value>5</value>
+  </data>
+  <data name="NumericUpDownTestSets.Location" type="System.Drawing.Point, System.Drawing">
+    <value>208, 42</value>
+  </data>
+  <data name="NumericUpDownTestSets.Size" type="System.Drawing.Size, System.Drawing">
+    <value>80, 21</value>
+  </data>
+  <data name="NumericUpDownTestSets.TabIndex" type="System.Int32, mscorlib">
+    <value>16</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSets.Name" xml:space="preserve">
+    <value>NumericUpDownTestSets</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSets.Type" xml:space="preserve">
+    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSets.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestSets.ZOrder" xml:space="preserve">
+    <value>6</value>
+  </data>
+  <data name="LabelTestWrap.AutoSize" type="System.Boolean, mscorlib">
+    <value>True</value>
+  </data>
+  <data name="LabelTestWrap.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="LabelTestWrap.Location" type="System.Drawing.Point, System.Drawing">
+    <value>173, 17</value>
+  </data>
+  <data name="LabelTestWrap.Size" type="System.Drawing.Size, System.Drawing">
+    <value>29, 12</value>
+  </data>
+  <data name="LabelTestWrap.TabIndex" type="System.Int32, mscorlib">
+    <value>12</value>
+  </data>
+  <data name="LabelTestWrap.Text" xml:space="preserve">
+    <value>Wrap</value>
+  </data>
+  <data name="&gt;&gt;LabelTestWrap.Name" xml:space="preserve">
+    <value>LabelTestWrap</value>
+  </data>
+  <data name="&gt;&gt;LabelTestWrap.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;LabelTestWrap.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;LabelTestWrap.ZOrder" xml:space="preserve">
+    <value>7</value>
+  </data>
+  <data name="LabelTestSets.AutoSize" type="System.Boolean, mscorlib">
+    <value>True</value>
+  </data>
+  <data name="LabelTestSets.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="LabelTestSets.Location" type="System.Drawing.Point, System.Drawing">
+    <value>173, 45</value>
+  </data>
+  <data name="LabelTestSets.Size" type="System.Drawing.Size, System.Drawing">
+    <value>29, 12</value>
+  </data>
+  <data name="LabelTestSets.TabIndex" type="System.Int32, mscorlib">
+    <value>15</value>
+  </data>
+  <data name="LabelTestSets.Text" xml:space="preserve">
+    <value>Sets</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSets.Name" xml:space="preserve">
+    <value>LabelTestSets</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSets.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSets.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;LabelTestSets.ZOrder" xml:space="preserve">
+    <value>8</value>
+  </data>
+  <data name="NumericUpDownTestWrap.Location" type="System.Drawing.Point, System.Drawing">
+    <value>208, 15</value>
+  </data>
+  <data name="NumericUpDownTestWrap.Size" type="System.Drawing.Size, System.Drawing">
+    <value>80, 21</value>
+  </data>
+  <data name="NumericUpDownTestWrap.TabIndex" type="System.Int32, mscorlib">
+    <value>13</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestWrap.Name" xml:space="preserve">
+    <value>NumericUpDownTestWrap</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestWrap.Type" xml:space="preserve">
+    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestWrap.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestWrap.ZOrder" xml:space="preserve">
+    <value>9</value>
+  </data>
+  <data name="ButtonDiagTest.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
+  </data>
+  <data name="ButtonDiagTest.Location" type="System.Drawing.Point, System.Drawing">
+    <value>294, 41</value>
+  </data>
+  <data name="ButtonDiagTest.Size" type="System.Drawing.Size, System.Drawing">
+    <value>115, 23</value>
+  </data>
+  <data name="ButtonDiagTest.TabIndex" type="System.Int32, mscorlib">
+    <value>14</value>
+  </data>
+  <data name="ButtonDiagTest.Text" xml:space="preserve">
+    <value>Diagnostic Write</value>
+  </data>
+  <data name="&gt;&gt;ButtonDiagTest.Name" xml:space="preserve">
+    <value>ButtonDiagTest</value>
+  </data>
+  <data name="&gt;&gt;ButtonDiagTest.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;ButtonDiagTest.Parent" xml:space="preserve">
+    <value>GroupBoxDiag</value>
+  </data>
+  <data name="&gt;&gt;ButtonDiagTest.ZOrder" xml:space="preserve">
+    <value>10</value>
+  </data>
+  <data name="&gt;&gt;LabelTestBlocksize.Name" xml:space="preserve">
+    <value>LabelTestBlocksize</value>
+  </data>
+  <data name="&gt;&gt;LabelTestBlocksize.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;LabelTestBlocksize.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
+  </data>
+  <data name="&gt;&gt;LabelTestBlocksize.ZOrder" xml:space="preserve">
+    <value>0</value>
+  </data>
+  <data name="&gt;&gt;ButtonVerify.Name" xml:space="preserve">
+    <value>ButtonVerify</value>
+  </data>
+  <data name="&gt;&gt;ButtonVerify.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;ButtonVerify.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
+  </data>
+  <data name="&gt;&gt;ButtonVerify.ZOrder" xml:space="preserve">
+    <value>1</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestBlkSize.Name" xml:space="preserve">
+    <value>NumericUpDownTestBlkSize</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestBlkSize.Type" xml:space="preserve">
+    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestBlkSize.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestBlkSize.ZOrder" xml:space="preserve">
+    <value>2</value>
+  </data>
+  <data name="&gt;&gt;LabelTestBlockCount.Name" xml:space="preserve">
+    <value>LabelTestBlockCount</value>
+  </data>
+  <data name="&gt;&gt;LabelTestBlockCount.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;LabelTestBlockCount.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
+  </data>
+  <data name="&gt;&gt;LabelTestBlockCount.ZOrder" xml:space="preserve">
+    <value>3</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestBlkNum.Name" xml:space="preserve">
+    <value>NumericUpDownTestBlkNum</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestBlkNum.Type" xml:space="preserve">
+    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestBlkNum.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
+  </data>
+  <data name="&gt;&gt;NumericUpDownTestBlkNum.ZOrder" xml:space="preserve">
+    <value>4</value>
+  </data>
+  <data name="&gt;&gt;RadioButtonTest1.Name" xml:space="preserve">
+    <value>RadioButtonTest1</value>
+  </data>
+  <data name="&gt;&gt;RadioButtonTest1.Type" xml:space="preserve">
+    <value>System.Windows.Forms.RadioButton, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;RadioButtonTest1.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
+  </data>
+  <data name="&gt;&gt;RadioButtonTest1.ZOrder" xml:space="preserve">
+    <value>5</value>
+  </data>
+  <data name="&gt;&gt;RadioButtonTest2.Name" xml:space="preserve">
+    <value>RadioButtonTest2</value>
+  </data>
+  <data name="&gt;&gt;RadioButtonTest2.Type" xml:space="preserve">
+    <value>System.Windows.Forms.RadioButton, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;RadioButtonTest2.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
+  </data>
+  <data name="&gt;&gt;RadioButtonTest2.ZOrder" xml:space="preserve">
+    <value>6</value>
+  </data>
+  <data name="&gt;&gt;ButtonTest.Name" xml:space="preserve">
+    <value>ButtonTest</value>
+  </data>
+  <data name="&gt;&gt;ButtonTest.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;ButtonTest.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
+  </data>
+  <data name="&gt;&gt;ButtonTest.ZOrder" xml:space="preserve">
+    <value>7</value>
+  </data>
+  <data name="GroupBoxRWTest.Location" type="System.Drawing.Point, System.Drawing">
+    <value>7, 6</value>
+  </data>
+  <data name="GroupBoxRWTest.Size" type="System.Drawing.Size, System.Drawing">
+    <value>350, 74</value>
+  </data>
+  <data name="GroupBoxRWTest.TabIndex" type="System.Int32, mscorlib">
+    <value>20</value>
+  </data>
+  <data name="GroupBoxRWTest.Text" xml:space="preserve">
+    <value>RW Test</value>
+  </data>
+  <data name="&gt;&gt;GroupBoxRWTest.Name" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
+  </data>
+  <data name="&gt;&gt;GroupBoxRWTest.Type" xml:space="preserve">
+    <value>System.Windows.Forms.GroupBox, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;GroupBoxRWTest.Parent" xml:space="preserve">
+    <value>TabPageTest</value>
+  </data>
+  <data name="&gt;&gt;GroupBoxRWTest.ZOrder" xml:space="preserve">
+    <value>1</value>
+  </data>
+  <data name="LabelTestBlocksize.AutoSize" type="System.Boolean, mscorlib">
+    <value>True</value>
+  </data>
+  <data name="LabelTestBlocksize.Location" type="System.Drawing.Point, System.Drawing">
+    <value>6, 17</value>
+  </data>
+  <data name="LabelTestBlocksize.Size" type="System.Drawing.Size, System.Drawing">
+    <value>59, 12</value>
+  </data>
+  <data name="LabelTestBlocksize.TabIndex" type="System.Int32, mscorlib">
+    <value>0</value>
+  </data>
+  <data name="LabelTestBlocksize.Text" xml:space="preserve">
+    <value>BlockSize</value>
+  </data>
+  <data name="&gt;&gt;LabelTestBlocksize.Name" xml:space="preserve">
+    <value>LabelTestBlocksize</value>
+  </data>
+  <data name="&gt;&gt;LabelTestBlocksize.Type" xml:space="preserve">
+    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;LabelTestBlocksize.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
+  </data>
+  <data name="&gt;&gt;LabelTestBlocksize.ZOrder" xml:space="preserve">
+    <value>0</value>
+  </data>
   <data name="ButtonVerify.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
     <value>NoControl</value>
   </data>
@@ -4392,107 +4839,26 @@
   <data name="&gt;&gt;ButtonVerify.ZOrder" xml:space="preserve">
     <value>1</value>
   </data>
-  <data name="ButtonTest.Location" type="System.Drawing.Point, System.Drawing">
-    <value>188, 39</value>
+  <data name="NumericUpDownTestBlkSize.Location" type="System.Drawing.Point, System.Drawing">
+    <value>81, 15</value>
   </data>
-  <data name="ButtonTest.Size" type="System.Drawing.Size, System.Drawing">
-    <value>75, 23</value>
-  </data>
-  <data name="ButtonTest.TabIndex" type="System.Int32, mscorlib">
-    <value>6</value>
-  </data>
-  <data name="ButtonTest.Text" xml:space="preserve">
-    <value>Write</value>
-  </data>
-  <data name="&gt;&gt;ButtonTest.Name" xml:space="preserve">
-    <value>ButtonTest</value>
-  </data>
-  <data name="&gt;&gt;ButtonTest.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonTest.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;ButtonTest.ZOrder" xml:space="preserve">
-    <value>7</value>
-  </data>
-  <data name="RadioButtonTest2.AutoSize" type="System.Boolean, mscorlib">
-    <value>True</value>
-  </data>
-  <data name="RadioButtonTest2.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="RadioButtonTest2.Location" type="System.Drawing.Point, System.Drawing">
-    <value>265, 17</value>
-  </data>
-  <data name="RadioButtonTest2.Size" type="System.Drawing.Size, System.Drawing">
-    <value>53, 16</value>
-  </data>
-  <data name="RadioButtonTest2.TabIndex" type="System.Int32, mscorlib">
-    <value>5</value>
-  </data>
-  <data name="RadioButtonTest2.Text" xml:space="preserve">
-    <value>Zeros</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest2.Name" xml:space="preserve">
-    <value>RadioButtonTest2</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest2.Type" xml:space="preserve">
-    <value>System.Windows.Forms.RadioButton, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest2.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest2.ZOrder" xml:space="preserve">
-    <value>6</value>
-  </data>
-  <data name="RadioButtonTest1.AutoSize" type="System.Boolean, mscorlib">
-    <value>True</value>
-  </data>
-  <data name="RadioButtonTest1.Location" type="System.Drawing.Point, System.Drawing">
-    <value>200, 17</value>
-  </data>
-  <data name="RadioButtonTest1.Size" type="System.Drawing.Size, System.Drawing">
-    <value>59, 16</value>
-  </data>
-  <data name="RadioButtonTest1.TabIndex" type="System.Int32, mscorlib">
-    <value>4</value>
-  </data>
-  <data name="RadioButtonTest1.Text" xml:space="preserve">
-    <value>Random</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest1.Name" xml:space="preserve">
-    <value>RadioButtonTest1</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest1.Type" xml:space="preserve">
-    <value>System.Windows.Forms.RadioButton, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest1.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;RadioButtonTest1.ZOrder" xml:space="preserve">
-    <value>5</value>
-  </data>
-  <data name="NumericUpDownTestBlkNum.Location" type="System.Drawing.Point, System.Drawing">
-    <value>81, 42</value>
-  </data>
-  <data name="NumericUpDownTestBlkNum.Size" type="System.Drawing.Size, System.Drawing">
+  <data name="NumericUpDownTestBlkSize.Size" type="System.Drawing.Size, System.Drawing">
     <value>101, 21</value>
   </data>
-  <data name="NumericUpDownTestBlkNum.TabIndex" type="System.Int32, mscorlib">
-    <value>3</value>
+  <data name="NumericUpDownTestBlkSize.TabIndex" type="System.Int32, mscorlib">
+    <value>1</value>
   </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkNum.Name" xml:space="preserve">
-    <value>NumericUpDownTestBlkNum</value>
+  <data name="&gt;&gt;NumericUpDownTestBlkSize.Name" xml:space="preserve">
+    <value>NumericUpDownTestBlkSize</value>
   </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkNum.Type" xml:space="preserve">
+  <data name="&gt;&gt;NumericUpDownTestBlkSize.Type" xml:space="preserve">
     <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkNum.Parent" xml:space="preserve">
+  <data name="&gt;&gt;NumericUpDownTestBlkSize.Parent" xml:space="preserve">
     <value>GroupBoxRWTest</value>
   </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkNum.ZOrder" xml:space="preserve">
-    <value>4</value>
+  <data name="&gt;&gt;NumericUpDownTestBlkSize.ZOrder" xml:space="preserve">
+    <value>2</value>
   </data>
   <data name="LabelTestBlockCount.AutoSize" type="System.Boolean, mscorlib">
     <value>True</value>
@@ -4524,512 +4890,137 @@
   <data name="&gt;&gt;LabelTestBlockCount.ZOrder" xml:space="preserve">
     <value>3</value>
   </data>
-  <data name="NumericUpDownTestBlkSize.Location" type="System.Drawing.Point, System.Drawing">
-    <value>81, 15</value>
+  <data name="NumericUpDownTestBlkNum.Location" type="System.Drawing.Point, System.Drawing">
+    <value>81, 42</value>
   </data>
-  <data name="NumericUpDownTestBlkSize.Size" type="System.Drawing.Size, System.Drawing">
+  <data name="NumericUpDownTestBlkNum.Size" type="System.Drawing.Size, System.Drawing">
     <value>101, 21</value>
   </data>
-  <data name="NumericUpDownTestBlkSize.TabIndex" type="System.Int32, mscorlib">
-    <value>1</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkSize.Name" xml:space="preserve">
-    <value>NumericUpDownTestBlkSize</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkSize.Type" xml:space="preserve">
-    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkSize.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownTestBlkSize.ZOrder" xml:space="preserve">
-    <value>2</value>
-  </data>
-  <data name="LabelTestBlocksize.AutoSize" type="System.Boolean, mscorlib">
-    <value>True</value>
-  </data>
-  <data name="LabelTestBlocksize.Location" type="System.Drawing.Point, System.Drawing">
-    <value>6, 17</value>
-  </data>
-  <data name="LabelTestBlocksize.Size" type="System.Drawing.Size, System.Drawing">
-    <value>59, 12</value>
-  </data>
-  <data name="LabelTestBlocksize.TabIndex" type="System.Int32, mscorlib">
-    <value>0</value>
-  </data>
-  <data name="LabelTestBlocksize.Text" xml:space="preserve">
-    <value>BlockSize</value>
-  </data>
-  <data name="&gt;&gt;LabelTestBlocksize.Name" xml:space="preserve">
-    <value>LabelTestBlocksize</value>
-  </data>
-  <data name="&gt;&gt;LabelTestBlocksize.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;LabelTestBlocksize.Parent" xml:space="preserve">
-    <value>GroupBoxRWTest</value>
-  </data>
-  <data name="&gt;&gt;LabelTestBlocksize.ZOrder" xml:space="preserve">
-    <value>0</value>
-  </data>
-  <data name="ButtonRestoreLBA.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="ButtonRestoreLBA.Location" type="System.Drawing.Point, System.Drawing">
-    <value>368, 31</value>
-  </data>
-  <data name="ButtonRestoreLBA.Size" type="System.Drawing.Size, System.Drawing">
-    <value>75, 23</value>
-  </data>
-  <data name="ButtonRestoreLBA.TabIndex" type="System.Int32, mscorlib">
-    <value>60</value>
-  </data>
-  <data name="ButtonRestoreLBA.Text" xml:space="preserve">
-    <value>Restore</value>
-  </data>
-  <data name="&gt;&gt;ButtonRestoreLBA.Name" xml:space="preserve">
-    <value>ButtonRestoreLBA</value>
-  </data>
-  <data name="&gt;&gt;ButtonRestoreLBA.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonRestoreLBA.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;ButtonRestoreLBA.ZOrder" xml:space="preserve">
-    <value>0</value>
-  </data>
-  <data name="ButtonDumpLBA.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="ButtonDumpLBA.Location" type="System.Drawing.Point, System.Drawing">
-    <value>287, 31</value>
-  </data>
-  <data name="ButtonDumpLBA.Size" type="System.Drawing.Size, System.Drawing">
-    <value>75, 23</value>
-  </data>
-  <data name="ButtonDumpLBA.TabIndex" type="System.Int32, mscorlib">
-    <value>59</value>
-  </data>
-  <data name="ButtonDumpLBA.Text" xml:space="preserve">
-    <value>Dump</value>
-  </data>
-  <data name="&gt;&gt;ButtonDumpLBA.Name" xml:space="preserve">
-    <value>ButtonDumpLBA</value>
-  </data>
-  <data name="&gt;&gt;ButtonDumpLBA.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonDumpLBA.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;ButtonDumpLBA.ZOrder" xml:space="preserve">
-    <value>1</value>
-  </data>
-  <data name="Label1.AutoSize" type="System.Boolean, mscorlib">
-    <value>True</value>
-  </data>
-  <data name="Label1.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="Label1.Location" type="System.Drawing.Point, System.Drawing">
-    <value>6, 35</value>
-  </data>
-  <data name="Label1.Size" type="System.Drawing.Size, System.Drawing">
-    <value>35, 12</value>
-  </data>
-  <data name="Label1.TabIndex" type="System.Int32, mscorlib">
-    <value>58</value>
-  </data>
-  <data name="Label1.Text" xml:space="preserve">
-    <value>Count</value>
-  </data>
-  <data name="&gt;&gt;Label1.Name" xml:space="preserve">
-    <value>Label1</value>
-  </data>
-  <data name="&gt;&gt;Label1.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;Label1.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;Label1.ZOrder" xml:space="preserve">
-    <value>2</value>
-  </data>
-  <data name="ComboBoxReportOptions.Items" xml:space="preserve">
-    <value>00h List all of the zones in the zoned block device.</value>
-  </data>
-  <data name="ComboBoxReportOptions.Items1" xml:space="preserve">
-    <value>01h List the zones with a Zone Condition of EMPTY</value>
-  </data>
-  <data name="ComboBoxReportOptions.Items2" xml:space="preserve">
-    <value>02h List the zones with a Zone Condition of IMPLICITLY OPENED.</value>
-  </data>
-  <data name="ComboBoxReportOptions.Items3" xml:space="preserve">
-    <value>03h List the zones with a Zone Condition of EXPLICITLY OPENED.</value>
-  </data>
-  <data name="ComboBoxReportOptions.Items4" xml:space="preserve">
-    <value>04h List the zones with a Zone Condition of CLOSED.</value>
-  </data>
-  <data name="ComboBoxReportOptions.Items5" xml:space="preserve">
-    <value>05h List the zones with a Zone Condition of FULL.</value>
-  </data>
-  <data name="ComboBoxReportOptions.Items6" xml:space="preserve">
-    <value>10h List of the zones with RWP Recommended set to true.</value>
-  </data>
-  <data name="ComboBoxReportOptions.Items7" xml:space="preserve">
-    <value>3Fh List of the zones with a Zone Condition of NOT WRITE POINTER.</value>
-  </data>
-  <data name="ComboBoxReportOptions.Location" type="System.Drawing.Point, System.Drawing">
-    <value>95, 61</value>
-  </data>
-  <data name="ComboBoxReportOptions.Size" type="System.Drawing.Size, System.Drawing">
-    <value>47, 20</value>
-  </data>
-  <data name="ComboBoxReportOptions.TabIndex" type="System.Int32, mscorlib">
-    <value>57</value>
-  </data>
-  <data name="ComboBoxReportOptions.Text" xml:space="preserve">
-    <value>00h List all of the zones in the zoned block device.</value>
-  </data>
-  <data name="&gt;&gt;ComboBoxReportOptions.Name" xml:space="preserve">
-    <value>ComboBoxReportOptions</value>
-  </data>
-  <data name="&gt;&gt;ComboBoxReportOptions.Type" xml:space="preserve">
-    <value>System.Windows.Forms.ComboBox, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ComboBoxReportOptions.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;ComboBoxReportOptions.ZOrder" xml:space="preserve">
+  <data name="NumericUpDownTestBlkNum.TabIndex" type="System.Int32, mscorlib">
     <value>3</value>
   </data>
-  <data name="NumericUpDownWriteLBACount.Location" type="System.Drawing.Point, System.Drawing">
-    <value>47, 33</value>
+  <data name="&gt;&gt;NumericUpDownTestBlkNum.Name" xml:space="preserve">
+    <value>NumericUpDownTestBlkNum</value>
   </data>
-  <data name="NumericUpDownWriteLBACount.Size" type="System.Drawing.Size, System.Drawing">
-    <value>128, 21</value>
-  </data>
-  <data name="NumericUpDownWriteLBACount.TabIndex" type="System.Int32, mscorlib">
-    <value>56</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownWriteLBACount.Name" xml:space="preserve">
-    <value>NumericUpDownWriteLBACount</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownWriteLBACount.Type" xml:space="preserve">
+  <data name="&gt;&gt;NumericUpDownTestBlkNum.Type" xml:space="preserve">
     <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </data>
-  <data name="&gt;&gt;NumericUpDownWriteLBACount.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
+  <data name="&gt;&gt;NumericUpDownTestBlkNum.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
   </data>
-  <data name="&gt;&gt;NumericUpDownWriteLBACount.ZOrder" xml:space="preserve">
+  <data name="&gt;&gt;NumericUpDownTestBlkNum.ZOrder" xml:space="preserve">
     <value>4</value>
   </data>
-  <data name="ButtonWriteRandom.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="ButtonWriteRandom.Location" type="System.Drawing.Point, System.Drawing">
-    <value>181, 31</value>
-  </data>
-  <data name="ButtonWriteRandom.Size" type="System.Drawing.Size, System.Drawing">
-    <value>100, 23</value>
-  </data>
-  <data name="ButtonWriteRandom.TabIndex" type="System.Int32, mscorlib">
-    <value>55</value>
-  </data>
-  <data name="ButtonWriteRandom.Text" xml:space="preserve">
-    <value>Write(Random)</value>
-  </data>
-  <data name="&gt;&gt;ButtonWriteRandom.Name" xml:space="preserve">
-    <value>ButtonWriteRandom</value>
-  </data>
-  <data name="&gt;&gt;ButtonWriteRandom.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonWriteRandom.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;ButtonWriteRandom.ZOrder" xml:space="preserve">
-    <value>5</value>
-  </data>
-  <data name="ButtonReportZone.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="ButtonReportZone.Location" type="System.Drawing.Point, System.Drawing">
-    <value>323, 6</value>
-  </data>
-  <data name="ButtonReportZone.Size" type="System.Drawing.Size, System.Drawing">
-    <value>81, 23</value>
-  </data>
-  <data name="ButtonReportZone.TabIndex" type="System.Int32, mscorlib">
-    <value>54</value>
-  </data>
-  <data name="ButtonReportZone.Text" xml:space="preserve">
-    <value>ReportZone</value>
-  </data>
-  <data name="&gt;&gt;ButtonReportZone.Name" xml:space="preserve">
-    <value>ButtonReportZone</value>
-  </data>
-  <data name="&gt;&gt;ButtonReportZone.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonReportZone.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;ButtonReportZone.ZOrder" xml:space="preserve">
-    <value>6</value>
-  </data>
-  <data name="NumericUpDownSectorSize.Location" type="System.Drawing.Point, System.Drawing">
-    <value>181, 6</value>
-  </data>
-  <data name="NumericUpDownSectorSize.Size" type="System.Drawing.Size, System.Drawing">
-    <value>55, 21</value>
-  </data>
-  <data name="NumericUpDownSectorSize.TabIndex" type="System.Int32, mscorlib">
-    <value>53</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownSectorSize.Name" xml:space="preserve">
-    <value>NumericUpDownSectorSize</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownSectorSize.Type" xml:space="preserve">
-    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownSectorSize.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownSectorSize.ZOrder" xml:space="preserve">
-    <value>7</value>
-  </data>
-  <data name="ButtonReadLBA.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="ButtonReadLBA.Location" type="System.Drawing.Point, System.Drawing">
-    <value>242, 6</value>
-  </data>
-  <data name="ButtonReadLBA.Size" type="System.Drawing.Size, System.Drawing">
-    <value>75, 23</value>
-  </data>
-  <data name="ButtonReadLBA.TabIndex" type="System.Int32, mscorlib">
-    <value>52</value>
-  </data>
-  <data name="ButtonReadLBA.Text" xml:space="preserve">
-    <value>Read</value>
-  </data>
-  <data name="&gt;&gt;ButtonReadLBA.Name" xml:space="preserve">
-    <value>ButtonReadLBA</value>
-  </data>
-  <data name="&gt;&gt;ButtonReadLBA.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonReadLBA.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;ButtonReadLBA.ZOrder" xml:space="preserve">
-    <value>8</value>
-  </data>
-  <data name="ButtonFinishZone.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="ButtonFinishZone.Location" type="System.Drawing.Point, System.Drawing">
-    <value>572, 6</value>
-  </data>
-  <data name="ButtonFinishZone.Size" type="System.Drawing.Size, System.Drawing">
-    <value>75, 23</value>
-  </data>
-  <data name="ButtonFinishZone.TabIndex" type="System.Int32, mscorlib">
-    <value>51</value>
-  </data>
-  <data name="ButtonFinishZone.Text" xml:space="preserve">
-    <value>FinishZone</value>
-  </data>
-  <data name="&gt;&gt;ButtonFinishZone.Name" xml:space="preserve">
-    <value>ButtonFinishZone</value>
-  </data>
-  <data name="&gt;&gt;ButtonFinishZone.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonFinishZone.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;ButtonFinishZone.ZOrder" xml:space="preserve">
-    <value>9</value>
-  </data>
-  <data name="ButtonResetWritePointer.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="ButtonResetWritePointer.Location" type="System.Drawing.Point, System.Drawing">
-    <value>653, 6</value>
-  </data>
-  <data name="ButtonResetWritePointer.Size" type="System.Drawing.Size, System.Drawing">
-    <value>124, 23</value>
-  </data>
-  <data name="ButtonResetWritePointer.TabIndex" type="System.Int32, mscorlib">
-    <value>50</value>
-  </data>
-  <data name="ButtonResetWritePointer.Text" xml:space="preserve">
-    <value>ResetWritePointer</value>
-  </data>
-  <data name="&gt;&gt;ButtonResetWritePointer.Name" xml:space="preserve">
-    <value>ButtonResetWritePointer</value>
-  </data>
-  <data name="&gt;&gt;ButtonResetWritePointer.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonResetWritePointer.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;ButtonResetWritePointer.ZOrder" xml:space="preserve">
-    <value>10</value>
-  </data>
-  <data name="ButtonCloseZone.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
-    <value>NoControl</value>
-  </data>
-  <data name="ButtonCloseZone.Location" type="System.Drawing.Point, System.Drawing">
-    <value>491, 6</value>
-  </data>
-  <data name="ButtonCloseZone.Size" type="System.Drawing.Size, System.Drawing">
-    <value>75, 23</value>
-  </data>
-  <data name="ButtonCloseZone.TabIndex" type="System.Int32, mscorlib">
-    <value>49</value>
-  </data>
-  <data name="ButtonCloseZone.Text" xml:space="preserve">
-    <value>CloseZone</value>
-  </data>
-  <data name="&gt;&gt;ButtonCloseZone.Name" xml:space="preserve">
-    <value>ButtonCloseZone</value>
-  </data>
-  <data name="&gt;&gt;ButtonCloseZone.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonCloseZone.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;ButtonCloseZone.ZOrder" xml:space="preserve">
-    <value>11</value>
-  </data>
-  <data name="ButtonOpenZone.Location" type="System.Drawing.Point, System.Drawing">
-    <value>410, 6</value>
-  </data>
-  <data name="ButtonOpenZone.Size" type="System.Drawing.Size, System.Drawing">
-    <value>75, 23</value>
-  </data>
-  <data name="ButtonOpenZone.TabIndex" type="System.Int32, mscorlib">
-    <value>48</value>
-  </data>
-  <data name="ButtonOpenZone.Text" xml:space="preserve">
-    <value>OpenZone</value>
-  </data>
-  <data name="&gt;&gt;ButtonOpenZone.Name" xml:space="preserve">
-    <value>ButtonOpenZone</value>
-  </data>
-  <data name="&gt;&gt;ButtonOpenZone.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;ButtonOpenZone.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;ButtonOpenZone.ZOrder" xml:space="preserve">
-    <value>12</value>
-  </data>
-  <data name="LabelLBA.AutoSize" type="System.Boolean, mscorlib">
+  <data name="RadioButtonTest1.AutoSize" type="System.Boolean, mscorlib">
     <value>True</value>
   </data>
-  <data name="LabelLBA.Location" type="System.Drawing.Point, System.Drawing">
-    <value>6, 8</value>
+  <data name="RadioButtonTest1.Location" type="System.Drawing.Point, System.Drawing">
+    <value>200, 17</value>
   </data>
-  <data name="LabelLBA.Size" type="System.Drawing.Size, System.Drawing">
-    <value>23, 12</value>
+  <data name="RadioButtonTest1.Size" type="System.Drawing.Size, System.Drawing">
+    <value>59, 16</value>
   </data>
-  <data name="LabelLBA.TabIndex" type="System.Int32, mscorlib">
-    <value>47</value>
+  <data name="RadioButtonTest1.TabIndex" type="System.Int32, mscorlib">
+    <value>4</value>
   </data>
-  <data name="LabelLBA.Text" xml:space="preserve">
-    <value>LBA</value>
+  <data name="RadioButtonTest1.Text" xml:space="preserve">
+    <value>Random</value>
   </data>
-  <data name="&gt;&gt;LabelLBA.Name" xml:space="preserve">
-    <value>LabelLBA</value>
+  <data name="&gt;&gt;RadioButtonTest1.Name" xml:space="preserve">
+    <value>RadioButtonTest1</value>
   </data>
-  <data name="&gt;&gt;LabelLBA.Type" xml:space="preserve">
-    <value>System.Windows.Forms.Label, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  <data name="&gt;&gt;RadioButtonTest1.Type" xml:space="preserve">
+    <value>System.Windows.Forms.RadioButton, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </data>
-  <data name="&gt;&gt;LabelLBA.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
+  <data name="&gt;&gt;RadioButtonTest1.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
   </data>
-  <data name="&gt;&gt;LabelLBA.ZOrder" xml:space="preserve">
-    <value>13</value>
+  <data name="&gt;&gt;RadioButtonTest1.ZOrder" xml:space="preserve">
+    <value>5</value>
   </data>
-  <data name="NumericUpDownLBA.Location" type="System.Drawing.Point, System.Drawing">
-    <value>48, 6</value>
+  <data name="RadioButtonTest2.AutoSize" type="System.Boolean, mscorlib">
+    <value>True</value>
   </data>
-  <data name="NumericUpDownLBA.Size" type="System.Drawing.Size, System.Drawing">
-    <value>127, 21</value>
-  </data>
-  <data name="NumericUpDownLBA.TabIndex" type="System.Int32, mscorlib">
-    <value>46</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownLBA.Name" xml:space="preserve">
-    <value>NumericUpDownLBA</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownLBA.Type" xml:space="preserve">
-    <value>System.Windows.Forms.NumericUpDown, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownLBA.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
-  </data>
-  <data name="&gt;&gt;NumericUpDownLBA.ZOrder" xml:space="preserve">
-    <value>14</value>
-  </data>
-  <data name="ButtonCloseAllZones.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+  <data name="RadioButtonTest2.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
     <value>NoControl</value>
   </data>
-  <data name="ButtonCloseAllZones.Location" type="System.Drawing.Point, System.Drawing">
-    <value>181, 59</value>
+  <data name="RadioButtonTest2.Location" type="System.Drawing.Point, System.Drawing">
+    <value>265, 17</value>
   </data>
-  <data name="ButtonCloseAllZones.Size" type="System.Drawing.Size, System.Drawing">
-    <value>93, 23</value>
+  <data name="RadioButtonTest2.Size" type="System.Drawing.Size, System.Drawing">
+    <value>53, 16</value>
   </data>
-  <data name="ButtonCloseAllZones.TabIndex" type="System.Int32, mscorlib">
-    <value>1</value>
+  <data name="RadioButtonTest2.TabIndex" type="System.Int32, mscorlib">
+    <value>5</value>
   </data>
-  <data name="ButtonCloseAllZones.Text" xml:space="preserve">
-    <value>CloseAllZones</value>
+  <data name="RadioButtonTest2.Text" xml:space="preserve">
+    <value>Zeros</value>
   </data>
-  <data name="&gt;&gt;ButtonCloseAllZones.Name" xml:space="preserve">
-    <value>ButtonCloseAllZones</value>
+  <data name="&gt;&gt;RadioButtonTest2.Name" xml:space="preserve">
+    <value>RadioButtonTest2</value>
   </data>
-  <data name="&gt;&gt;ButtonCloseAllZones.Type" xml:space="preserve">
+  <data name="&gt;&gt;RadioButtonTest2.Type" xml:space="preserve">
+    <value>System.Windows.Forms.RadioButton, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;RadioButtonTest2.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
+  </data>
+  <data name="&gt;&gt;RadioButtonTest2.ZOrder" xml:space="preserve">
+    <value>6</value>
+  </data>
+  <data name="ButtonTest.Location" type="System.Drawing.Point, System.Drawing">
+    <value>188, 39</value>
+  </data>
+  <data name="ButtonTest.Size" type="System.Drawing.Size, System.Drawing">
+    <value>75, 23</value>
+  </data>
+  <data name="ButtonTest.TabIndex" type="System.Int32, mscorlib">
+    <value>6</value>
+  </data>
+  <data name="ButtonTest.Text" xml:space="preserve">
+    <value>Write</value>
+  </data>
+  <data name="&gt;&gt;ButtonTest.Name" xml:space="preserve">
+    <value>ButtonTest</value>
+  </data>
+  <data name="&gt;&gt;ButtonTest.Type" xml:space="preserve">
     <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </data>
-  <data name="&gt;&gt;ButtonCloseAllZones.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
+  <data name="&gt;&gt;ButtonTest.Parent" xml:space="preserve">
+    <value>GroupBoxRWTest</value>
   </data>
-  <data name="&gt;&gt;ButtonCloseAllZones.ZOrder" xml:space="preserve">
-    <value>15</value>
+  <data name="&gt;&gt;ButtonTest.ZOrder" xml:space="preserve">
+    <value>7</value>
   </data>
-  <data name="ButtonReportZones.Location" type="System.Drawing.Point, System.Drawing">
-    <value>6, 59</value>
+  <data name="ButtonRDErrRateLog.Anchor" type="System.Windows.Forms.AnchorStyles, System.Windows.Forms">
+    <value>Bottom, Right</value>
   </data>
-  <data name="ButtonReportZones.Size" type="System.Drawing.Size, System.Drawing">
-    <value>87, 23</value>
+  <data name="ButtonRDErrRateLog.ImeMode" type="System.Windows.Forms.ImeMode, System.Windows.Forms">
+    <value>NoControl</value>
   </data>
-  <data name="ButtonReportZones.TabIndex" type="System.Int32, mscorlib">
-    <value>0</value>
+  <data name="ButtonRDErrRateLog.Location" type="System.Drawing.Point, System.Drawing">
+    <value>1017, 59</value>
   </data>
-  <data name="ButtonReportZones.Text" xml:space="preserve">
-    <value>ReportZones</value>
+  <data name="ButtonRDErrRateLog.Size" type="System.Drawing.Size, System.Drawing">
+    <value>107, 23</value>
   </data>
-  <data name="&gt;&gt;ButtonReportZones.Name" xml:space="preserve">
-    <value>ButtonReportZones</value>
+  <data name="ButtonRDErrRateLog.TabIndex" type="System.Int32, mscorlib">
+    <value>7</value>
   </data>
-  <data name="&gt;&gt;ButtonReportZones.Type" xml:space="preserve">
+  <data name="ButtonRDErrRateLog.Text" xml:space="preserve">
+    <value>Error rate log</value>
+  </data>
+  <data name="&gt;&gt;ButtonRDErrRateLog.Name" xml:space="preserve">
+    <value>ButtonRDErrRateLog</value>
+  </data>
+  <data name="&gt;&gt;ButtonRDErrRateLog.Type" xml:space="preserve">
     <value>System.Windows.Forms.Button, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </data>
-  <data name="&gt;&gt;ButtonReportZones.Parent" xml:space="preserve">
-    <value>TabPageZBC</value>
+  <data name="&gt;&gt;ButtonRDErrRateLog.Parent" xml:space="preserve">
+    <value>TabPageTest</value>
   </data>
-  <data name="&gt;&gt;ButtonReportZones.ZOrder" xml:space="preserve">
-    <value>16</value>
+  <data name="&gt;&gt;ButtonRDErrRateLog.ZOrder" xml:space="preserve">
+    <value>2</value>
   </data>
   <data name="ToolStripSeparator1.Size" type="System.Drawing.Size, System.Drawing">
     <value>112, 6</value>
