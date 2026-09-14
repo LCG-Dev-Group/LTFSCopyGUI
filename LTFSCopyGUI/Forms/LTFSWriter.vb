@@ -5822,7 +5822,6 @@ Public Class LTFSWriter
         PrintMsg($"Extent {work.ExtentIndex}: P={work.PhysicalPartition} B={extent.startblock} BO={extent.byteoffset} BC={extent.bytecount} FO={extent.fileoffset}", LogOnly:=True)
         Dim remaining As Long = extent.bytecount
         Dim byteOffset As Long = extent.byteoffset
-        Dim written As Long = 0
         Using output As New IO.FileStream(work.FileWork.TempPath,
                                           IO.FileMode.Open,
                                           IO.FileAccess.ReadWrite,
@@ -5832,6 +5831,9 @@ Public Class LTFSWriter
             If output.Length <> work.FileWork.Request.FileIndex.length Then
                 Throw New IO.IOException($"Temporary file length changed: {work.FileWork.TempPath}")
             End If
+            ' Extents can be out of file order, but blocks within an extent are contiguous.
+            ' Seeking for every block flushes the write buffer, defeating batching on SMB.
+            output.Seek(extent.fileoffset, IO.SeekOrigin.Begin)
             While remaining > 0 AndAlso Not StopFlag
                 Dim requested As Long = Math.Min(blockSize, remaining + byteOffset)
                 If requested <= 0 OrElse requested > UInteger.MaxValue Then
@@ -5849,9 +5851,7 @@ Public Class LTFSWriter
                 If writeLength <= 0 OrElse writeLength > Integer.MaxValue Then
                     Throw New IO.EndOfStreamException("The tape block does not contain extent data")
                 End If
-                output.Seek(extent.fileoffset + written, IO.SeekOrigin.Begin)
                 output.Write(data, CInt(byteOffset), CInt(writeLength))
-                written += writeLength
                 remaining -= writeLength
                 Threading.Interlocked.Add(TotalBytesProcessed, writeLength)
                 Threading.Interlocked.Add(CurrentBytesProcessed, writeLength)
