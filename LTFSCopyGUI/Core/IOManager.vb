@@ -2776,6 +2776,7 @@ Public Class ZBCDeviceHelper
                     If needDump Then
                         Dim readed = ReadBytes(currZone.ZoneStartLBA, 0, (currstartLBA - currZone.ZoneStartLBA) * SectorLength)
                         Array.Copy(readed, toWrite, readed.Length)
+                        ResetWritePointer(currZone.ZoneStartLBA)
                     End If
                     Dim destOffset As Integer = 0
                     If writeFromZoneHeader Then
