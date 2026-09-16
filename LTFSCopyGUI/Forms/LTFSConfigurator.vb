@@ -3562,7 +3562,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                                                 If(.RESET, " RESET ", "       ")}")
                                         End With
                                     End Sub)
-                             cdb = {&H94, &H1,
+                             cdb = {&H94, &H4,
                                     CByte(CLng((LBA >> 56)) And &HFF),
                                     CByte(CLng((LBA >> 48)) And &HFF),
                                     CByte(CLng((LBA >> 40)) And &HFF),
