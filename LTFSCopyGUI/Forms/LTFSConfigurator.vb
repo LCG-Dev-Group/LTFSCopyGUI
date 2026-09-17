@@ -3603,14 +3603,14 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
             Dim svc As New ZBCISCSIService() With {.ZoneDevice = disk}
 
             AddHandler svc.LogPrint, Sub(s As String)
-                                         Invoke(Sub() TextBoxDebugOutput.AppendText($"iSCSISVC> {s}{vbCrLf}"))
+                                         Invoke(Sub() TextBoxDebugOutput.AppendText($"iSCSISVC>{Now.Ticks} {s}{vbCrLf}"))
                                      End Sub
             AddHandler disk.StatusReport, Sub(s As String)
-                                              Invoke(Sub() TextBoxDebugOutput.AppendText($"ZBC> {s}{vbCrLf}"))
+                                              Invoke(Sub() TextBoxDebugOutput.AppendText($"ZBC>{Now.Ticks} {s}{vbCrLf}"))
                                           End Sub
             If My.Settings.LTFSWriter_LogEnabled Then
                 AddHandler disk.ReportSCSICDB, Sub(data As Byte())
-                                                   Invoke(Sub() TextBoxDebugOutput.AppendText($"ZBC> {IOManager.Byte2Hex(data, False)}"))
+                                                   Invoke(Sub() TextBoxDebugOutput.AppendText($"ZBC>{Now.Ticks} {IOManager.Byte2Hex(data, False)}"))
                                                End Sub
             End If
             svc.port = port

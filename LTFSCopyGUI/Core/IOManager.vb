@@ -2420,6 +2420,7 @@ Public Class ZBCDeviceHelper
                                       0, 0, 0, 128, &H80, 0}
         Dim data1 As Byte() = TapeUtils.SCSIReadParam(handle, cdb, CommandLengthLimit)
         RaiseEvent ReportSCSICDB(cdb)
+        RaiseEvent StatusReport($"ReportZone {ToRefresh.ZoneStartLBA}")
         Dim readed As New Zone(data1, 64)
         With ToRefresh
             .NON_SEQ = readed.NON_SEQ
@@ -2474,6 +2475,7 @@ Public Class ZBCDeviceHelper
                                              Return True
                                          End Function)
         RaiseEvent ReportSCSICDB(cdb)
+        RaiseEvent StatusReport($"CloseAllZone")
         For i As Integer = 0 To 10
             If senseFin Then Exit For
             Thread.Sleep(1)
@@ -2500,8 +2502,8 @@ Public Class ZBCDeviceHelper
                                          senseFin = True
                                          Return True
                                      End Function)
-
         RaiseEvent ReportSCSICDB(cdb)
+        RaiseEvent StatusReport($"ResetWritePointer {LowestLBA}")
         For i As Integer = 0 To 10
             If senseFin Then Exit For
             Thread.Sleep(1)
@@ -2529,6 +2531,7 @@ Public Class ZBCDeviceHelper
                                          Return True
                                      End Function)
         RaiseEvent ReportSCSICDB(cdb)
+        RaiseEvent StatusReport($"OpenZone {LowestLBA}")
         For i As Integer = 0 To 10
             If senseFin Then Exit For
             Thread.Sleep(1)
@@ -2556,6 +2559,7 @@ Public Class ZBCDeviceHelper
                                          Return True
                                      End Function)
         RaiseEvent ReportSCSICDB(cdb)
+        RaiseEvent StatusReport($"CloseZone {LowestLBA}")
         For i As Integer = 0 To 10
             If senseFin Then Exit For
             Thread.Sleep(1)
@@ -2585,6 +2589,7 @@ Public Class ZBCDeviceHelper
                                          End Function)
 
         RaiseEvent ReportSCSICDB(cdb)
+        RaiseEvent StatusReport($"FinishZone {LowestLBA}")
         For i As Integer = 0 To 10
             If senseFin Then Exit For
             Thread.Sleep(1)
@@ -2792,10 +2797,17 @@ Public Class ZBCDeviceHelper
                                 End If
                                 CurrentOpenedZone.Add(currZone)
                             Case Zone.ZoneConditionDef.IMPLICIT_OPENED, Zone.ZoneConditionDef.EXPLICIT_OPENED
-                                If currstartLBA <> currZone.ZoneWritePointerLBA Then
+                                If currstartLBA < currZone.ZoneWritePointerLBA Then
                                     needDump = True
                                     writeFromZoneHeader = True
+                                ElseIf currstartLBA = currZone.ZoneWritePointerLBA Then
+                                    needDump = False
+                                    writeFromZoneHeader = False
                                 Else
+                                    Dim paddingsectors As Integer = CInt(currstartLBA - currZone.ZoneWritePointerLBA)
+                                    Dim Padding(paddingsectors * SectorLength - 1) As Byte
+                                    WriteBytes(Padding, currZone.ZoneWritePointerLBA, 0, True)
+                                    currZone.ZoneWritePointerLBA = currstartLBA
                                     needDump = False
                                     writeFromZoneHeader = False
                                 End If
@@ -2848,6 +2860,7 @@ Public Class ZBCDeviceHelper
                                                      Return True
                                                  End Function, timeout)
                 RaiseEvent ReportSCSICDB(commandBytes)
+                RaiseEvent StatusReport($"SCSIOP 0x{commandBytes(0).ToString("X")}")
                 If result Then
                     Response = Param
                     If commandBytes(0) = &H12 Then
