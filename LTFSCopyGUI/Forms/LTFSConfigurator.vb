@@ -3147,7 +3147,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                      End Function)
         End If
     End Sub
-    Public Async Function WriteAndFree(fs As FileStream, toWrite As Byte(), offset As Integer, count As Integer, pool As ArrayPool(Of Byte)) As Task
+    Public Async Function WriteAndFree(fs As FileStream, toWrite As Byte(), offset As Integer, count As Integer, pool As ArrayPool(Of Byte)) As Task(Of Task)
         Await fs.WriteAsync(toWrite, offset, count)
         pool.Return(toWrite)
     End Function
@@ -3582,5 +3582,36 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                                 Enabled = True
                             End Sub)
                  End Sub)
+    End Sub
+
+    Private Sub ButtonZBCiSCSISvc_Click(sender As Object, e As EventArgs) Handles ButtonZBCiSCSISvc.Click
+        Dim port As UShort = 3262
+        If DisplayHelper.ShowInputDialog("Port", "iSCSI Service", port) <> DialogResult.OK Then Exit Sub
+        ButtonZBCiSCSISvc.Enabled = False
+        Dim drvHandle As IntPtr
+        TapeUtils.OpenTapeDrive(ConfTapeDrive, drvHandle)
+        Dim devdata As TapeUtils.BlockDevice = TapeUtils.Inquiry(drvHandle)
+        Dim disk As New ZBCDeviceHelper With {.handle = drvHandle}
+        disk.ReportZones()
+        Dim svc As New ZBCISCSIService() With {.ZoneDevice = disk}
+
+        AddHandler svc.LogPrint, Sub(s As String)
+                                     Invoke(Sub() TextBoxDebugOutput.AppendText($"iSCSISVC> {s}"))
+                                 End Sub
+        svc.port = port
+        If My.Settings.LTFSWriter_LogEnabled Then svc.LogCommand = True
+        Task.Run(Sub()
+                     SyncLock TapeUtils.GetSCSIOperationLock(drvHandle)
+                         svc.StartService($"iqn.2019-01.com.ltfscopygui:ltfswriter{If(devdata IsNot Nothing, $":{devdata.SerialNumber}", "")}")
+                         MessageBox.Show(New Form With {.TopMost = True}, $"Service running on port {svc.port}.")
+                         svc.StopService()
+                     End SyncLock
+                     TapeUtils.CloseTapeDrive(drvHandle)
+                     Invoke(Sub()
+                                MessageBox.Show(New Form With {.TopMost = True}, "Service stopped.")
+                                ButtonZBCiSCSISvc.Enabled = True
+                            End Sub)
+                 End Sub)
+
     End Sub
 End Class

@@ -147,6 +147,8 @@ Partial Class LTFSConfigurator
         Me.ButtonTest = New System.Windows.Forms.Button()
         Me.ButtonRDErrRateLog = New System.Windows.Forms.Button()
         Me.TabPageZBC = New System.Windows.Forms.TabPage()
+        Me.ButtonZBCiSCSISvc = New System.Windows.Forms.Button()
+        Me.ButtonResetAllZones = New System.Windows.Forms.Button()
         Me.ButtonRestoreLBA = New System.Windows.Forms.Button()
         Me.ButtonDumpLBA = New System.Windows.Forms.Button()
         Me.Label1 = New System.Windows.Forms.Label()
@@ -185,7 +187,6 @@ Partial Class LTFSConfigurator
         Me.SaveFileDialog1 = New System.Windows.Forms.SaveFileDialog()
         Me.SaveFileDialog2 = New System.Windows.Forms.SaveFileDialog()
         Me.OpenFileDialog1 = New System.Windows.Forms.OpenFileDialog()
-        Me.ButtonResetAllZones = New System.Windows.Forms.Button()
         Me.ContextMenuStripRefreshDeviceList.SuspendLayout()
         Me.Panel1.SuspendLayout()
         Me.ContextMenuStripLTFSWriter.SuspendLayout()
@@ -1067,6 +1068,7 @@ Partial Class LTFSConfigurator
         '
         'TabPageZBC
         '
+        Me.TabPageZBC.Controls.Add(Me.ButtonZBCiSCSISvc)
         Me.TabPageZBC.Controls.Add(Me.ButtonResetAllZones)
         Me.TabPageZBC.Controls.Add(Me.ButtonRestoreLBA)
         Me.TabPageZBC.Controls.Add(Me.ButtonDumpLBA)
@@ -1088,6 +1090,18 @@ Partial Class LTFSConfigurator
         resources.ApplyResources(Me.TabPageZBC, "TabPageZBC")
         Me.TabPageZBC.Name = "TabPageZBC"
         Me.TabPageZBC.UseVisualStyleBackColor = True
+        '
+        'ButtonZBCiSCSISvc
+        '
+        resources.ApplyResources(Me.ButtonZBCiSCSISvc, "ButtonZBCiSCSISvc")
+        Me.ButtonZBCiSCSISvc.Name = "ButtonZBCiSCSISvc"
+        Me.ButtonZBCiSCSISvc.UseVisualStyleBackColor = True
+        '
+        'ButtonResetAllZones
+        '
+        resources.ApplyResources(Me.ButtonResetAllZones, "ButtonResetAllZones")
+        Me.ButtonResetAllZones.Name = "ButtonResetAllZones"
+        Me.ButtonResetAllZones.UseVisualStyleBackColor = True
         '
         'ButtonRestoreLBA
         '
@@ -1303,12 +1317,6 @@ Partial Class LTFSConfigurator
         'OpenFileDialog1
         '
         Me.OpenFileDialog1.FileName = "OpenFileDialog1"
-        '
-        'ButtonResetAllZones
-        '
-        resources.ApplyResources(Me.ButtonResetAllZones, "ButtonResetAllZones")
-        Me.ButtonResetAllZones.Name = "ButtonResetAllZones"
-        Me.ButtonResetAllZones.UseVisualStyleBackColor = True
         '
         'LTFSConfigurator
         '
@@ -1536,4 +1544,5 @@ Partial Class LTFSConfigurator
     Friend WithEvents GroupBoxDiag As GroupBox
     Friend WithEvents GroupBoxRWTest As GroupBox
     Friend WithEvents ButtonResetAllZones As Button
+    Friend WithEvents ButtonZBCiSCSISvc As Button
 End Class

@@ -2697,7 +2697,7 @@ Public Class ZBCDeviceHelper
         Return True
     End Function
 
-    Public Function HandleSCSICommand(commandBytes As Byte(), Param As Byte(), dataIn As Byte, dataLen As Integer, ByRef Response As Byte(), ByRef sense As Byte()) As Boolean
+    Public Function HandleSCSICommand(commandBytes As Byte(), Param As Byte(), dataIn As Byte, dataLen As Integer, ByRef Response As Byte(), ByRef sense As Byte(), Optional ByVal timeout As Integer = 600) As Boolean
         Select Case commandBytes(0)
             Case &H2A
                 Dim startLBA As ULong = 0
@@ -2797,7 +2797,7 @@ Public Class ZBCDeviceHelper
                                      0}, toWrite, 0, senseReport:=Function(sdata As Byte())
                                                                       lastSense = sdata
                                                                       Return True
-                                                                  End Function)
+                                                                  End Function, timeout)
                     RefreshZoneCondition(currZone)
                     If currZone.ZoneCondition = Zone.ZoneConditionDef.EXPLICIT_OPENED OrElse currZone.ZoneCondition = Zone.ZoneConditionDef.IMPLICIT_OPENED Then
                         CloseZone(currZone.ZoneStartLBA)
@@ -2809,14 +2809,15 @@ Public Class ZBCDeviceHelper
             Case Else
                 Dim senseFin As Boolean = False
                 Dim senseresult As Byte() = Array.Empty(Of Byte)()
+                If dataIn = 1 Then Param = Response
                 Dim result As Boolean = TapeUtils.SendSCSICommand(
                     handle, commandBytes, Param, dataIn,
                                                  Function(sdata As Byte())
                                                      senseresult = sdata
                                                      senseFin = True
                                                      Return True
-                                                 End Function)
-
+                                                 End Function, timeout)
+                If result Then Response = Param
                 For i As Integer = 0 To 10
                     If senseFin Then Exit For
                     Thread.Sleep(1)
