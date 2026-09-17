@@ -2435,7 +2435,14 @@ Public Class ZBCDeviceHelper
             If (SearchEnd - SearchStart) > 1 Then
                 idx = (SearchStart + SearchEnd) \ 2
             Else
-                idx += 1
+                If ZoneList(SearchStart).ZoneStartLBA <= LBA AndAlso ZoneList(SearchStart).ZoneEndLBA >= LBA Then
+                    idx = SearchStart
+                    Exit While
+                End If
+                If ZoneList(SearchEnd).ZoneStartLBA <= LBA AndAlso ZoneList(SearchEnd).ZoneEndLBA >= LBA Then
+                    idx = SearchEnd
+                    Exit While
+                End If
             End If
         End While
         Return ZoneList(idx)

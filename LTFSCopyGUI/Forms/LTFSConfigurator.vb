@@ -3592,7 +3592,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
         TapeUtils.OpenTapeDrive(ConfTapeDrive, drvHandle)
         Dim devdata As TapeUtils.BlockDevice = TapeUtils.Inquiry(drvHandle)
         Dim disk As New ZBCDeviceHelper With {.handle = drvHandle}
-        disk.ReportZones()
+        disk.InitDevice()
         Dim svc As New ZBCISCSIService() With {.ZoneDevice = disk}
 
         AddHandler svc.LogPrint, Sub(s As String)
@@ -3601,11 +3601,9 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
         svc.port = port
         If My.Settings.LTFSWriter_LogEnabled Then svc.LogCommand = True
         Task.Run(Sub()
-                     SyncLock TapeUtils.GetSCSIOperationLock(drvHandle)
-                         svc.StartService($"iqn.2019-01.com.ltfscopygui:ltfswriter{If(devdata IsNot Nothing, $":{devdata.SerialNumber}", "")}")
-                         MessageBox.Show(New Form With {.TopMost = True}, $"Service running on port {svc.port}.")
-                         svc.StopService()
-                     End SyncLock
+                     svc.StartService($"iqn.2019-01.com.ltfscopygui:ltfswriter{If(devdata IsNot Nothing, $":{devdata.SerialNumber}", "")}")
+                     MessageBox.Show(New Form With {.TopMost = True}, $"Service running on port {svc.port}.")
+                     svc.StopService()
                      TapeUtils.CloseTapeDrive(drvHandle)
                      Invoke(Sub()
                                 MessageBox.Show(New Form With {.TopMost = True}, "Service stopped.")

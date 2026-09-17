@@ -681,7 +681,7 @@ Public Class ZBCISCSIService
                                               Case &H5 'READ BLOCK LIMITS
                                                   datalen = 6
                                               Case &H8 'READ 6
-                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 2, 4))
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 2, 4)) * ZoneDevice.SectorLength
                                               Case &H12 'INQUIRY
                                                   datalen = CInt(BigEndianConverter.GetValue(commandBytes, 3, 4))
                                               Case &H1A 'MODE SENSE 6
@@ -691,7 +691,7 @@ Public Class ZBCISCSIService
                                               Case &H25 'READ CAPACITY 10
                                                   datalen = 8
                                               Case &H28 'READ 10
-                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 7, 8))
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 7, 8)) * ZoneDevice.SectorLength
                                               Case &H34 'READ POSITION
                                                   If commandBytes(1) = 0 Then
                                                       datalen = 20
@@ -719,7 +719,7 @@ Public Class ZBCISCSIService
                                               Case &H7F 'READ / WRITE / VERIFY 32
                                                   datalen = CInt(BigEndianConverter.GetValue(commandBytes, 28, 31))
                                               Case &H88 'READ 16
-                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 10, 13))
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 10, 13)) * ZoneDevice.SectorLength
                                               Case &H8C 'READ ATTRIBUTE
                                                   datalen = CInt(BigEndianConverter.GetValue(commandBytes, 10, 13))
                                               Case &H95 'REPORT ZONES
@@ -749,7 +749,7 @@ Public Class ZBCISCSIService
                                                           End Select
                                                   End Select
                                               Case &HA8 'READ 12
-                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 6, 9))
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 6, 9)) * ZoneDevice.SectorLength
                                               Case &HAB
                                                   datalen = CInt(BigEndianConverter.GetValue(commandBytes, 6, 9))
                                               Case &HB7 'READ DEFECT DATA 12
