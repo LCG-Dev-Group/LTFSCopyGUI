@@ -3601,20 +3601,30 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
             Dim disk As New ZBCDeviceHelper With {.handle = drvHandle}
             disk.InitDevice()
             Dim svc As New ZBCISCSIService() With {.ZoneDevice = disk}
-
+            Dim svcStat As String = ""
+            Dim zbcStat As String = ""
+            Dim cdbStat As String = ""
             AddHandler svc.LogPrint, Sub(s As String)
-                                         Invoke(Sub() TextBoxDebugOutput.AppendText($"iSCSISVC>{Now.Ticks} {s}{vbCrLf}"))
+                                         svcStat = $"{s}{vbCrLf}"
                                      End Sub
             AddHandler disk.StatusReport, Sub(s As String)
-                                              Invoke(Sub() TextBoxDebugOutput.AppendText($"ZBC>{Now.Ticks} {s}{vbCrLf}"))
+                                              zbcStat = $"ZBC>{Now.Ticks} {s}{vbCrLf}"
                                           End Sub
             If My.Settings.LTFSWriter_LogEnabled Then
                 AddHandler disk.ReportSCSICDB, Sub(data As Byte())
-                                                   Invoke(Sub() TextBoxDebugOutput.AppendText($"ZBC>{Now.Ticks} {IOManager.Byte2Hex(data, False)}"))
+                                                   cdbStat = $"ZBC>{Now.Ticks} {IOManager.Byte2Hex(data, False)}"
                                                End Sub
             End If
             svc.port = port
             If My.Settings.LTFSWriter_LogEnabled Then svc.LogCommand = True
+            Task.Run(Sub()
+                         While iSCSIRunningFlag
+                             Threading.Thread.Sleep(100)
+                             Invoke(Sub()
+                                        TextBoxDebugOutput.Text = $"{svcStat}{vbCrLf}{zbcStat}{If(My.Settings.LTFSWriter_LogEnabled, $"{vbCrLf}{cdbStat}", "")}"
+                                    End Sub)
+                         End While
+                     End Sub)
             Task.Run(Sub()
                          svc.StartService($"iqn.2019-01.com.ltfscopygui:zbcdevicehelper{If(devdata IsNot Nothing, $":{devdata.SerialNumber}", "")}")
                          MessageBox.Show(New Form With {.TopMost = True}, $"Service running on port {svc.port}.")
