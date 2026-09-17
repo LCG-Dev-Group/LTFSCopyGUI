@@ -2817,7 +2817,16 @@ Public Class ZBCDeviceHelper
                                                      senseFin = True
                                                      Return True
                                                  End Function, timeout)
-                If result Then Response = Param
+                If result Then
+                    Response = Param
+                    If commandBytes(0) = &H12 Then
+                        Dim EVPD As Byte = commandBytes(1) And CByte(&H1)
+                        If EVPD = 0 Then
+                            'Standard inquiry PERIPHERAL DEVICE TYPE change to normal HDD instead of 0x14h (host managed zoned block device)
+                            Response(0) = 0
+                        End If
+                    End If
+                End If
                 For i As Integer = 0 To 10
                     If senseFin Then Exit For
                     Thread.Sleep(1)
