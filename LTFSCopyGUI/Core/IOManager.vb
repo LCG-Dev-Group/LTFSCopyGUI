@@ -120,7 +120,11 @@ Public Class IOManager
                 If TextShow Then
                     ln.Append(tb)
                 End If
-                sb.Append(ln.ToString().PadRight(74) & "|")
+                If TextShow Then
+                    sb.Append(ln.ToString().PadRight(74) & "|")
+                Else
+                    sb.Append(ln.ToString())
+                End If
                 sb.Append(vbCrLf)
                 ln = New StringBuilder()
                 tb = ""
@@ -2256,6 +2260,8 @@ Public Class ZBCDeviceHelper
     Public Property SectorLength As UInt16 = 512
     Public Property CommandLengthLimit As Integer = 524288
     Public Property MaxZoneOpened As UInteger = &HFFFFFFFFUI
+    Public Event StatusReport(info As String)
+    Public Event ReportSCSICDB(cdb As Byte())
     Public Property CurrentOpenedZone As New List(Of Zone)
     Private _CMRStartLBA As ULong
     Public ReadOnly Property CMRStartLBA As ULong
@@ -2327,6 +2333,7 @@ Public Class ZBCDeviceHelper
         SectorLength = CUShort(BigEndianConverter.ToUInt16(MP03, 12))
         ReportZones()
         LoadData()
+        RaiseEvent StatusReport($"SectorLEN={SectorLength} Zonecount={ZoneList.Count} OpenedZoneCount={CurrentOpenedZone}/{MaxZoneOpened}")
     End Sub
     Public Sub ReportZones(Optional ByVal opt As Byte = 0)
         Dim data0 As Byte() = TapeUtils.SCSIReadParam(handle, {&H95, 0,
@@ -2343,20 +2350,21 @@ Public Class ZBCDeviceHelper
         ZoneLBAMap.Clear()
         CurrentOpenedZone.Clear()
         While True
-            Dim data1 As Byte() = TapeUtils.SCSIReadParam(handle, {&H95, 0,
-                                                          CByte(CLng((currLBA >> 56)) And &HFF),
-                                                          CByte(CLng((currLBA >> 48)) And &HFF),
-                                                          CByte(CLng((currLBA >> 40)) And &HFF),
-                                                          CByte(CLng((currLBA >> 32)) And &HFF),
-                                                          CByte(CLng((currLBA >> 24)) And &HFF),
-                                                          CByte(CLng((currLBA >> 16)) And &HFF),
-                                                          CByte(CLng((currLBA >> 8)) And &HFF),
-                                                          CByte(CLng((currLBA >> 0)) And &HFF),
-                                                          CByte((CommandLengthLimit >> 24) And &HFF),
-                                                          CByte((CommandLengthLimit >> 16) And &HFF),
-                                                          CByte((CommandLengthLimit >> 8) And &HFF),
-                                                          CByte((CommandLengthLimit >> 0) And &HFF),
-                                                          CByte(&H80 Or opt), 0}, CommandLengthLimit)
+            Dim cdb As Byte() = {&H95, 0, CByte(CLng((currLBA >> 56)) And &HFF),
+                                          CByte(CLng((currLBA >> 48)) And &HFF),
+                                          CByte(CLng((currLBA >> 40)) And &HFF),
+                                          CByte(CLng((currLBA >> 32)) And &HFF),
+                                          CByte(CLng((currLBA >> 24)) And &HFF),
+                                          CByte(CLng((currLBA >> 16)) And &HFF),
+                                          CByte(CLng((currLBA >> 8)) And &HFF),
+                                          CByte(CLng((currLBA >> 0)) And &HFF),
+                                          CByte((CommandLengthLimit >> 24) And &HFF),
+                                          CByte((CommandLengthLimit >> 16) And &HFF),
+                                          CByte((CommandLengthLimit >> 8) And &HFF),
+                                          CByte((CommandLengthLimit >> 0) And &HFF),
+                                          CByte(&H80 Or opt), 0}
+            Dim data1 As Byte() = TapeUtils.SCSIReadParam(handle, cdb, CommandLengthLimit)
+            RaiseEvent ReportSCSICDB(cdb)
             ZoneListLen = BigEndianConverter.ToUInt32(data1, 0)
             If ZoneListLen = 0 Then Exit While
             ZoneCount = ZoneListLen \ 64UI
@@ -2401,17 +2409,17 @@ Public Class ZBCDeviceHelper
         End If
     End Sub
     Public Sub RefreshZoneCondition(ToRefresh As Zone)
-        Dim data1 As Byte() = TapeUtils.SCSIReadParam(handle, {&H95, 0,
-                                                          CByte(CLng((ToRefresh.ZoneStartLBA >> 56)) And &HFF),
-                                                          CByte(CLng((ToRefresh.ZoneStartLBA >> 48)) And &HFF),
-                                                          CByte(CLng((ToRefresh.ZoneStartLBA >> 40)) And &HFF),
-                                                          CByte(CLng((ToRefresh.ZoneStartLBA >> 32)) And &HFF),
-                                                          CByte(CLng((ToRefresh.ZoneStartLBA >> 24)) And &HFF),
-                                                          CByte(CLng((ToRefresh.ZoneStartLBA >> 16)) And &HFF),
-                                                          CByte(CLng((ToRefresh.ZoneStartLBA >> 8)) And &HFF),
-                                                          CByte(CLng((ToRefresh.ZoneStartLBA >> 0)) And &HFF),
-                                                          0, 0, 0, 128,
-                                                          &H80, 0}, CommandLengthLimit)
+        Dim cdb As Byte() = {&H95, 0, CByte(CLng((ToRefresh.ZoneStartLBA >> 56)) And &HFF),
+                                      CByte(CLng((ToRefresh.ZoneStartLBA >> 48)) And &HFF),
+                                      CByte(CLng((ToRefresh.ZoneStartLBA >> 40)) And &HFF),
+                                      CByte(CLng((ToRefresh.ZoneStartLBA >> 32)) And &HFF),
+                                      CByte(CLng((ToRefresh.ZoneStartLBA >> 24)) And &HFF),
+                                      CByte(CLng((ToRefresh.ZoneStartLBA >> 16)) And &HFF),
+                                      CByte(CLng((ToRefresh.ZoneStartLBA >> 8)) And &HFF),
+                                      CByte(CLng((ToRefresh.ZoneStartLBA >> 0)) And &HFF),
+                                      0, 0, 0, 128, &H80, 0}
+        Dim data1 As Byte() = TapeUtils.SCSIReadParam(handle, cdb, CommandLengthLimit)
+        RaiseEvent ReportSCSICDB(cdb)
         Dim readed As New Zone(data1, 64)
         With ToRefresh
             .NON_SEQ = readed.NON_SEQ
@@ -2422,6 +2430,7 @@ Public Class ZBCDeviceHelper
             .ZoneType = readed.ZoneType
             .ZoneWritePointerLBA = readed.ZoneWritePointerLBA
         End With
+        RaiseEvent StatusReport($"SectorLEN={SectorLength} Zonecount={ZoneList.Count} OpenedZoneCount={CurrentOpenedZone}/{MaxZoneOpened}")
     End Sub
     Public Function GetZoneByLBA(LBA As ULong) As Zone
         Dim result As Zone = Nothing
@@ -2457,12 +2466,14 @@ Public Class ZBCDeviceHelper
     Public Function CloseAllZones(Optional ByRef sense As Byte() = Nothing) As Boolean
         Dim senseFin As Boolean = False
         Dim senseresult As Byte() = Array.Empty(Of Byte)()
-        Dim result As Boolean = TapeUtils.SendSCSICommand(handle, {&H94, &H1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0}, Nothing, 1,
+        Dim cdb As Byte() = {&H94, &H1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0}
+        Dim result As Boolean = TapeUtils.SendSCSICommand(handle, cdb, Nothing, 1,
                                          Function(sdata As Byte())
                                              senseresult = sdata
                                              senseFin = True
                                              Return True
                                          End Function)
+        RaiseEvent ReportSCSICDB(cdb)
         For i As Integer = 0 To 10
             If senseFin Then Exit For
             Thread.Sleep(1)
@@ -2473,8 +2484,7 @@ Public Class ZBCDeviceHelper
     Public Function ResetWritePointer(LowestLBA As ULong, Optional ByRef sense As Byte() = Nothing) As Boolean
         Dim senseFin As Boolean = False
         Dim senseresult As Byte() = Array.Empty(Of Byte)()
-        Dim result As Boolean = TapeUtils.SendSCSICommand(
-            handle, {&H94, &H4,
+        Dim cdb As Byte() = {&H94, &H4,
             CByte(CLng((LowestLBA >> 56)) And &HFF),
             CByte(CLng((LowestLBA >> 48)) And &HFF),
             CByte(CLng((LowestLBA >> 40)) And &HFF),
@@ -2483,13 +2493,15 @@ Public Class ZBCDeviceHelper
             CByte(CLng((LowestLBA >> 16)) And &HFF),
             CByte(CLng((LowestLBA >> 8)) And &HFF),
             CByte(CLng((LowestLBA >> 0)) And &HFF),
-            0, 0, 0, 0, 0, 0}, Nothing, 1,
-                                         Function(sdata As Byte())
-                                             senseresult = sdata
-                                             senseFin = True
-                                             Return True
-                                         End Function)
+            0, 0, 0, 0, 0, 0}
+        Dim result As Boolean = TapeUtils.SendSCSICommand(
+            handle, cdb, Nothing, 1, Function(sdata As Byte())
+                                         senseresult = sdata
+                                         senseFin = True
+                                         Return True
+                                     End Function)
 
+        RaiseEvent ReportSCSICDB(cdb)
         For i As Integer = 0 To 10
             If senseFin Then Exit For
             Thread.Sleep(1)
@@ -2500,8 +2512,7 @@ Public Class ZBCDeviceHelper
     Public Function OpenZone(LowestLBA As ULong, Optional ByRef sense As Byte() = Nothing) As Boolean
         Dim senseFin As Boolean = False
         Dim senseresult As Byte() = Array.Empty(Of Byte)()
-        Dim result As Boolean = TapeUtils.SendSCSICommand(
-            handle, {&H94, &H3,
+        Dim cdb As Byte() = {&H94, &H3,
             CByte(CLng((LowestLBA >> 56)) And &HFF),
             CByte(CLng((LowestLBA >> 48)) And &HFF),
             CByte(CLng((LowestLBA >> 40)) And &HFF),
@@ -2510,13 +2521,14 @@ Public Class ZBCDeviceHelper
             CByte(CLng((LowestLBA >> 16)) And &HFF),
             CByte(CLng((LowestLBA >> 8)) And &HFF),
             CByte(CLng((LowestLBA >> 0)) And &HFF),
-            0, 0, 0, 0, 0, 0}, Nothing, 1,
-                                         Function(sdata As Byte())
-                                             senseresult = sdata
-                                             senseFin = True
-                                             Return True
-                                         End Function)
-
+            0, 0, 0, 0, 0, 0}
+        Dim result As Boolean = TapeUtils.SendSCSICommand(
+            handle, cdb, Nothing, 1, Function(sdata As Byte())
+                                         senseresult = sdata
+                                         senseFin = True
+                                         Return True
+                                     End Function)
+        RaiseEvent ReportSCSICDB(cdb)
         For i As Integer = 0 To 10
             If senseFin Then Exit For
             Thread.Sleep(1)
@@ -2527,8 +2539,7 @@ Public Class ZBCDeviceHelper
     Public Function CloseZone(LowestLBA As ULong, Optional ByRef sense As Byte() = Nothing) As Boolean
         Dim senseFin As Boolean = False
         Dim senseresult As Byte() = Array.Empty(Of Byte)()
-        Dim result As Boolean = TapeUtils.SendSCSICommand(
-            handle, {&H94, &H1,
+        Dim cdb As Byte() = {&H94, &H1,
             CByte(CLng((LowestLBA >> 56)) And &HFF),
             CByte(CLng((LowestLBA >> 48)) And &HFF),
             CByte(CLng((LowestLBA >> 40)) And &HFF),
@@ -2537,13 +2548,14 @@ Public Class ZBCDeviceHelper
             CByte(CLng((LowestLBA >> 16)) And &HFF),
             CByte(CLng((LowestLBA >> 8)) And &HFF),
             CByte(CLng((LowestLBA >> 0)) And &HFF),
-            0, 0, 0, 0, 0, 0}, Nothing, 1,
-                                         Function(sdata As Byte())
-                                             senseresult = sdata
-                                             senseFin = True
-                                             Return True
-                                         End Function)
-
+            0, 0, 0, 0, 0, 0}
+        Dim result As Boolean = TapeUtils.SendSCSICommand(
+            handle, cdb, Nothing, 1, Function(sdata As Byte())
+                                         senseresult = sdata
+                                         senseFin = True
+                                         Return True
+                                     End Function)
+        RaiseEvent ReportSCSICDB(cdb)
         For i As Integer = 0 To 10
             If senseFin Then Exit For
             Thread.Sleep(1)
@@ -2554,8 +2566,7 @@ Public Class ZBCDeviceHelper
     Public Function FinishZone(LowestLBA As ULong, Optional ByRef sense As Byte() = Nothing) As Boolean
         Dim senseFin As Boolean = False
         Dim senseresult As Byte() = Array.Empty(Of Byte)()
-        Dim result As Boolean = TapeUtils.SendSCSICommand(
-            handle, {&H94, &H2,
+        Dim cdb As Byte() = {&H94, &H2,
             CByte(CLng((LowestLBA >> 56)) And &HFF),
             CByte(CLng((LowestLBA >> 48)) And &HFF),
             CByte(CLng((LowestLBA >> 40)) And &HFF),
@@ -2564,13 +2575,16 @@ Public Class ZBCDeviceHelper
             CByte(CLng((LowestLBA >> 16)) And &HFF),
             CByte(CLng((LowestLBA >> 8)) And &HFF),
             CByte(CLng((LowestLBA >> 0)) And &HFF),
-            0, 0, 0, 0, 0, 0}, Nothing, 1,
+            0, 0, 0, 0, 0, 0}
+        Dim result As Boolean = TapeUtils.SendSCSICommand(
+            handle, cdb, Nothing, 1,
                                          Function(sdata As Byte())
                                              senseresult = sdata
                                              senseFin = True
                                              Return True
                                          End Function)
 
+        RaiseEvent ReportSCSICDB(cdb)
         For i As Integer = 0 To 10
             If senseFin Then Exit For
             Thread.Sleep(1)
@@ -2584,8 +2598,7 @@ Public Class ZBCDeviceHelper
         Dim oncereadsectorcount As Integer = CInt(Math.Truncate(CommandLengthLimit / SectorLength))
         Dim currentLBA As ULong = StartLBA
         While remain > 0
-            Dim data As Byte() = TapeUtils.SCSIReadParam(handle, {
-                &H28, 0,
+            Dim cdb As Byte() = {&H28, 0,
                 CByte(CLng((StartLBA >> 24)) And &HFF),
                 CByte(CLng((StartLBA >> 16)) And &HFF),
                 CByte(CLng((StartLBA >> 8)) And &HFF),
@@ -2593,7 +2606,9 @@ Public Class ZBCDeviceHelper
                 0,
                 CByte((oncereadsectorcount >> 8) And &HFF),
                 CByte((oncereadsectorcount >> 0) And &HFF),
-                 0}, oncereadsectorcount * SectorLength)
+                 0}
+            Dim data As Byte() = TapeUtils.SCSIReadParam(handle, cdb, oncereadsectorcount * SectorLength)
+            RaiseEvent ReportSCSICDB(cdb)
             If currentLBA = StartLBA AndAlso ByteOffset > 0 Then
                 data = data.Skip(ByteOffset).ToArray()
             End If
@@ -2669,7 +2684,7 @@ Public Class ZBCDeviceHelper
             End If
             Dim toSend(currentsendsectorcount * SectorLength - 1) As Byte
             Array.Copy(source, source.Length - remain, toSend, 0, sendlen)
-            TapeUtils.SendSCSICommand(handle, {
+            Dim cdb As Byte() = {
                 &H2A, 0,
                 CByte(CLng((currentLBA >> 24)) And &HFF),
                 CByte(CLng((currentLBA >> 16)) And &HFF),
@@ -2678,8 +2693,9 @@ Public Class ZBCDeviceHelper
                 0,
                 CByte((currentsendsectorcount >> 8) And &HFF),
                 CByte((currentsendsectorcount >> 0) And &HFF),
-                 0}, toSend, 0, senseReport, 600)
-
+                 0}
+            TapeUtils.SendSCSICommand(handle, cdb, toSend, 0, senseReport, 600)
+            RaiseEvent ReportSCSICDB(cdb)
             remain -= sendlen
             currentLBA = CULng(currentLBA + currentsendsectorcount)
             If Not Conventional Then
@@ -2831,6 +2847,7 @@ Public Class ZBCDeviceHelper
                                                      senseFin = True
                                                      Return True
                                                  End Function, timeout)
+                RaiseEvent ReportSCSICDB(commandBytes)
                 If result Then
                     Response = Param
                     If commandBytes(0) = &H12 Then

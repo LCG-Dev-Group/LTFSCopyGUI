@@ -4,6 +4,7 @@ Imports System.ComponentModel
 Imports System.IO
 Imports System.Runtime.InteropServices
 Imports System.Text
+Imports System.Threading
 Imports LTFSCopyGUI.Native
 Imports NAudio.Wave
 Imports Serilog
@@ -3584,32 +3585,51 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                  End Sub)
     End Sub
 
+    Public Property iSCSIStopFlag As New AutoResetEvent(False)
+    Public Property iSCSIRunningFlag As Boolean = False
     Private Sub ButtonZBCiSCSISvc_Click(sender As Object, e As EventArgs) Handles ButtonZBCiSCSISvc.Click
-        Dim port As UShort = 3262
-        If DisplayHelper.ShowInputDialog("Port", "iSCSI Service", port) <> DialogResult.OK Then Exit Sub
-        ButtonZBCiSCSISvc.Enabled = False
-        Dim drvHandle As IntPtr
-        TapeUtils.OpenTapeDrive(ConfTapeDrive, drvHandle)
-        Dim devdata As TapeUtils.BlockDevice = TapeUtils.Inquiry(drvHandle)
-        Dim disk As New ZBCDeviceHelper With {.handle = drvHandle}
-        disk.InitDevice()
-        Dim svc As New ZBCISCSIService() With {.ZoneDevice = disk}
+        If iSCSIRunningFlag Then
+            iSCSIStopFlag.Set()
+        Else
+            Dim port As UShort = 3262
+            If DisplayHelper.ShowInputDialog("Port", "iSCSI Service", port) <> DialogResult.OK Then Exit Sub
+            iSCSIRunningFlag = True
+            ButtonZBCiSCSISvc.Text = "Stop"
+            Dim drvHandle As IntPtr
+            TapeUtils.OpenTapeDrive(ConfTapeDrive, drvHandle)
+            Dim devdata As TapeUtils.BlockDevice = TapeUtils.Inquiry(drvHandle)
+            Dim disk As New ZBCDeviceHelper With {.handle = drvHandle}
+            disk.InitDevice()
+            Dim svc As New ZBCISCSIService() With {.ZoneDevice = disk}
 
-        AddHandler svc.LogPrint, Sub(s As String)
-                                     Invoke(Sub() TextBoxDebugOutput.AppendText($"iSCSISVC> {s}"))
-                                 End Sub
-        svc.port = port
-        If My.Settings.LTFSWriter_LogEnabled Then svc.LogCommand = True
-        Task.Run(Sub()
-                     svc.StartService($"iqn.2019-01.com.ltfscopygui:ltfswriter{If(devdata IsNot Nothing, $":{devdata.SerialNumber}", "")}")
-                     MessageBox.Show(New Form With {.TopMost = True}, $"Service running on port {svc.port}.")
-                     svc.StopService()
-                     TapeUtils.CloseTapeDrive(drvHandle)
-                     Invoke(Sub()
-                                MessageBox.Show(New Form With {.TopMost = True}, "Service stopped.")
-                                ButtonZBCiSCSISvc.Enabled = True
-                            End Sub)
-                 End Sub)
+            AddHandler svc.LogPrint, Sub(s As String)
+                                         Invoke(Sub() TextBoxDebugOutput.AppendText($"iSCSISVC> {s}{vbCrLf}"))
+                                     End Sub
+            AddHandler disk.StatusReport, Sub(s As String)
+                                              Invoke(Sub() TextBoxDebugOutput.AppendText($"ZBC> {s}{vbCrLf}"))
+                                          End Sub
+            If My.Settings.LTFSWriter_LogEnabled Then
+                AddHandler disk.ReportSCSICDB, Sub(data As Byte())
+                                                   Invoke(Sub() TextBoxDebugOutput.AppendText($"ZBC> {IOManager.Byte2Hex(data, False)}"))
+                                               End Sub
+            End If
+            svc.port = port
+            If My.Settings.LTFSWriter_LogEnabled Then svc.LogCommand = True
+            Task.Run(Sub()
+                         svc.StartService($"iqn.2019-01.com.ltfscopygui:zbcdevicehelper{If(devdata IsNot Nothing, $":{devdata.SerialNumber}", "")}")
+                         MessageBox.Show(New Form With {.TopMost = True}, $"Service running on port {svc.port}.")
+                         iSCSIStopFlag.WaitOne()
+                         svc.StopService()
+                         TapeUtils.CloseTapeDrive(drvHandle)
+                         Invoke(Sub()
+                                    MessageBox.Show(New Form With {.TopMost = True}, "Service stopped.")
+                                    ButtonZBCiSCSISvc.Text = "iSCSI"
+                                    iSCSIRunningFlag = False
+                                    iSCSIStopFlag.Reset()
+                                End Sub)
+                     End Sub)
+        End If
+
 
     End Sub
 End Class
