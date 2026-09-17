@@ -526,7 +526,7 @@ Public Class ZBCISCSIService
                     _DataDir.Add({&H3C}, 1)
                     _DataDir.Add({&H3E}, 1)
                     _DataDir.Add({&H3F}, 0)
-                    _DataDir.Add({&H40}, 1)
+                    _DataDir.Add({&H40}, 0)
                     _DataDir.Add({&H41}, 0)
                     _DataDir.Add({&H42}, 0)
                     _DataDir.Add({&H43}, 1)
@@ -671,6 +671,91 @@ Public Class ZBCISCSIService
                                   Sub()
                                       Dim cmddir As Byte = GetDataDir(commandBytes)
                                       Dim datalen As Integer = data.Length
+                                      If cmddir <> 0 Then
+                                          datalen = 1024
+                                          Select Case commandBytes(0)
+                                              Case &H0, &H1, &HB, &H10, &H11, &H13, &H16, &H17, &H19, &H1B, &H1E, &H2B, &H2F, &H56, &H57, &H8F, &H91, &H92, &H94, &HAF
+                                                  datalen = 0
+                                              Case &H3 'REQUEST SENSE
+                                                  datalen = commandBytes(4)
+                                              Case &H5 'READ BLOCK LIMITS
+                                                  datalen = 6
+                                              Case &H8 'READ 6
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 2, 4))
+                                              Case &H12 'INQUIRY
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 3, 4))
+                                              Case &H1A 'MODE SENSE 6
+                                                  datalen = commandBytes(4)
+                                              Case &H1C 'RECEIVE DIAGNOSTIC RESULTS
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 3, 4))
+                                              Case &H25 'READ CAPACITY 10
+                                                  datalen = 8
+                                              Case &H28 'READ 10
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 7, 8))
+                                              Case &H34 'READ POSITION
+                                                  If commandBytes(1) = 0 Then
+                                                      datalen = 20
+                                                  Else
+                                                      datalen = 32
+                                                  End If
+                                              Case &H37 'READ DEFECT DATA 10
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 7, 8))
+                                              Case &H3C 'READ BUFFER 10
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 6, 8))
+                                              Case &H3E 'READ LONG 10
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 7, 8))
+                                              Case &H43 'READ TOC
+                                                  datalen = CInt(Math.Max(BigEndianConverter.GetValue(commandBytes, 7, 8), 20))
+                                              Case &H44 'REPORT DENSITY SUPPORT
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 7, 8))
+                                              Case &H48 'SANITIZE
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 7, 8))
+                                              Case &H4D 'LOG SENSE
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 7, 8))
+                                              Case &H5A 'MODE SENSE 10
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 7, 8))
+                                              Case &H5E 'PERSISTENT RESERVE IN
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 7, 8))
+                                              Case &H7F 'READ / WRITE / VERIFY 32
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 28, 31))
+                                              Case &H88 'READ 16
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 10, 13))
+                                              Case &H8C 'READ ATTRIBUTE
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 10, 13))
+                                              Case &H95 'REPORT ZONES
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 10, 13))
+                                              Case &H9B 'READ BUFFER 16
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 10, 13))
+                                              Case &H9E 'GET LBA / STREAM STATUS / READ CAPACITY / READ LONG 16 / STREAM CONTROL
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 10, 13))
+                                              Case &HA0 'REPORT LUNS
+                                                  datalen = CInt(Math.Min(32, BigEndianConverter.GetValue(commandBytes, 6, 9)))
+                                              Case &HA2 'SECURITY PROTOCOL IN
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 6, 9))
+                                              Case &HA3
+                                                  Select Case commandBytes(1)
+                                                      Case &H5, &HA, &HC, &HD, &HF
+                                                          datalen = CInt(BigEndianConverter.GetValue(commandBytes, 6, 9))
+                                                      Case &H1F
+                                                          Select Case commandBytes(2)
+                                                              Case &H6, &H10, &H12, &H15
+                                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 6, 9))
+                                                              Case &H7, &HA, &HB, &HD, &HE, &H18
+                                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 6, 7))
+                                                              Case &H8, &H9
+                                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 6, 8))
+                                                              Case &H14
+                                                                  datalen = commandBytes(9)
+                                                          End Select
+                                                  End Select
+                                              Case &HA8 'READ 12
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 6, 9))
+                                              Case &HAB
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 6, 9))
+                                              Case &HB7 'READ DEFECT DATA 12
+                                                  datalen = CInt(BigEndianConverter.GetValue(commandBytes, 6, 9))
+                                          End Select
+                                      End If
                                       Dim sense(63) As Byte
                                       Dim responsedata(datalen - 1) As Byte
                                       ZoneDevice.HandleSCSICommand(commandBytes, data, cmddir, datalen, responsedata, sense, 24 * 3600)
