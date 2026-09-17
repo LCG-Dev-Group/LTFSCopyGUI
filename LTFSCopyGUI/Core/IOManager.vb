@@ -2333,7 +2333,7 @@ Public Class ZBCDeviceHelper
         SectorLength = CUShort(BigEndianConverter.ToUInt16(MP03, 12))
         ReportZones()
         LoadData()
-        RaiseEvent StatusReport($"SectorLEN={SectorLength} Zonecount={ZoneList.Count} OpenedZoneCount={CurrentOpenedZone}/{MaxZoneOpened}")
+        RaiseEvent StatusReport($"SectorLEN={SectorLength} Zonecount={ZoneList.Count} OpenedZoneCount={CurrentOpenedZone.Count}/{MaxZoneOpened}")
     End Sub
     Public Sub ReportZones(Optional ByVal opt As Byte = 0)
         Dim data0 As Byte() = TapeUtils.SCSIReadParam(handle, {&H95, 0,
@@ -2430,7 +2430,7 @@ Public Class ZBCDeviceHelper
             .ZoneType = readed.ZoneType
             .ZoneWritePointerLBA = readed.ZoneWritePointerLBA
         End With
-        RaiseEvent StatusReport($"SectorLEN={SectorLength} Zonecount={ZoneList.Count} OpenedZoneCount={CurrentOpenedZone}/{MaxZoneOpened}")
+        RaiseEvent StatusReport($"SectorLEN={SectorLength} Zonecount={ZoneList.Count} OpenedZoneCount={CurrentOpenedZone.Count}/{MaxZoneOpened}")
     End Sub
     Public Function GetZoneByLBA(LBA As ULong) As Zone
         Dim result As Zone = Nothing
