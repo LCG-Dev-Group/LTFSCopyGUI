@@ -2809,7 +2809,7 @@ Public Class ZBCDeviceHelper
             Case Else
                 Dim senseFin As Boolean = False
                 Dim senseresult As Byte() = Array.Empty(Of Byte)()
-                If dataIn = 1 Then Param = Response
+                If dataIn = 1 Then ReDim Param(dataLen - 1)
                 Dim result As Boolean = TapeUtils.SendSCSICommand(
                     handle, commandBytes, Param, dataIn,
                                                  Function(sdata As Byte())
