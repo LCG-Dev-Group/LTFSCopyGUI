@@ -753,7 +753,8 @@ Public Class ZBCISCSIService
         svc = New ISCSIServer()
         Try
             Dim directInterface As New SCSIDirectInterface(ZoneDevice) With {
-                    .LogCommand = LogCommand
+                    .LogCommand = LogCommand,
+                    .ZoneDevice = ZoneDevice
                 }
             target = New ISCSITarget(TargetName, directInterface)
             svc.AddTarget(target)
