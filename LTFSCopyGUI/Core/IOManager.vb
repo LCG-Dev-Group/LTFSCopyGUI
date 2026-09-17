@@ -2255,7 +2255,8 @@ Public Class ZBCDeviceHelper
     Public Property MaximumLBA As ULong
     Public Property SectorLength As UInt16 = 512
     Public Property CommandLengthLimit As Integer = 524288
-
+    Public Property MaxZoneOpened As UInteger = &HFFFFFFFFUI
+    Public Property CurrentOpenedZone As New List(Of Zone)
     Private _CMRStartLBA As ULong
     Public ReadOnly Property CMRStartLBA As ULong
         Get
@@ -2333,11 +2334,14 @@ Public Class ZBCDeviceHelper
                                                       0, 0, 0, &H40,
                                                       0, 0}, 64)
         MaximumLBA = BigEndianConverter.ToUInt64(data0, 8)
+        Dim vpddata As Byte() = TapeUtils.SCSIReadParam(handle, {&H12, 1, &HB6, 0, &H40, 0}, 64)
         Dim ZoneListLen As UInteger = BigEndianConverter.ToUInt32(data0, 0)
+        MaxZoneOpened = BigEndianConverter.ToUInt32(vpddata, 16)
         Dim ZoneCount As UInteger = ZoneListLen \ 64UI
         Dim currLBA As ULong = 0
         ZoneList.Clear()
         ZoneLBAMap.Clear()
+        CurrentOpenedZone.Clear()
         While True
             Dim data1 As Byte() = TapeUtils.SCSIReadParam(handle, {&H95, 0,
                                                           CByte(CLng((currLBA >> 56)) And &HFF),
@@ -2359,6 +2363,9 @@ Public Class ZBCDeviceHelper
             Dim readed As Zone = Nothing
             For i As Integer = 0 To CInt(ZoneCount - 1)
                 readed = New Zone(data1, 64 + 64 * i)
+                If readed.ZoneCondition = Zone.ZoneConditionDef.EXPLICIT_OPENED OrElse readed.ZoneCondition = Zone.ZoneConditionDef.IMPLICIT_OPENED Then
+                    CurrentOpenedZone.Add(readed)
+                End If
                 ZoneList.Add(readed)
                 ZoneLBAMap.Add(readed.ZoneStartLBA, readed)
             Next
@@ -2597,7 +2604,7 @@ Public Class ZBCDeviceHelper
         End While
         Return result.ToArray()
     End Function
-    Public Function WriteBytes(ByVal source As Byte(), StartLBA As ULong, ByVal ByteOffset As UInt16, Optional ByVal Conventional As Boolean = True) As Boolean
+    Public Function WriteBytes(ByVal source As Byte(), StartLBA As ULong, ByVal ByteOffset As UInt16, Optional ByVal Conventional As Boolean = True, Optional senseReport As Func(Of Byte(), Boolean) = Nothing) As Boolean
         Dim result As New List(Of Byte)
         Dim remain As Integer = source.Length
         Dim oncewritesectorcount As Integer = CInt(Math.Truncate(CommandLengthLimit / SectorLength))
@@ -2654,10 +2661,12 @@ Public Class ZBCDeviceHelper
         While remain > 0
             Dim sendlen As Integer = Math.Min(oncewritesectorcount * SectorLength, remain)
             Dim currentsendsectorcount As Integer = CInt(Math.Ceiling(sendlen / SectorLength))
-            currentEndZone = GetZoneByLBA(CULng(currentLBA + currentsendsectorcount - 1))
-            For i As Integer = ZoneList.IndexOf(currentZone) + 1 To ZoneList.IndexOf(currentEndZone)
-                OpenZone(ZoneList(i).ZoneStartLBA)
-            Next
+            If Not Conventional Then
+                currentEndZone = GetZoneByLBA(CULng(currentLBA + currentsendsectorcount - 1))
+                For i As Integer = ZoneList.IndexOf(currentZone) + 1 To ZoneList.IndexOf(currentEndZone)
+                    OpenZone(ZoneList(i).ZoneStartLBA)
+                Next
+            End If
             Dim toSend(currentsendsectorcount * SectorLength - 1) As Byte
             Array.Copy(source, source.Length - remain, toSend, 0, sendlen)
             TapeUtils.SendSCSICommand(handle, {
@@ -2669,7 +2678,7 @@ Public Class ZBCDeviceHelper
                 0,
                 CByte((currentsendsectorcount >> 8) And &HFF),
                 CByte((currentsendsectorcount >> 0) And &HFF),
-                 0}, toSend, 0)
+                 0}, toSend, 0, senseReport, 600)
 
             remain -= sendlen
             currentLBA = CULng(currentLBA + currentsendsectorcount)
@@ -2745,6 +2754,7 @@ Public Class ZBCDeviceHelper
                                 Else
                                     writeFromZoneHeader = False
                                 End If
+                                CurrentOpenedZone.Add(currZone)
                             Case Zone.ZoneConditionDef.CLOSED
                                 If currstartLBA <> currZone.ZoneWritePointerLBA Then
                                     needDump = True
@@ -2754,6 +2764,7 @@ Public Class ZBCDeviceHelper
                                     needDump = False
                                     writeFromZoneHeader = False
                                 End If
+                                CurrentOpenedZone.Add(currZone)
                             Case Zone.ZoneConditionDef.FULL
                                 If currstartLBA <> currZone.ZoneStartLBA Then
                                     needDump = True
@@ -2763,6 +2774,7 @@ Public Class ZBCDeviceHelper
                                     needDump = False
                                     writeFromZoneHeader = False
                                 End If
+                                CurrentOpenedZone.Add(currZone)
                             Case Zone.ZoneConditionDef.IMPLICIT_OPENED, Zone.ZoneConditionDef.EXPLICIT_OPENED
                                 If currstartLBA <> currZone.ZoneWritePointerLBA Then
                                     needDump = True
@@ -2773,6 +2785,10 @@ Public Class ZBCDeviceHelper
                                 End If
                         End Select
                     End If
+                    While CurrentOpenedZone.Count > MaxZoneOpened \ 2
+                        CloseZone(CurrentOpenedZone(0).ZoneStartLBA)
+                        CurrentOpenedZone.RemoveAt(0)
+                    End While
                     Dim totalSectorsToWrite = currsectorCnt
                     Dim writeStartLBA = currstartLBA
                     If writeFromZoneHeader Then
@@ -2792,22 +2808,13 @@ Public Class ZBCDeviceHelper
 
                     Array.Copy(Param, CInt((currstartLBA - startLBA) * SectorLength), toWrite,
                                     destOffset, CInt(currsectorCnt * SectorLength))
-                    result = TapeUtils.SendSCSICommand(handle, {
-                                    &H2A, 0,
-                                    CByte(CLng((writeStartLBA >> 24)) And &HFF),
-                                    CByte(CLng((writeStartLBA >> 16)) And &HFF),
-                                    CByte(CLng((writeStartLBA >> 8)) And &HFF),
-                                    CByte(CLng((writeStartLBA >> 0)) And &HFF),
-                                    0,
-                                    CByte(CLng((totalSectorsToWrite >> 8)) And &HFF),
-                                    CByte(CLng((totalSectorsToWrite >> 0)) And &HFF),
-                                     0}, toWrite, 0, senseReport:=Function(sdata As Byte())
-                                                                      lastSense = sdata
-                                                                      Return True
-                                                                  End Function, timeout)
+                    result = WriteBytes(toWrite, writeStartLBA, 0, True, Function(sdata As Byte())
+                                                                             lastSense = sdata
+                                                                             Return True
+                                                                         End Function)
                     RefreshZoneCondition(currZone)
-                    If currZone.ZoneCondition = Zone.ZoneConditionDef.EXPLICIT_OPENED OrElse currZone.ZoneCondition = Zone.ZoneConditionDef.IMPLICIT_OPENED Then
-                        CloseZone(currZone.ZoneStartLBA)
+                    If currZone.ZoneCondition = Zone.ZoneConditionDef.FULL Then
+                        CurrentOpenedZone.Remove(currZone)
                     End If
                     If Not result Then Exit For
                 Next
