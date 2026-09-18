@@ -2704,11 +2704,12 @@ Public Class ZBCDeviceHelper
         Dim remain As Integer = transferLength
         Dim sourceOffset As Integer = 0
         Dim currentLBA As ULong = StartLBA
+        Dim toSend() As Byte = {}
         While remain > 0
             Dim sendlen As Integer = Math.Min(maxTransferBytes, remain)
             Dim sectorCount As Integer = (sendlen - 1) \ sectorLen + 1
             Dim transferLen As Integer = sectorCount * sectorLen
-            Dim toSend(transferLen - 1) As Byte
+            If toSend.Length < transferLen Then ReDim toSend(transferLen - 1)
             Array.Copy(source, sourceOffset, toSend, 0, sendlen)
             Dim cdb As Byte() = {
                 &H2A, 0,
@@ -2742,158 +2743,164 @@ Public Class ZBCDeviceHelper
         End If
         Return paddingBuffer
     End Function
+    Private _SCSICommandHandlerLock As New Object
     Public Function HandleSCSICommand(commandBytes As Byte(), Param As Byte(), dataIn As Byte, dataLen As Integer, ByRef Response As Byte(), ByRef sense As Byte(), Optional ByVal timeout As Integer = 600) As Boolean
-        Select Case commandBytes(0)
-            Case &H2A
-                Dim startLBA As ULong = 0
-                For i As Integer = 2 To 5
-                    startLBA <<= 8
-                    startLBA = startLBA Or commandBytes(i)
-                Next
-                Dim sectorCount As ULong = 0
-                For i As Integer = 7 To 8
-                    sectorCount <<= 8
-                    sectorCount = sectorCount Or commandBytes(i)
-                Next
-                Dim startZone = ZoneList.IndexOf(GetZoneByLBA(startLBA))
-                Dim endZone = ZoneList.IndexOf(GetZoneByLBA(startLBA + sectorCount - 1UL))
-                Dim lastSense() As Byte = {}
-                Dim senseCallback As Func(Of Byte(), Boolean) =
+        SyncLock _SCSICommandHandlerLock
+            Select Case commandBytes(0)
+                Case &H2A
+                    Dim startLBA As ULong = 0
+                    For i As Integer = 2 To 5
+                        startLBA <<= 8
+                        startLBA = startLBA Or commandBytes(i)
+                    Next
+                    Dim sectorCount As ULong = 0
+                    For i As Integer = 7 To 8
+                        sectorCount <<= 8
+                        sectorCount = sectorCount Or commandBytes(i)
+                    Next
+                    Dim startZone = ZoneList.IndexOf(GetZoneByLBA(startLBA))
+                    Dim endZone = ZoneList.IndexOf(GetZoneByLBA(startLBA + sectorCount - 1UL))
+                    Dim lastSense() As Byte = {}
+                    Dim senseCallback As Func(Of Byte(), Boolean) =
                     Function(sdata As Byte())
                         lastSense = sdata
                         Return True
                     End Function
-                Dim result As Boolean = True
-                For i As Integer = startZone To endZone
-                    Dim currZone = ZoneList(i)
-                    Dim currstartLBA = currZone.ZoneStartLBA
-                    Dim currsectorCnt = currZone.ZoneLength
-                    If i = startZone Then
-                        currstartLBA = Math.Max(currstartLBA, startLBA)
-                        currsectorCnt = Math.Min(currsectorCnt, currZone.ZoneEndLBA - currstartLBA + 1UL)
-                        currsectorCnt = Math.Min(currsectorCnt, sectorCount)
-                    ElseIf i = endZone Then
-                        currsectorCnt = startLBA + sectorCount - currZone.ZoneStartLBA
-                    End If
-                    Dim needDump As Boolean = False '是否需要先读
-                    Dim writeFromZoneHeader As Boolean = False '是否需要填充开头扇区
-                    If currZone.ZoneType = Zone.ZoneTypeDef.Conventional Then
-                        needDump = False
-                    Else
-                        Select Case currZone.ZoneCondition
-                            Case Zone.ZoneConditionDef.EMPTY
-                                needDump = False
-                                If currstartLBA <> currZone.ZoneStartLBA Then
-                                    writeFromZoneHeader = True
-                                Else
-                                    writeFromZoneHeader = False
-                                End If
-                                CurrentOpenedZone.Add(currZone)
-                            Case Zone.ZoneConditionDef.CLOSED
-                                If currstartLBA <> currZone.ZoneWritePointerLBA Then
-                                    needDump = True
-                                    writeFromZoneHeader = True
-                                Else
-                                    OpenZone(currZone.ZoneStartLBA)
+                    Dim result As Boolean = True
+                    For i As Integer = startZone To endZone
+                        Dim currZone = ZoneList(i)
+                        Dim currstartLBA = currZone.ZoneStartLBA
+                        Dim currsectorCnt = currZone.ZoneLength
+                        If i = startZone Then
+                            currstartLBA = Math.Max(currstartLBA, startLBA)
+                            currsectorCnt = Math.Min(currsectorCnt, currZone.ZoneEndLBA - currstartLBA + 1UL)
+                            currsectorCnt = Math.Min(currsectorCnt, sectorCount)
+                        ElseIf i = endZone Then
+                            currsectorCnt = startLBA + sectorCount - currZone.ZoneStartLBA
+                        End If
+                        Dim needDump As Boolean = False '是否需要先读
+                        Dim writeFromZoneHeader As Boolean = False '是否需要填充开头扇区
+                        If currZone.ZoneType = Zone.ZoneTypeDef.Conventional Then
+                            needDump = False
+                        Else
+                            Select Case currZone.ZoneCondition
+                                Case Zone.ZoneConditionDef.EMPTY
                                     needDump = False
-                                    writeFromZoneHeader = False
-                                End If
-                                CurrentOpenedZone.Add(currZone)
-                            Case Zone.ZoneConditionDef.FULL
-                                If currstartLBA <> currZone.ZoneStartLBA Then
-                                    needDump = True
-                                    writeFromZoneHeader = True
-                                Else
-                                    ResetWritePointer(currZone.ZoneStartLBA)
-                                    needDump = False
-                                    writeFromZoneHeader = False
-                                End If
-                                CurrentOpenedZone.Add(currZone)
-                            Case Zone.ZoneConditionDef.IMPLICIT_OPENED, Zone.ZoneConditionDef.EXPLICIT_OPENED
-                                If currstartLBA < currZone.ZoneWritePointerLBA Then
-                                    needDump = True
-                                    writeFromZoneHeader = True
-                                ElseIf currstartLBA = currZone.ZoneWritePointerLBA Then
-                                    needDump = False
-                                    writeFromZoneHeader = False
-                                Else
-                                    Dim paddingsectors As Integer = CInt(currstartLBA - currZone.ZoneWritePointerLBA)
-                                    Dim maxPaddingSectors As Integer = Math.Max(1, CommandLengthLimit \ SectorLength)
-                                    Dim paddingBuffer = GetPaddingBuffer(maxPaddingSectors * SectorLength)
-                                    While paddingsectors > 0
-                                        Dim count As Integer = CInt(Math.Min(CULng(maxPaddingSectors), paddingsectors))
-                                        Dim paddingLen = count * SectorLength
-                                        If Not WriteBytesConventional(paddingBuffer, paddingLen, currZone.ZoneWritePointerLBA) Then Return False
-                                        currZone.ZoneWritePointerLBA += CULng(count)
-                                        paddingsectors -= count
-                                    End While
-                                    currZone.ZoneWritePointerLBA = currstartLBA
-                                    needDump = False
-                                    writeFromZoneHeader = False
-                                End If
-                        End Select
-                    End If
-                    While CurrentOpenedZone.Count > MaxZoneOpened \ 2
-                        CloseZone(CurrentOpenedZone(0).ZoneStartLBA)
-                        CurrentOpenedZone.RemoveAt(0)
-                    End While
-                    Dim totalSectorsToWrite = currsectorCnt
-                    Dim writeStartLBA = currstartLBA
-                    If writeFromZoneHeader Then
-                        totalSectorsToWrite += currstartLBA - currZone.ZoneStartLBA
-                        writeStartLBA = currZone.ZoneStartLBA
-                    End If
-                    Dim totalBytesToWrite As Integer = CInt(totalSectorsToWrite * SectorLength)
-                    Dim toWrite() As Byte = GetZoneBuffer(totalBytesToWrite)
-                    If needDump Then
-                        If Not ReadBytes(currZone.ZoneStartLBA, 0, (currstartLBA - currZone.ZoneStartLBA) * SectorLength, toWrite, 0) Then Return False
-                        ResetWritePointer(currZone.ZoneStartLBA)
-                    ElseIf writeFromZoneHeader Then
-                        Array.Clear(toWrite, 0, CInt((currstartLBA - currZone.ZoneStartLBA) * SectorLength))
-                    End If
-                    Dim destOffset As Integer = 0
-                    If writeFromZoneHeader Then
-                        destOffset = CInt((currstartLBA - currZone.ZoneStartLBA) * SectorLength)
-                    End If
+                                    If currstartLBA <> currZone.ZoneStartLBA Then
+                                        writeFromZoneHeader = True
+                                    Else
+                                        writeFromZoneHeader = False
+                                    End If
+                                    CurrentOpenedZone.Add(currZone)
+                                Case Zone.ZoneConditionDef.CLOSED
+                                    If currstartLBA <> currZone.ZoneWritePointerLBA Then
+                                        needDump = True
+                                        writeFromZoneHeader = True
+                                    Else
+                                        OpenZone(currZone.ZoneStartLBA)
+                                        needDump = False
+                                        writeFromZoneHeader = False
+                                    End If
+                                    CurrentOpenedZone.Add(currZone)
+                                Case Zone.ZoneConditionDef.FULL
+                                    If currstartLBA <> currZone.ZoneStartLBA Then
+                                        needDump = True
+                                        writeFromZoneHeader = True
+                                    Else
+                                        ResetWritePointer(currZone.ZoneStartLBA)
+                                        needDump = False
+                                        writeFromZoneHeader = False
+                                    End If
+                                    CurrentOpenedZone.Add(currZone)
+                                Case Zone.ZoneConditionDef.IMPLICIT_OPENED, Zone.ZoneConditionDef.EXPLICIT_OPENED
+                                    If currstartLBA < currZone.ZoneWritePointerLBA Then
+                                        needDump = True
+                                        writeFromZoneHeader = True
+                                    ElseIf currstartLBA = currZone.ZoneWritePointerLBA Then
+                                        needDump = False
+                                        writeFromZoneHeader = False
+                                    Else
+                                        Dim paddingsectors As Integer = CInt(currstartLBA - currZone.ZoneWritePointerLBA)
+                                        Dim maxPaddingSectors As Integer = Math.Max(1, CommandLengthLimit \ SectorLength)
+                                        Dim paddingBuffer = GetPaddingBuffer(maxPaddingSectors * SectorLength)
+                                        While paddingsectors > 0
+                                            Dim count As Integer = CInt(Math.Min(CULng(maxPaddingSectors), paddingsectors))
+                                            Dim paddingLen = count * SectorLength
+                                            If Not WriteBytesConventional(paddingBuffer, paddingLen, currZone.ZoneWritePointerLBA) Then Return False
+                                            currZone.ZoneWritePointerLBA += CULng(count)
+                                            paddingsectors -= count
+                                        End While
+                                        currZone.ZoneWritePointerLBA = currstartLBA
+                                        needDump = False
+                                        writeFromZoneHeader = False
+                                    End If
+                            End Select
+                        End If
+                        While CurrentOpenedZone.Count > MaxZoneOpened \ 2
+                            CloseZone(CurrentOpenedZone(0).ZoneStartLBA)
+                            CurrentOpenedZone.RemoveAt(0)
+                        End While
+                        Dim totalSectorsToWrite = currsectorCnt
+                        Dim writeStartLBA = currstartLBA
+                        If writeFromZoneHeader Then
+                            totalSectorsToWrite += currstartLBA - currZone.ZoneStartLBA
+                            writeStartLBA = currZone.ZoneStartLBA
+                        End If
+                        Dim totalBytesToWrite As Integer = CInt(totalSectorsToWrite * SectorLength)
+                        Dim toWrite() As Byte = ArrayPool(Of Byte).Shared.Rent(totalBytesToWrite)
+                        'Dim toWrite(totalBytesToWrite - 1) As Byte
+                        'Dim toWrite() As Byte = GetZoneBuffer(totalBytesToWrite)
+                        If needDump Then
+                            If Not ReadBytes(currZone.ZoneStartLBA, 0, (currstartLBA - currZone.ZoneStartLBA) * SectorLength, toWrite, 0) Then Return False
+                            ResetWritePointer(currZone.ZoneStartLBA)
+                        ElseIf writeFromZoneHeader Then
+                            Array.Clear(toWrite, 0, CInt((currstartLBA - currZone.ZoneStartLBA) * SectorLength))
+                        End If
+                        Dim destOffset As Integer = 0
+                        If writeFromZoneHeader Then
+                            destOffset = CInt((currstartLBA - currZone.ZoneStartLBA) * SectorLength)
+                        End If
 
-                    Array.Copy(Param, CInt((currstartLBA - startLBA) * SectorLength), toWrite,
+                        Array.Copy(Param, CInt((currstartLBA - startLBA) * SectorLength), toWrite,
                                     destOffset, CInt(currsectorCnt * SectorLength))
-                    result = WriteBytesConventional(toWrite, totalBytesToWrite, writeStartLBA, senseCallback)
-                    RefreshZoneCondition(currZone)
-                    If currZone.ZoneCondition = Zone.ZoneConditionDef.FULL Then
-                        CurrentOpenedZone.Remove(currZone)
-                    End If
-                    If Not result Then Exit For
-                Next
-                sense = lastSense
-                Return result
-            Case Else
-                Dim senseFin As Boolean = False
-                Dim senseresult As Byte() = Array.Empty(Of Byte)()
-                If dataIn = 1 Then ReDim Param(dataLen - 1)
-                Dim result As Boolean = TapeUtils.SendSCSICommand(
+                        result = WriteBytesConventional(toWrite, totalBytesToWrite, writeStartLBA, senseCallback)
+                        ArrayPool(Of Byte).Shared.Return(toWrite)
+                        RefreshZoneCondition(currZone)
+                        If currZone.ZoneCondition = Zone.ZoneConditionDef.FULL Then
+                            CurrentOpenedZone.Remove(currZone)
+                        End If
+                        If Not result Then Exit For
+                    Next
+                    sense = lastSense
+                    Return result
+                Case Else
+                    Dim senseFin As Boolean = False
+                    Dim senseresult As Byte() = Array.Empty(Of Byte)()
+                    If dataIn = 1 Then ReDim Param(dataLen - 1)
+                    Dim result As Boolean = TapeUtils.SendSCSICommand(
                     handle, commandBytes, Param, dataIn,
                                                  Function(sdata As Byte())
                                                      senseresult = sdata
                                                      senseFin = True
                                                      Return True
                                                  End Function, timeout)
-                RaiseEvent ReportSCSICDB(commandBytes)
-                RaiseEvent StatusReport($"SCSIOP 0x{commandBytes(0).ToString("X")}")
-                If result Then
-                    Response = Param
-                    If commandBytes(0) = &H12 Then
-                        'PERIPHERAL DEVICE TYPE change to normal HDD instead of 0x14h (host managed zoned block device)
-                        Response(0) = 0
+                    RaiseEvent ReportSCSICDB(commandBytes)
+                    RaiseEvent StatusReport($"SCSIOP 0x{commandBytes(0).ToString("X")}")
+                    If result Then
+                        Response = Param
+                        If commandBytes(0) = &H12 Then
+                            'PERIPHERAL DEVICE TYPE change to normal HDD instead of 0x14h (host managed zoned block device)
+                            Response(0) = 0
+                        End If
                     End If
-                End If
-                For i As Integer = 0 To 10
-                    If senseFin Then Exit For
-                    Thread.Sleep(1)
-                Next
-                sense = senseresult
-                Return result
-        End Select
+                    For i As Integer = 0 To 10
+                        If senseFin Then Exit For
+                        Thread.Sleep(1)
+                    Next
+                    sense = senseresult
+                    Return result
+            End Select
+        End SyncLock
     End Function
     Public Property Data As ZBCDataHelper
     Public Property DataStartLBA As ULong
