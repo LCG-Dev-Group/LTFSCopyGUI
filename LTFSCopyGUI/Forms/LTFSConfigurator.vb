@@ -2771,7 +2771,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
         testdata(0) = &H7F
         testdata(4095) = &HFF
         Dim FirstSMRLBA As ULong = CULng(disk.CMREndLBA + 1)
-        disk.WriteBytes(testdata, FirstSMRLBA, 0, False)
+        disk.WriteBytesConventional(testdata, FirstSMRLBA)
         Dim readout As Byte() = disk.ReadBytes(FirstSMRLBA, 0, 4096)
         MessageBox.Show("OK")
         TapeUtils.CloseTapeDrive(drvhandle)

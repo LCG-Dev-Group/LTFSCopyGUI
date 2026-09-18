@@ -2624,113 +2624,38 @@ Public Class ZBCDeviceHelper
         End While
         Return result.ToArray()
     End Function
-    Public Function WriteBytes(ByVal source As Byte(), StartLBA As ULong, ByVal ByteOffset As UInt16, Optional ByVal Conventional As Boolean = True, Optional senseReport As Func(Of Byte(), Boolean) = Nothing) As Boolean
-        Dim result As New List(Of Byte)
+    Public Function WriteBytesConventional(ByVal source As Byte(), StartLBA As ULong, Optional senseReport As Func(Of Byte(), Boolean) = Nothing) As Boolean
+        If source Is Nothing OrElse source.Length = 0 Then Return True
+        Dim sectorLen As Integer = SectorLength
+        If sectorLen <= 0 Then Return False
+        Dim maxSectorCount As Integer = Math.Min(&HFFFF, CommandLengthLimit \ sectorLen)
+        If maxSectorCount <= 0 Then Return False
+        Dim maxTransferBytes As Integer = maxSectorCount * sectorLen
         Dim remain As Integer = source.Length
-        Dim oncewritesectorcount As Integer = CInt(Math.Truncate(CommandLengthLimit / SectorLength))
+        Dim sourceOffset As Integer = 0
         Dim currentLBA As ULong = StartLBA
-        Dim totalSector As ULong = CULng(Math.Ceiling((source.Length + ByteOffset) / SectorLength))
-        Dim EndLBA As ULong = CULng(StartLBA + totalSector - 1)
-        Dim tempData As New Dictionary(Of ULong, Byte())
-        Dim zone0 As Zone = Nothing, zone1 As Zone = Nothing
-        If ByteOffset > 0 Then
-            source = ReadBytes(StartLBA, 0, ByteOffset).Concat(source).ToArray()
-        End If
-        If Not Conventional Then
-            ' check zone condition
-            zone0 = GetZoneByLBA(StartLBA)
-            zone1 = GetZoneByLBA(EndLBA)
-            If zone0.ZoneStartLBA < StartLBA Then
-                If zone0.ZoneCondition = Zone.ZoneConditionDef.EMPTY Then
-                    'empty
-                    Dim empty(SectorLength - 1) As Byte
-                    OpenZone(zone0.ZoneStartLBA)
-                    For lba As ULong = zone0.ZoneStartLBA To CULng(StartLBA - 1)
-                        WriteBytes(empty, lba, 0, True)
-                    Next
-                ElseIf (Not zone0.WRITER_POINTER_LBA_INVALID) AndAlso zone0.ZoneWritePointerLBA <= StartLBA Then
-                    'data end < write position
-                    If zone0.ZoneCondition = Zone.ZoneConditionDef.CLOSED Then OpenZone(zone0.ZoneStartLBA)
-                    Dim empty(SectorLength - 1) As Byte
-                    For lba As ULong = zone0.ZoneWritePointerLBA To CULng(StartLBA - 1)
-                        WriteBytes(empty, lba, 0, True)
-                    Next
-                ElseIf ((Not zone0.WRITER_POINTER_LBA_INVALID) AndAlso zone0.ZoneWritePointerLBA > StartLBA) OrElse zone0.ZoneCondition = Zone.ZoneConditionDef.FULL Then
-                    'data end >= write position
-                    For lba As ULong = zone0.ZoneStartLBA To CULng(StartLBA - 1)
-                        tempData.Add(lba, ReadBytes(lba, 0, SectorLength))
-                    Next
-                    ResetWritePointer(zone0.ZoneStartLBA)
-                    OpenZone(zone0.ZoneStartLBA)
-                    For lba As ULong = zone0.ZoneStartLBA To CULng(StartLBA - 1)
-                        WriteBytes(tempData(lba), lba, 0, True)
-                    Next
-                Else
-                    'cmr zone
-                End If
-            End If
-            If zone1.ZoneEndLBA > EndLBA Then
-                For lba As ULong = CULng(EndLBA + 1) To zone1.ZoneEndLBA
-                    tempData.Add(lba, ReadBytes(lba, 0, SectorLength))
-                Next
-                ResetWritePointer(zone1.ZoneStartLBA)
-            End If
-        End If
-        Dim currentZone As Zone = zone0
-        Dim currentEndZone As Zone = Nothing
         While remain > 0
-            Dim sendlen As Integer = Math.Min(oncewritesectorcount * SectorLength, remain)
-            Dim currentsendsectorcount As Integer = CInt(Math.Ceiling(sendlen / SectorLength))
-            If Not Conventional Then
-                currentEndZone = GetZoneByLBA(CULng(currentLBA + currentsendsectorcount - 1))
-                For i As Integer = ZoneList.IndexOf(currentZone) + 1 To ZoneList.IndexOf(currentEndZone)
-                    OpenZone(ZoneList(i).ZoneStartLBA)
-                Next
-            End If
-            Dim toSend(currentsendsectorcount * SectorLength - 1) As Byte
-            Array.Copy(source, source.Length - remain, toSend, 0, sendlen)
+            Dim sendlen As Integer = Math.Min(maxTransferBytes, remain)
+            Dim sectorCount As Integer = (sendlen - 1) \ sectorLen + 1
+            Dim transferLen As Integer = sectorCount * sectorLen
+            Dim toSend(transferLen - 1) As Byte
+            Array.Copy(source, sourceOffset, toSend, 0, sendlen)
             Dim cdb As Byte() = {
                 &H2A, 0,
-                CByte(CLng((currentLBA >> 24)) And &HFF),
-                CByte(CLng((currentLBA >> 16)) And &HFF),
-                CByte(CLng((currentLBA >> 8)) And &HFF),
-                CByte(CLng((currentLBA >> 0)) And &HFF),
+                CByte((currentLBA >> 24) And &HFFUL),
+                CByte((currentLBA >> 16) And &HFFUL),
+                CByte((currentLBA >> 8) And &HFFUL),
+                CByte(currentLBA And &HFFUL),
                 0,
-                CByte((currentsendsectorcount >> 8) And &HFF),
-                CByte((currentsendsectorcount >> 0) And &HFF),
-                 0}
-            TapeUtils.SendSCSICommand(handle, cdb, toSend, 0, senseReport, 600)
+                CByte((sectorCount >> 8) And &HFF),
+                CByte(sectorCount And &HFF),
+                0}
+            If Not TapeUtils.SendSCSICommand(handle, cdb, toSend, 0, senseReport, 600) Then Return False
             RaiseEvent ReportSCSICDB(cdb)
+            sourceOffset += sendlen
             remain -= sendlen
-            currentLBA = CULng(currentLBA + currentsendsectorcount)
-            If Not Conventional Then
-                Dim nextZone As Zone = GetZoneByLBA(currentLBA)
-                If nextZone.ZoneStartLBA > currentEndZone.ZoneStartLBA Then
-                    For i As Integer = ZoneList.IndexOf(currentZone) To ZoneList.IndexOf(currentZone)
-                        FinishZone(ZoneList(i).ZoneStartLBA)
-                    Next
-                Else
-                    For i As Integer = ZoneList.IndexOf(currentZone) To ZoneList.IndexOf(currentEndZone) - 1
-                        FinishZone(ZoneList(i).ZoneStartLBA)
-                    Next
-                End If
-                currentZone = nextZone
-            End If
+            currentLBA += CULng(sectorCount)
         End While
-        If Not Conventional AndAlso tempData.Count > 0 Then
-            For Each kv In tempData.OrderBy(Function(x) x.Key)
-                WriteBytes(kv.Value, kv.Key, 0, True)
-            Next
-        End If
-        If Not Conventional Then
-            'check zone condition
-            RefreshZoneCondition(currentEndZone)
-            If currentEndZone.ZoneCondition <> Zone.ZoneConditionDef.FULL AndAlso
-                currentEndZone.ZoneCondition <> Zone.ZoneConditionDef.CLOSED AndAlso
-                currentEndZone.ZoneCondition <> Zone.ZoneConditionDef.NOT_WRITE_POINTER Then
-                CloseZone(currentEndZone.ZoneStartLBA)
-            End If
-        End If
         Return True
     End Function
 
@@ -2806,7 +2731,7 @@ Public Class ZBCDeviceHelper
                                 Else
                                     Dim paddingsectors As Integer = CInt(currstartLBA - currZone.ZoneWritePointerLBA)
                                     Dim Padding(paddingsectors * SectorLength - 1) As Byte
-                                    WriteBytes(Padding, currZone.ZoneWritePointerLBA, 0, True)
+                                    WriteBytesConventional(Padding, currZone.ZoneWritePointerLBA)
                                     currZone.ZoneWritePointerLBA = currstartLBA
                                     needDump = False
                                     writeFromZoneHeader = False
@@ -2836,10 +2761,10 @@ Public Class ZBCDeviceHelper
 
                     Array.Copy(Param, CInt((currstartLBA - startLBA) * SectorLength), toWrite,
                                     destOffset, CInt(currsectorCnt * SectorLength))
-                    result = WriteBytes(toWrite, writeStartLBA, 0, True, Function(sdata As Byte())
-                                                                             lastSense = sdata
-                                                                             Return True
-                                                                         End Function)
+                    result = WriteBytesConventional(toWrite, writeStartLBA, Function(sdata As Byte())
+                                                                                lastSense = sdata
+                                                                                Return True
+                                                                            End Function)
                     RefreshZoneCondition(currZone)
                     If currZone.ZoneCondition = Zone.ZoneConditionDef.FULL Then
                         CurrentOpenedZone.Remove(currZone)
@@ -2897,7 +2822,7 @@ Public Class ZBCDeviceHelper
         Dim LenLBABytes As Byte() = BigEndianConverter.GetBytes(CULng(Math.Ceiling((dataBinary.Length) / SectorLength)))
         Array.Copy(StartLBABytes, 0, vol1, &H1CE + 8, 8)
         Array.Copy(LenLBABytes, 0, vol1, &H1CE + 12, 8)
-        WriteBytes(vol1, 0, 0, True)
+        WriteBytesConventional(vol1, 0)
     End Sub
     <Serializable>
     Public Class ZBCDataHelper
@@ -2907,7 +2832,7 @@ Public Class ZBCDeviceHelper
         Public Property CMRDataLength As ULong
         Public Sub WriteCMRData(toWrite As Byte())
             CMRDataLength = CULng(toWrite.Length)
-            Device.WriteBytes(toWrite, CMRDataStartLBA, 0, True)
+            Device.WriteBytesConventional(toWrite, CMRDataStartLBA)
         End Sub
         Public Function ReadCMRData() As Byte()
             Return Device.ReadBytes(CMRDataStartLBA, 0, CMRDataLength)

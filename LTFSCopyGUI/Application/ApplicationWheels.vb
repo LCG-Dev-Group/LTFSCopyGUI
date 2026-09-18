@@ -1375,4 +1375,66 @@ Public NotInheritable Class FileDropHandler
     End Sub
 End Class
 
+Public Class TrieMatcher
+    Private ReadOnly _root As New TrieNode()
 
+    ' 前缀树节点定义
+    Private Class TrieNode
+        ' 使用大数组会占用较多内存，但查找是 O(1) 的。
+        ' 如果开头字节范围很广，可以用 Dictionary(Of Byte, TrieNode)，但在 Framework 下会有装箱开销。
+        ' 这里采用 256 长度的数组，换取极致的查找速度
+        Public ReadOnly Children As TrieNode() = New TrieNode(255) {}
+        Public IsEnd As Boolean = False
+        Public TypeValue As Byte = 0
+    End Class
+
+    ''' <summary>
+    ''' 注册前缀序列
+    ''' </summary>
+    Public Sub Register(prefix As Byte(), typeValue As Byte)
+        If prefix Is Nothing OrElse prefix.Length = 0 Then Return
+
+        Dim current As TrieNode = _root
+        For Each b As Byte In prefix
+            If current.Children(b) Is Nothing Then
+                current.Children(b) = New TrieNode()
+            End If
+            current = current.Children(b)
+        Next
+        current.IsEnd = True
+        current.TypeValue = typeValue
+    End Sub
+
+    ''' <summary>
+    ''' 查找
+    ''' </summary>
+    Public Function TryGetValue(source As Byte(), ByRef outType As Byte) As Boolean
+        If source Is Nothing OrElse source.Length = 0 Then Return False
+
+        Dim current As TrieNode = _root
+        Dim lastMatchedType As Byte = 0
+        Dim hasMatch As Boolean = False
+
+        ' 沿树向下遍历源数组
+        For i As Integer = 0 To source.Length - 1
+            Dim b As Byte = source(i)
+            current = current.Children(b)
+
+            ' 如果树断了，说明后面不可能匹配上了，直接退出
+            If current Is Nothing Then Exit For
+
+            ' 记录沿途匹配到的最新（最长）的有效类型
+            If current.IsEnd Then
+                lastMatchedType = current.TypeValue
+                hasMatch = True
+            End If
+        Next
+
+        If hasMatch Then
+            outType = lastMatchedType
+            Return True
+        End If
+
+        Return False
+    End Function
+End Class
