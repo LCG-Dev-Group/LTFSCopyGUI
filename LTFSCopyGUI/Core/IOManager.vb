@@ -2624,6 +2624,41 @@ Public Class ZBCDeviceHelper
         End While
         Return result.ToArray()
     End Function
+    Public Function ReadBytes(StartLBA As ULong, ByVal ByteOffset As UInt16, ReadLen As ULong, ByVal Destination As Byte(), ByVal DestinationOffset As Integer) As Boolean
+        If ReadLen = 0 Then Return True
+        If ReadLen > CULng(Destination.Length - DestinationOffset) Then Return False
+
+        Dim remain As ULong = ReadLen
+        Dim currentLBA As ULong = StartLBA
+        Dim currentOffset As Integer = ByteOffset
+        Dim destOffset As Integer = DestinationOffset
+        Dim maxSectorCount As Integer = CInt(Math.Truncate(CommandLengthLimit / SectorLength))
+
+        While remain > 0
+            Dim sectorCount As Integer = CInt(Math.Min(CULng(maxSectorCount), (CULng(currentOffset) + remain + CULng(SectorLength) - 1UL) \ CULng(SectorLength)))
+            Dim cdb As Byte() = {&H28, 0,
+            CByte((currentLBA >> 24) And &HFFUL),
+            CByte((currentLBA >> 16) And &HFFUL),
+            CByte((currentLBA >> 8) And &HFFUL),
+            CByte(currentLBA And &HFFUL),
+            0,
+            CByte((sectorCount >> 8) And &HFF),
+            CByte(sectorCount And &HFF),
+            0}
+            Dim data As Byte() = TapeUtils.SCSIReadParam(handle, cdb, sectorCount * SectorLength)
+            RaiseEvent ReportSCSICDB(cdb)
+
+            If data Is Nothing OrElse data.Length <= currentOffset Then Return False
+            Dim copyLen As Integer = CInt(Math.Min(CULng(data.Length - currentOffset), remain))
+            Buffer.BlockCopy(data, currentOffset, Destination, destOffset, copyLen)
+
+            remain -= CULng(copyLen)
+            destOffset += copyLen
+            currentLBA += CULng(sectorCount)
+            currentOffset = 0
+        End While
+        Return True
+    End Function
     Public Function WriteBytesConventional(ByVal source As Byte(), StartLBA As ULong, Optional senseReport As Func(Of Byte(), Boolean) = Nothing) As Boolean
         If source Is Nothing OrElse source.Length = 0 Then Return True
         Dim sectorLen As Integer = SectorLength
@@ -2658,7 +2693,55 @@ Public Class ZBCDeviceHelper
         End While
         Return True
     End Function
-
+    Public Function WriteBytesConventional(ByVal source As Byte(), ByVal transferLength As Integer, StartLBA As ULong, Optional senseReport As Func(Of Byte(), Boolean) = Nothing) As Boolean
+        If source Is Nothing OrElse transferLength = 0 Then Return True
+        If transferLength < 0 OrElse transferLength > source.Length Then Return False
+        Dim sectorLen As Integer = SectorLength
+        If sectorLen <= 0 Then Return False
+        Dim maxSectorCount As Integer = Math.Min(&HFFFF, CommandLengthLimit \ sectorLen)
+        If maxSectorCount <= 0 Then Return False
+        Dim maxTransferBytes As Integer = maxSectorCount * sectorLen
+        Dim remain As Integer = transferLength
+        Dim sourceOffset As Integer = 0
+        Dim currentLBA As ULong = StartLBA
+        While remain > 0
+            Dim sendlen As Integer = Math.Min(maxTransferBytes, remain)
+            Dim sectorCount As Integer = (sendlen - 1) \ sectorLen + 1
+            Dim transferLen As Integer = sectorCount * sectorLen
+            Dim toSend(transferLen - 1) As Byte
+            Array.Copy(source, sourceOffset, toSend, 0, sendlen)
+            Dim cdb As Byte() = {
+                &H2A, 0,
+                CByte((currentLBA >> 24) And &HFFUL),
+                CByte((currentLBA >> 16) And &HFFUL),
+                CByte((currentLBA >> 8) And &HFFUL),
+                CByte(currentLBA And &HFFUL),
+                0,
+                CByte((sectorCount >> 8) And &HFF),
+                CByte(sectorCount And &HFF),
+                0}
+            If Not TapeUtils.SendSCSICommand(handle, cdb, toSend, transferLen, 0, senseReport, 600) Then Return False
+            RaiseEvent ReportSCSICDB(cdb)
+            sourceOffset += sendlen
+            remain -= sendlen
+            currentLBA += CULng(sectorCount)
+        End While
+        Return True
+    End Function
+    Public ZoneBuffer As Byte()
+    Public Function GetZoneBuffer(size As Integer) As Byte()
+        If ZoneBuffer Is Nothing OrElse ZoneBuffer.Length < size Then
+            ReDim ZoneBuffer(size - 1)
+        End If
+        Return ZoneBuffer
+    End Function
+    Public paddingBuffer As Byte()
+    Public Function GetPaddingBuffer(size As Integer) As Byte()
+        If paddingBuffer Is Nothing OrElse paddingBuffer.Length < size Then
+            ReDim paddingBuffer(size - 1)
+        End If
+        Return paddingBuffer
+    End Function
     Public Function HandleSCSICommand(commandBytes As Byte(), Param As Byte(), dataIn As Byte, dataLen As Integer, ByRef Response As Byte(), ByRef sense As Byte(), Optional ByVal timeout As Integer = 600) As Boolean
         Select Case commandBytes(0)
             Case &H2A
@@ -2675,6 +2758,11 @@ Public Class ZBCDeviceHelper
                 Dim startZone = ZoneList.IndexOf(GetZoneByLBA(startLBA))
                 Dim endZone = ZoneList.IndexOf(GetZoneByLBA(startLBA + sectorCount - 1UL))
                 Dim lastSense() As Byte = {}
+                Dim senseCallback As Func(Of Byte(), Boolean) =
+                    Function(sdata As Byte())
+                        lastSense = sdata
+                        Return True
+                    End Function
                 Dim result As Boolean = True
                 For i As Integer = startZone To endZone
                     Dim currZone = ZoneList(i)
@@ -2730,8 +2818,15 @@ Public Class ZBCDeviceHelper
                                     writeFromZoneHeader = False
                                 Else
                                     Dim paddingsectors As Integer = CInt(currstartLBA - currZone.ZoneWritePointerLBA)
-                                    Dim Padding(paddingsectors * SectorLength - 1) As Byte
-                                    WriteBytesConventional(Padding, currZone.ZoneWritePointerLBA)
+                                    Dim maxPaddingSectors As Integer = Math.Max(1, CommandLengthLimit \ SectorLength)
+                                    Dim paddingBuffer = GetPaddingBuffer(maxPaddingSectors * SectorLength)
+                                    While paddingsectors > 0
+                                        Dim count As Integer = CInt(Math.Min(CULng(maxPaddingSectors), paddingsectors))
+                                        Dim paddingLen = count * SectorLength
+                                        If Not WriteBytesConventional(paddingBuffer, paddingLen, currZone.ZoneWritePointerLBA) Then Return False
+                                        currZone.ZoneWritePointerLBA += CULng(count)
+                                        paddingsectors -= count
+                                    End While
                                     currZone.ZoneWritePointerLBA = currstartLBA
                                     needDump = False
                                     writeFromZoneHeader = False
@@ -2748,11 +2843,13 @@ Public Class ZBCDeviceHelper
                         totalSectorsToWrite += currstartLBA - currZone.ZoneStartLBA
                         writeStartLBA = currZone.ZoneStartLBA
                     End If
-                    Dim toWrite(CInt(totalSectorsToWrite * SectorLength) - 1) As Byte
+                    Dim totalBytesToWrite As Integer = CInt(totalSectorsToWrite * SectorLength)
+                    Dim toWrite() As Byte = GetZoneBuffer(totalBytesToWrite)
                     If needDump Then
-                        Dim readed = ReadBytes(currZone.ZoneStartLBA, 0, (currstartLBA - currZone.ZoneStartLBA) * SectorLength)
-                        Array.Copy(readed, toWrite, readed.Length)
+                        If Not ReadBytes(currZone.ZoneStartLBA, 0, (currstartLBA - currZone.ZoneStartLBA) * SectorLength, toWrite, 0) Then Return False
                         ResetWritePointer(currZone.ZoneStartLBA)
+                    ElseIf writeFromZoneHeader Then
+                        Array.Clear(toWrite, 0, CInt((currstartLBA - currZone.ZoneStartLBA) * SectorLength))
                     End If
                     Dim destOffset As Integer = 0
                     If writeFromZoneHeader Then
@@ -2761,10 +2858,7 @@ Public Class ZBCDeviceHelper
 
                     Array.Copy(Param, CInt((currstartLBA - startLBA) * SectorLength), toWrite,
                                     destOffset, CInt(currsectorCnt * SectorLength))
-                    result = WriteBytesConventional(toWrite, writeStartLBA, Function(sdata As Byte())
-                                                                                lastSense = sdata
-                                                                                Return True
-                                                                            End Function)
+                    result = WriteBytesConventional(toWrite, totalBytesToWrite, writeStartLBA, senseCallback)
                     RefreshZoneCondition(currZone)
                     If currZone.ZoneCondition = Zone.ZoneConditionDef.FULL Then
                         CurrentOpenedZone.Remove(currZone)

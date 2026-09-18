@@ -7305,15 +7305,17 @@ Public Class TapeUtils
     End Function
     Public Shared Function SendSCSICommand(handle As IntPtr, cdbData As Byte(), ByRef Data As Byte(), ByVal DataLen As Integer, Optional DataIn As Byte = 2, Optional ByVal senseReport As Func(Of Byte(), Boolean) = Nothing, Optional ByVal TimeOut As Integer = 60000) As Boolean
         Dim dataBufferPtr As IntPtr
-        If Data IsNot Nothing Then
+        If Data IsNot Nothing AndAlso Data.Length > 0 Then
+            If DataLen > Data.Length Then Return False
             dataBufferPtr = Marshal.AllocHGlobal(DataLen)
             Marshal.Copy(Data, 0, dataBufferPtr, DataLen)
         Else
             dataBufferPtr = Marshal.AllocHGlobal(128)
+            DataLen = 0
         End If
         Dim senseBuffer(63) As Byte
         Dim succ As Boolean = TapeSCSIIOCtlUnmanaged(handle, cdbData, dataBufferPtr, CUInt(DataLen), DataIn, CUInt(TimeOut), senseBuffer)
-        If succ AndAlso Data IsNot Nothing AndAlso DataIn <> 1 Then Marshal.Copy(dataBufferPtr, Data, 0, DataLen)
+        If succ AndAlso Data IsNot Nothing AndAlso Data.Length > 0 AndAlso DataIn <> 0 Then Marshal.Copy(dataBufferPtr, Data, 0, DataLen)
         If senseReport IsNot Nothing Then
             senseReport(senseBuffer)
         End If
