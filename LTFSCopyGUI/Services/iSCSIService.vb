@@ -674,9 +674,6 @@ Public Class ZBCISCSIService
         Private ReadOnly _commandLock As AutoResetEvent = New AutoResetEvent(False)
 
         Public Sub QueueCommand(commandBytes() As Byte, lun As LUNStructure, data() As Byte, task As Object, OnCommandCompleted As OnCommandCompleted) Implements SCSITargetInterface.QueueCommand
-
-            ' 【优化 1】抛弃重型的 New Task()，改用高效的线程池工作项。
-            ' 如果要彻底压榨 IOPS，建议此处将参数打包投递到预分配的无锁 FIFO 队列中。
             ThreadPool.QueueUserWorkItem(
                 Sub()
                     Dim cmddir As Byte = GetDataDir(commandBytes)
@@ -685,7 +682,6 @@ Public Class ZBCISCSIService
                     If cmddir <> 0 Then
                         datalen = 1024
 
-                        ' 此处的 Select Case 保持原样，编译器底层有极好的二分树和跳转表优化
                         Select Case commandBytes(0)
                             Case &H0, &H1, &HB, &H10, &H11, &H13, &H16, &H17, &H19, &H1B, &H1E, &H2B, &H2F, &H56, &H57, &H8F, &H91, &H92, &H94, &HAF
                                 datalen = 0
@@ -790,8 +786,6 @@ Public Class ZBCISCSIService
                         End If
                     Else
                         status = SCSIStatusCodeName.CheckCondition
-                        ' 【优化 2】彻底抛弃 LINQ 扩展方法 Concat 和 ToArray
-                        ' 改用传统的 Buffer.BlockCopy，耗时下降一个数量级，内存分配极小
                         Dim totalLen As Integer = 2 + sense.Length + responsedata.Length
                         response = New Byte(totalLen - 1) {}
 

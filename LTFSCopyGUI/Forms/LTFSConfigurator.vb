@@ -3606,13 +3606,40 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
             Dim cdbStat As String = ""
             AddHandler svc.LogPrint, Sub(s As String)
                                          svcStat = $"{s}{vbCrLf}"
+                                         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSConfigurator))
+                                             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Configurator")
+                                                 Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
+                                                     Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
+                                                         Log.Error(svcStat)
+                                                     End Using
+                                                 End Using
+                                             End Using
+                                         End Using
                                      End Sub
             AddHandler disk.StatusReport, Sub(s As String)
                                               zbcStat = $"ZBC>{Now.Ticks} {s}{vbCrLf}"
+                                              Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSConfigurator))
+                                                  Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Configurator")
+                                                      Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
+                                                          Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
+                                                              Log.Error(zbcStat)
+                                                          End Using
+                                                      End Using
+                                                  End Using
+                                              End Using
                                           End Sub
             If My.Settings.LTFSWriter_LogEnabled Then
                 AddHandler disk.ReportSCSICDB, Sub(data As Byte())
                                                    cdbStat = $"ZBC>{Now.Ticks} {IOManager.Byte2Hex(data, False)}"
+                                                   Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSConfigurator))
+                                                       Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Configurator")
+                                                           Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
+                                                               Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
+                                                                   Log.Error(cdbStat)
+                                                               End Using
+                                                           End Using
+                                                       End Using
+                                                   End Using
                                                End Sub
             End If
             svc.port = port

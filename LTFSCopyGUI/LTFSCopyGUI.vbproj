@@ -313,6 +313,7 @@
     <Compile Include="Controls\Direct2DChartControl.vb">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="Core\ZoneBlockCommand.vb" />
     <Compile Include="Forms\ChangerTool.Designer.vb">
       <DependentUpon>ChangerTool.vb</DependentUpon>
     </Compile>
