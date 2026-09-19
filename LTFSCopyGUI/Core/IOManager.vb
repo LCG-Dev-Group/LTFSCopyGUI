@@ -136,7 +136,20 @@ Public Class IOManager
         If ln.Length > 0 Then sb.Append(ln.ToString().PadRight(74) & "|")
         Return sb.ToString()
     End Function
+    Private Shared ReadOnly HexChars As Char() = "0123456789ABCDEF".ToCharArray()
+    Public Shared Function Bytes2HexFastContinuous(data As Byte()) As String
+        If data Is Nothing OrElse data.Length = 0 Then Return String.Empty
 
+        Dim chars(data.Length * 2 - 1) As Char
+
+        For i As Integer = 0 To data.Length - 1
+            Dim b As Integer = data(i)
+            chars(i * 2) = HexChars(b >> 4)
+            chars(i * 2 + 1) = HexChars(b And &HF)
+        Next
+
+        Return New String(chars)
+    End Function
     Public Shared Function SHA1(filename As String, LogFile As String()) As String
         If LogFile.Contains("[hash] " & filename) Then
 

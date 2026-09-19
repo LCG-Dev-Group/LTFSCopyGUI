@@ -3609,8 +3609,8 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                                          Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSConfigurator))
                                              Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Configurator")
                                                  Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                                                     Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
-                                                         Log.Error(svcStat)
+                                                     Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Info")
+                                                         Log.Information(svcStat)
                                                      End Using
                                                  End Using
                                              End Using
@@ -3621,8 +3621,8 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                                               Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSConfigurator))
                                                   Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Configurator")
                                                       Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                                                          Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
-                                                              Log.Error(zbcStat)
+                                                          Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Info")
+                                                              Log.Information(zbcStat)
                                                           End Using
                                                       End Using
                                                   End Using
@@ -3630,12 +3630,12 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                                           End Sub
             If My.Settings.LTFSWriter_LogEnabled Then
                 AddHandler disk.ReportSCSICDB, Sub(data As Byte())
-                                                   cdbStat = $"ZBC>{Now.Ticks} {IOManager.Byte2Hex(data, False)}"
+                                                   cdbStat = $"ZBC>{Now.Ticks} {IOManager.Bytes2HexFastContinuous(data)}"
                                                    Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(LTFSConfigurator))
                                                        Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Configurator")
                                                            Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
-                                                               Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Error")
-                                                                   Log.Error(cdbStat)
+                                                               Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "Info")
+                                                                   Log.Information(cdbStat)
                                                                End Using
                                                            End Using
                                                        End Using
