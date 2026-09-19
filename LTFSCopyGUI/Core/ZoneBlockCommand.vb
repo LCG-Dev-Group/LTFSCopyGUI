@@ -1,4 +1,5 @@
 ﻿Imports System.IO
+Imports System.Runtime.CompilerServices
 Imports System.Text
 Imports System.Threading
 Imports System.Xml.Serialization
@@ -76,12 +77,13 @@ Public Class ZBCDeviceHelper
     End Class
     Public Property ZoneList As New List(Of Zone)
     Private ZoneLBAMap As New Dictionary(Of ULong, Zone)
+    <MethodImpl(MethodImplOptions.NoOptimization Or MethodImplOptions.NoInlining)>
     Public Sub InitDevice()
+        My.Settings.TapeUtils_DriverType = TapeUtils.DriverType.ZBCDevice
         TapeUtils.LoadEject(handle, TapeUtils.LoadOption.LoadThreaded)
         Dim MP03 As Byte() = TapeUtils.ModeSense(handle, 3)
         SectorLength = CUShort(BigEndianConverter.ToUInt16(MP03, 12))
         ReportZones()
-        LoadData()
         RaiseEvent StatusReport($"SectorLEN={SectorLength} Zonecount={ZoneList.Count} OpenedZoneCount={CurrentOpenedZone.Count}/{MaxZoneOpened}")
     End Sub
     Public Sub ReportZones(Optional ByVal opt As Byte = 0)
@@ -348,7 +350,7 @@ Public Class ZBCDeviceHelper
     End Function
     Public Function ReadBytes(StartLBA As ULong, ByVal ByteOffset As UInt16, ReadLen As ULong) As Byte()
         Dim result As New List(Of Byte)
-        Dim remain As ULong = ReadLen
+        Dim remain As Long = CLng(ReadLen)
         Dim oncereadsectorcount As Integer = CInt(Math.Truncate(CommandLengthLimit / SectorLength))
         Dim currentLBA As ULong = StartLBA
         While remain > 0
@@ -368,7 +370,7 @@ Public Class ZBCDeviceHelper
             End If
             If data.Length > remain Then data = data.Take(CInt(remain)).ToArray()
             result.AddRange(data)
-            remain = CULng(remain - data.Length)
+            remain = remain - data.Length
             currentLBA = CULng(currentLBA + oncereadsectorcount)
         End While
         Return result.ToArray()
@@ -808,6 +810,8 @@ Public Class ZBCDeviceHelper
     Public Function ForceFlushZone(StartLBA As ULong, SectorCount As Integer) As Boolean
         If LastWrittenZone IsNot Nothing Then
             Dim Remaining As Long = SectorCount
+            If StartLBA > LastWrittenZone.ZoneEndLBA Then Return True
+            If StartLBA + SectorCount <= LastWrittenZone.ZoneStartLBA Then Return True
             Dim CurrentLBA As ULong = StartLBA
             While Remaining > 0
                 If LastWrittenZone.ZoneStartLBA <= CurrentLBA AndAlso CurrentLBA <= LastWrittenZone.ZoneEndLBA Then

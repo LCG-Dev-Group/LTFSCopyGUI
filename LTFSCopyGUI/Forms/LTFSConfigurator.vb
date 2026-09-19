@@ -3599,7 +3599,6 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
             TapeUtils.OpenTapeDrive(ConfTapeDrive, drvHandle)
             Dim devdata As TapeUtils.BlockDevice = TapeUtils.Inquiry(drvHandle)
             Dim disk As New ZBCDeviceHelper With {.handle = drvHandle}
-            disk.InitDevice()
             Dim svc As New ZBCISCSIService() With {.ZoneDevice = disk}
             Dim svcStat As String = ""
             Dim zbcStat As String = ""
@@ -3642,6 +3641,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                                                    End Using
                                                End Sub
             End If
+            disk.InitDevice()
             svc.port = port
             If My.Settings.LTFSWriter_LogEnabled Then svc.LogCommand = True
             Task.Run(Sub()
