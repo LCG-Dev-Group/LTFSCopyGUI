@@ -508,13 +508,12 @@ Public Class ZBCDeviceHelper
                         sectorCount = sectorCount Or commandBytes(i)
                     Next
                     If sectorCount = 0 Then
-                        sense = {}
                         Return True
                     End If
                     RaiseEvent StatusReport($"SCSIOP 0x2A WRITE LBA={startLBA.ToString()} SECTOR={sectorCount}")
                     Dim startZone = ZoneList.IndexOf(GetZoneByLBA(startLBA))
                     Dim endZone = ZoneList.IndexOf(GetZoneByLBA(startLBA + sectorCount - 1UL))
-                    Dim lastSense() As Byte = {}
+                    Dim lastSense(63) As Byte
                     Dim senseCallback As Func(Of Byte(), Boolean) =
                     Function(sdata As Byte())
                         lastSense = sdata
@@ -747,8 +746,11 @@ Public Class ZBCDeviceHelper
             RaiseEvent StatusReport($"Readout required. ZoneStart={zoneToWrite.ZoneStartLBA.ToString()} WriteAt={StartLBA.ToString()} WriteCount={SectorCnt} TotalWriteCount={totalSectorsToWrite}")
         End If
         Dim result As Boolean = True
-        result = UpdateZoneBuffer(zoneToWrite, writeStartLBA, CInt(totalSectorsToWrite), toWrite, 0)
-        'result = WriteBytesConventional(toWrite, totalBytesToWrite, writeStartLBA, senseCallback)
+        If zoneToWrite.ZoneType = Zone.ZoneTypeDef.Conventional Then
+            result = WriteBytesConventional(toWrite, totalBytesToWrite, writeStartLBA, senseCallback)
+        Else
+            result = UpdateZoneBuffer(zoneToWrite, writeStartLBA, CInt(totalSectorsToWrite), toWrite, 0)
+        End If
         If zoneToWrite.ZoneCondition = Zone.ZoneConditionDef.FULL Then
             CurrentOpenedZone.Remove(zoneToWrite)
         End If
