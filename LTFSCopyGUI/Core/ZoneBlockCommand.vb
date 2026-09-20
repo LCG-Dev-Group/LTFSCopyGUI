@@ -762,79 +762,90 @@ Public Class ZBCDeviceHelper
     Public Function UpdateZoneBuffer(zoneToWrite As Zone, StartLBA As ULong, SectorCount As Integer, Source As Byte(), SourceOffset As Integer) As Boolean
         Dim CopyStart As Integer = CInt(StartLBA - zoneToWrite.ZoneStartLBA) * SectorLength
         Dim CopyLen As Integer = SectorCount * SectorLength
-        If LastWrittenZone Is Nothing OrElse LastWrittenZone IsNot zoneToWrite Then
-            If LastWrittenZone IsNot Nothing Then
-                If Not ForceFlushZone(LastWrittenZone.ZoneStartLBA, 1) Then Return False
+        SyncLock BufferLock
+            If LastWrittenZone Is Nothing OrElse LastWrittenZone IsNot zoneToWrite Then
+                If LastWrittenZone IsNot Nothing Then
+                    If Not ForceFlushZone(LastWrittenZone.ZoneStartLBA, 1) Then Return False
+                End If
+                LastWrittenZone = zoneToWrite
+                Dim ZoneLengthInBytes As Integer = CInt(zoneToWrite.ZoneEndLBA - zoneToWrite.ZoneStartLBA + 1) * SectorLength
+                If LastWrittenZoneData Is Nothing OrElse LastWrittenZoneData.Length <> ZoneLengthInBytes Then
+                    ReDim LastWrittenZoneData(ZoneLengthInBytes - 1)
+                Else
+                    If CopyStart > 0 Then Array.Clear(LastWrittenZoneData, 0, CopyStart)
+                    If CopyStart + CopyLen < LastWrittenZoneData.Length Then Array.Clear(LastWrittenZoneData, CopyStart + CopyLen, (LastWrittenZoneData.Length - CopyStart - CopyLen))
+                End If
             End If
-            LastWrittenZone = zoneToWrite
-            Dim ZoneLengthInBytes As Integer = CInt(zoneToWrite.ZoneEndLBA - zoneToWrite.ZoneStartLBA + 1) * SectorLength
-            If LastWrittenZoneData Is Nothing OrElse LastWrittenZoneData.Length <> ZoneLengthInBytes Then
-                ReDim LastWrittenZoneData(ZoneLengthInBytes - 1)
-            Else
-                If CopyStart > 0 Then Array.Clear(LastWrittenZoneData, 0, CopyStart)
-                If CopyStart + CopyLen < LastWrittenZoneData.Length Then Array.Clear(LastWrittenZoneData, CopyStart + CopyLen, (LastWrittenZoneData.Length - CopyStart - CopyLen))
-            End If
-        End If
-        Array.Copy(Source, SourceOffset, LastWrittenZoneData, CopyStart, CopyLen)
-        Interlocked.Exchange(LastBufferUpdateTimeStamp, Stopwatch.GetTimestamp())
-        If UpdateTask Is Nothing Then
-            UpdateCTS = New CancellationTokenSource()
-            Dim token As CancellationToken = UpdateCTS.Token
-            UpdateTask = Task.Run(Sub()
-                                      Try
-                                          While True
+            Array.Copy(Source, SourceOffset, LastWrittenZoneData, CopyStart, CopyLen)
+            BufferWritten = False
+            Interlocked.Exchange(LastBufferUpdateTimeStamp, Stopwatch.GetTimestamp())
+            If UpdateTask Is Nothing Then
+                UpdateCTS = New CancellationTokenSource()
+                Dim token As CancellationToken = UpdateCTS.Token
+                UpdateTask = Task.Run(Sub()
+                                          Try
+                                              While True
+                                                  token.ThrowIfCancellationRequested()
+                                                  Dim lastTimestamp = Interlocked.Read(LastBufferUpdateTimeStamp)
+                                                  Dim elapsedSeconds = (Stopwatch.GetTimestamp() - lastTimestamp) / Stopwatch.Frequency
+                                                  If elapsedSeconds >= AutoFlushIdleSeconds Then Exit While
+                                                  If token.WaitHandle.WaitOne(100) Then token.ThrowIfCancellationRequested()
+                                              End While
                                               token.ThrowIfCancellationRequested()
-                                              Dim lastTimestamp = Interlocked.Read(LastBufferUpdateTimeStamp)
-                                              Dim elapsedSeconds = (Stopwatch.GetTimestamp() - lastTimestamp) / Stopwatch.Frequency
-                                              If elapsedSeconds >= AutoFlushIdleSeconds Then Exit While
-                                              If token.WaitHandle.WaitOne(100) Then token.ThrowIfCancellationRequested()
-                                          End While
-                                          token.ThrowIfCancellationRequested()
-                                          '自动回写入口内部也会获取 _SCSICommandHandlerLock
-                                          If Not ZoneAutoFlush(token) Then
-                                              Throw New Exception("Zone autoflush error")
-                                          End If
-                                      Catch ex As OperationCanceledException
-                                          '正常取消，不需要报错
-                                      End Try
-                                  End Sub)
-        End If
+                                              '自动回写入口内部也会获取 _SCSICommandHandlerLock
+                                              If Not ZoneAutoFlush(token) Then
+                                                  Throw New Exception("Zone autoflush error")
+                                              End If
+                                          Catch ex As OperationCanceledException
+                                              '正常取消，不需要报错
+                                          End Try
+                                      End Sub)
+            End If
+        End SyncLock
+
         Return True
     End Function
     Public Property LastWrittenZone As Zone
+    Public Property BufferWritten As Boolean = False
+    Public Property BufferLock As New Object
     Public Property LastWrittenZoneData As Byte()
     Public Property LastBufferUpdateTimeStamp As Long
     Public Property AutoFlushIdleSeconds As Double = 30
     Private UpdateTask As Task
     Private UpdateCTS As CancellationTokenSource
     Public Function ForceFlushZone(StartLBA As ULong, SectorCount As Integer) As Boolean
-        If LastWrittenZone IsNot Nothing Then
-            Dim Remaining As Long = SectorCount
-            If StartLBA > LastWrittenZone.ZoneEndLBA Then Return True
-            If StartLBA + SectorCount <= LastWrittenZone.ZoneStartLBA Then Return True
-            Dim CurrentLBA As ULong = StartLBA
-            While Remaining > 0
-                If LastWrittenZone.ZoneStartLBA <= CurrentLBA AndAlso CurrentLBA <= LastWrittenZone.ZoneEndLBA Then
-                    If Not ResetWritePointer(LastWrittenZone.ZoneStartLBA) Then Return False
-                    If Not WriteBytesConventional(LastWrittenZoneData, LastWrittenZoneData.Length, LastWrittenZone.ZoneStartLBA) Then Return False
-                    '取消尚在等待中的自动回写任务
-                    If UpdateCTS IsNot Nothing Then
-                        UpdateCTS.Cancel()
-                        UpdateCTS = Nothing
-                        UpdateTask = Nothing
+        SyncLock BufferLock
+            If LastWrittenZone IsNot Nothing Then
+                Dim Remaining As Long = SectorCount
+                If StartLBA > LastWrittenZone.ZoneEndLBA Then Return True
+                If StartLBA + SectorCount <= LastWrittenZone.ZoneStartLBA Then Return True
+                Dim CurrentLBA As ULong = StartLBA
+                While Remaining > 0
+                    If LastWrittenZone.ZoneStartLBA <= CurrentLBA AndAlso CurrentLBA <= LastWrittenZone.ZoneEndLBA Then
+                        If BufferWritten Then Exit While
+                        If Not ResetWritePointer(LastWrittenZone.ZoneStartLBA) Then Return False
+                        If Not WriteBytesConventional(LastWrittenZoneData, LastWrittenZoneData.Length, LastWrittenZone.ZoneStartLBA) Then Return False
+                        '取消尚在等待中的自动回写任务
+                        If UpdateCTS IsNot Nothing Then
+                            UpdateCTS.Cancel()
+                            UpdateCTS = Nothing
+                            UpdateTask = Nothing
+                        End If
+                        RefreshZoneCondition(LastWrittenZone)
+                        BufferWritten = True
+                        Remaining -= (CInt(LastWrittenZone.ZoneEndLBA - CurrentLBA) + 1)
+                        CurrentLBA = LastWrittenZone.ZoneEndLBA + 1UL
+                    Else
+                        Dim NextZone = GetZoneByLBA(CurrentLBA)
+                        If NextZone Is Nothing Then Exit While
+                        Dim NextLBA = NextZone.ZoneEndLBA + 1UL
+                        Remaining -= CInt(NextLBA - CurrentLBA)
+                        CurrentLBA = NextLBA
                     End If
-                    RefreshZoneCondition(LastWrittenZone)
-                    Remaining -= (CInt(LastWrittenZone.ZoneEndLBA - CurrentLBA) + 1)
-                    CurrentLBA = LastWrittenZone.ZoneEndLBA + 1UL
-                Else
-                    Dim NextZone = GetZoneByLBA(CurrentLBA)
-                    If NextZone Is Nothing Then Exit While
-                    Dim NextLBA = NextZone.ZoneEndLBA + 1UL
-                    Remaining -= CInt(NextLBA - CurrentLBA)
-                    CurrentLBA = NextLBA
-                End If
-            End While
-        End If
+                End While
+            End If
+        End SyncLock
+
         Return True
     End Function
     Public Function ZoneAutoFlush(token As CancellationToken) As Boolean
@@ -846,6 +857,12 @@ Public Class ZBCDeviceHelper
             UpdateTask = Nothing
             UpdateCTS = Nothing
             Return True
+        End SyncLock
+    End Function
+    Public Function SafeEject() As Boolean
+        SyncLock _SCSICommandHandlerLock
+            If LastWrittenZone Is Nothing Then Return True
+            Return ForceFlushZone(LastWrittenZone.ZoneStartLBA, 1)
         End SyncLock
     End Function
     Public Property Data As ZBCDataHelper

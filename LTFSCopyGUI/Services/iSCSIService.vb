@@ -866,6 +866,7 @@ Public Class ZBCISCSIService
         End Try
     End Sub
     Public Sub StopService()
+        If Not ZoneDevice.SafeEject() Then Throw New Exception("Safe eject failed.")
         If svc IsNot Nothing Then svc.Stop()
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(iSCSIService))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "iSCSI")
