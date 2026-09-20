@@ -473,6 +473,7 @@ Public Class ZBCDeviceHelper
                 CByte(sectorCount And &HFF),
                 0}
             If Not TapeUtils.SendSCSICommand(handle, cdb, toSend, transferLen, 0, senseReport, 600) Then Return False
+            RaiseEvent StatusReport($"Write LBA {currentLBA} SectorCount {sectorCount}")
             RaiseEvent ReportSCSICDB(cdb)
             sourceOffset += sendlen
             remain -= sendlen
@@ -861,8 +862,11 @@ Public Class ZBCDeviceHelper
     End Function
     Public Function SafeEject() As Boolean
         SyncLock _SCSICommandHandlerLock
-            If LastWrittenZone Is Nothing Then Return True
-            Return ForceFlushZone(LastWrittenZone.ZoneStartLBA, 1)
+            SyncLock BufferLock
+                If LastWrittenZone Is Nothing Then Return True
+                If BufferWritten Then Return True
+                Return ForceFlushZone(LastWrittenZone.ZoneStartLBA, 1)
+            End SyncLock
         End SyncLock
     End Function
     Public Property Data As ZBCDataHelper
