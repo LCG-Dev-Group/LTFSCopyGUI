@@ -621,12 +621,7 @@ pub unsafe extern "system" fn lfr_bridge_acquire_slot(
     if current.is_some() {
         return LFR_INVALID;
     }
-    let wait_started = Instant::now();
     let wait_result = bridge_wait_semaphore(context, context.full.0, timeout_ms);
-    context.header().read_wait_ns.fetch_add(
-        wait_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-        Ordering::Relaxed,
-    );
     if wait_result != LFR_OK {
         if wait_result == LFR_TIMEOUT
             && context.header().producer_done.load(Ordering::Acquire) != 0
@@ -926,14 +921,26 @@ fn scsi_read_block(
         allocation_length,
         timeout_seconds,
     )?;
+    scsi_read_length(&request, allocation_length)
+}
+
+fn scsi_read_length(request: &ScsiRequest, allocation_length: u32) -> io::Result<usize> {
     let key = request.sense[2] & 0x0f;
     let filemark = request.sense[2] & 0x80 != 0;
     let eom = request.sense[2] & 0x40 != 0;
     let ili = request.sense[2] & 0x20 != 0;
-    if request.pass.ScsiStatus != 0 || filemark || eom || (key != 0 && key != 1) {
+    // Match TapeUtils.ReadBlock(..., Truncate:=True), as used by
+    // LTFSWriter.ReadExtractionBlock: ILI with no sense-key error is not
+    // a failed READ. In particular, an extent may request only a record prefix.
+    let length_difference = request.pass.ScsiStatus == 2 && key == 0 && ili;
+    if (request.pass.ScsiStatus != 0 && !length_difference)
+        || filemark
+        || eom
+        || (key != 0 && key != 1)
+    {
         return Err(io::Error::other(format!(
             "READ failed: {}",
-            sense_description(&request)
+            sense_description(request)
         )));
     }
     let residual = i32::from_be_bytes([
@@ -942,11 +949,10 @@ fn scsi_read_block(
         request.sense[5],
         request.sense[6],
     ]);
-    let actual = if ili && residual > 0 {
-        allocation_length.saturating_sub(residual as u32)
-    } else {
-        allocation_length
-    };
+    // VB clamps DiffBytes to zero when Truncate=True, then returns
+    // BlockSizeLimit - DiffBytes. A negative residual means the requested
+    // prefix was read successfully; it must not trigger LOCATE + READ retries.
+    let actual = allocation_length.saturating_sub(residual.max(0) as u32);
     if actual == 0 {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -987,6 +993,7 @@ fn bridge_read_block_with_retry(
             if context.cancelled() {
                 return Err(cancelled_error());
             }
+            let read_started = Instant::now();
             let result = if need_locate || attempt > 0 {
                 scsi_locate(handle, partition, block, timeout_seconds).and_then(|_| {
                     scsi_read_block(handle, allocation_length, timeout_seconds, buffer)
@@ -994,6 +1001,11 @@ fn bridge_read_block_with_retry(
             } else {
                 scsi_read_block(handle, allocation_length, timeout_seconds, buffer)
             };
+            // Measure source SCSI time, not the consumer's empty-ring wait.
+            context.header().read_wait_ns.fetch_add(
+                read_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
             match result {
                 Ok(length) => return Ok(length),
                 Err(error) => last_error = Some(error),

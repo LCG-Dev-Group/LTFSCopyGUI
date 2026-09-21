@@ -4,6 +4,65 @@
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn read_reply(status: u8, transferred: u32, flags: u8, residual: i32) -> ScsiRequest {
+        let mut reply = ScsiRequest {
+            pass: SCSI_PASS_THROUGH_DIRECT::default(),
+            sense: [0; 64],
+        };
+        reply.pass.ScsiStatus = status;
+        reply.pass.DataTransferLength = transferred;
+        reply.pass.SenseInfoLength = 18;
+        reply.sense[0] = 0xf0;
+        reply.sense[2] = flags;
+        reply.sense[3..7].copy_from_slice(&residual.to_be_bytes());
+        reply
+    }
+
+    #[test]
+    fn tape_read_accepts_short_records_without_retrying_successful_data() {
+        let reply = read_reply(2, 1234, 0x20, 524288 - 1234);
+        // Ablation: the old status != GOOD predicate rejects a successful
+        // short record, causing all automatic LOCATE + READ retries to fail.
+        assert_ne!(reply.pass.ScsiStatus, 0);
+        assert_eq!(scsi_read_length(&reply, 524288).unwrap(), 1234);
+        assert_eq!(scsi_read_length(&read_reply(0, 524288, 0, 0), 524288).unwrap(), 524288);
+        // Same Truncate=True contract as VB: a negative residual returns
+        // the requested prefix, without rereading the longer physical record.
+        assert_eq!(scsi_read_length(&read_reply(2, 1234, 0x20, -100), 1234).unwrap(), 1234);
+    }
+
+    #[test]
+    fn tape_read_does_not_hide_errors_or_publish_missing_bytes() {
+        for reply in [
+            read_reply(2, 100, 0xa0, 100), // filemark
+            read_reply(2, 100, 0x60, 100), // EOM
+            read_reply(2, 100, 0x23, 100), // medium error
+            read_reply(2, 100, 0x25, 100), // illegal request
+            read_reply(8, 100, 0x20, 100), // busy
+            read_reply(2, 100, 0x20, 200), // zero-length result
+        ] {
+            assert!(scsi_read_length(&reply, 200).is_err());
+        }
+    }
+
+    #[test]
+    fn tape_read_residual_matches_vb_truncate_semantics() {
+        // TapeUtils.ReadBlock: DiffBytes = Max(DiffBytes, 0);
+        // DataLen = Min(BlockSizeLimit, BlockSizeLimit - DiffBytes).
+        for requested in [1u32, 1234, 524288] {
+            for residual in [i32::MIN, -100, -1, 0, 1, 100, 1233] {
+                let vb_length = i64::from(requested) - i64::from(residual.max(0));
+                let reply = read_reply(2, requested, 0x20, residual);
+                let actual = scsi_read_length(&reply, requested);
+                if vb_length > 0 {
+                    assert_eq!(actual.unwrap(), vb_length as usize);
+                } else {
+                    assert!(actual.is_err());
+                }
+            }
+        }
+    }
+
     struct TempFile(PathBuf);
 
     impl TempFile {

@@ -7850,7 +7850,7 @@ Public Class LTFSWriter
                 If SpeedLimit > 0 AndAlso CheckCount = 0 Then
                     Dim ts As Double = (Now - SpeedLimitLastTriggerTime).TotalSeconds
                     While SpeedLimit > 0 AndAlso ts > 0 AndAlso ((plabel.blocksize * CheckCycle / 1048576) / ts) > SpeedLimit
-                        Threading.Thread.Sleep(0)
+                        Threading.Thread.Sleep(1)
                         ts = (Now - SpeedLimitLastTriggerTime).TotalSeconds
                     End While
                     SpeedLimitLastTriggerTime = Now
@@ -13465,6 +13465,7 @@ Public Class LTFSWriter
                 End If
             Next
         End If
+        manifest.OrderFilesByTapePosition()
         Return manifest
     End Function
 

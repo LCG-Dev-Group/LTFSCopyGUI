@@ -21,6 +21,23 @@ Public NotInheritable Class DirectTapeCopyManifest
     Public Property SourceBlockSize As Integer
     Public Property Files As New List(Of DirectTapeCopyFile)
     Public Property Directories As New List(Of DirectTapeCopyDirectory)
+
+    Friend Sub OrderFilesByTapePosition()
+        ' Schedule all selected directories together, before ordinals are sent to the target.
+        ' Keep each file's extents in logical order; the bridge consumes whole files in FIFO order.
+        Files = Files.Select(Function(file) New With {
+                                 .File = file,
+                                 .FirstExtent = If(file.Length > 0 AndAlso String.IsNullOrEmpty(file.Symlink),
+                                                   file.Extents.OrderBy(Function(extent) extent.FileOffset).FirstOrDefault(),
+                                                   Nothing)}).
+            OrderBy(Function(entry) If(entry.FirstExtent Is Nothing, -1, entry.FirstExtent.Partition)).
+            ThenBy(Function(entry) If(entry.FirstExtent Is Nothing, -1L, entry.FirstExtent.StartBlock)).
+            ThenBy(Function(entry) If(entry.FirstExtent Is Nothing, -1L, entry.FirstExtent.ByteOffset)).
+            Select(Function(entry) entry.File).ToList()
+        For index As Integer = 0 To Files.Count - 1
+            Files(index).Ordinal = index
+        Next
+    End Sub
 End Class
 
 Public NotInheritable Class DirectTapeCopyDirectory

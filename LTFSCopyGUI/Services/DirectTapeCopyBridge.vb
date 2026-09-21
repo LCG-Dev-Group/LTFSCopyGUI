@@ -233,6 +233,13 @@ Friend NotInheritable Class DirectTapeCopyNative
         Throw New IOException(message)
     End Sub
 
+    Friend Shared Function ReadPerformanceStats(context As IntPtr) As RustFastReaderProvider.PerformanceStats
+        Dim result As New RustFastReaderProvider.PerformanceStats With {
+            .StructSize = CUInt(Marshal.SizeOf(GetType(RustFastReaderProvider.PerformanceStats)))}
+        ThrowResult(context, lfr_bridge_get_stats(context, result), "read bridge statistics")
+        Return result
+    End Function
+
     Friend Shared Function BuildHashMask(files As IEnumerable(Of DirectTapeCopyFile)) As UInteger
         Dim result As HashFlags = 0
         If My.Settings.LTFSWriter_ChecksumEnabled_SHA1 Then result = result Or HashFlags.SHA1
@@ -354,12 +361,7 @@ Public NotInheritable Class DirectTapeCopyBridgeConsumer
 
     Public Function GetPerformanceStats() As RustFastReaderProvider.PerformanceStats Implements IFastReaderConsumer.GetPerformanceStats
         ThrowIfDisposed()
-        Dim result As New RustFastReaderProvider.PerformanceStats With {
-            .StructSize = CUInt(Marshal.SizeOf(GetType(RustFastReaderProvider.PerformanceStats)))}
-        DirectTapeCopyNative.ThrowResult(_context,
-                                         DirectTapeCopyNative.lfr_bridge_get_stats(_context, result),
-                                         "read bridge statistics")
-        Return result
+        Return DirectTapeCopyNative.ReadPerformanceStats(_context)
     End Function
 
     Public Sub WaitForStreamFillFraction(fraction As Double, cancellationToken As CancellationToken) Implements IFastReaderConsumer.WaitForStreamFillFraction
@@ -455,6 +457,8 @@ Public NotInheritable Class DirectTapeCopyBridgeProducer
                              Dim text = Marshal.PtrToStringAnsi(message, CInt(messageLength))
                              Return If(retryPrompt IsNot Nothing AndAlso retryPrompt(text), 1, 0)
                          End Function
+        Dim before = DirectTapeCopyNative.ReadPerformanceStats(_context)
+        Dim timer = Stopwatch.StartNew()
         Dim result = DirectTapeCopyNative.lfr_bridge_stream_tape_file(
             _context,
             tapeHandle,
@@ -468,6 +472,13 @@ Public NotInheritable Class DirectTapeCopyBridgeProducer
             _retryDelegate,
             IntPtr.Zero)
         GC.KeepAlive(_retryDelegate)
+        timer.Stop()
+        Dim after = DirectTapeCopyNative.ReadPerformanceStats(_context)
+        Serilog.Log.Information("Direct tape source file completed. FileIndex={FileIndex} FileName={FileName} Result={Result} ElapsedMilliseconds={ElapsedMilliseconds} ScsiMilliseconds={ScsiMilliseconds} HashMilliseconds={HashMilliseconds} BufferWaitMilliseconds={BufferWaitMilliseconds}.",
+                                file.Ordinal, file.RelativePath, result, timer.Elapsed.TotalMilliseconds,
+                                (after.ReadWaitNanoseconds - before.ReadWaitNanoseconds) / 1000000.0,
+                                (after.HashNanoseconds - before.HashNanoseconds) / 1000000.0,
+                                (after.PublishWaitNanoseconds - before.PublishWaitNanoseconds) / 1000000.0)
         DirectTapeCopyNative.ThrowResult(_context, result, $"stream source file {file.RelativePath}")
     End Sub
 
