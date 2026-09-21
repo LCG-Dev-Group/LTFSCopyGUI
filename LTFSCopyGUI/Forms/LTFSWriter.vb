@@ -13869,6 +13869,8 @@ Public Class LTFSWriter
 
     Private Sub 粘贴选中ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 粘贴选中ToolStripMenuItem.Click
         Try
+            If MyClipBoard.Directory IsNot Nothing AndAlso MyClipBoard.Directory.Count > 0 Then Exit Try
+            If MyClipBoard.File IsNot Nothing AndAlso MyClipBoard.File.Count > 0 Then Exit Try
             If TryBeginDirectTapePaste() Then Return
         Catch ex As Exception
             MessageBox.Show(New Form With {.TopMost = True}, ex.Message, My.Resources.ResText_Warning, MessageBoxButtons.OK, MessageBoxIcon.Warning)
