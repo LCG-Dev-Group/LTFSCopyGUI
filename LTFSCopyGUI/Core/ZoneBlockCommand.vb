@@ -662,7 +662,8 @@ Public Class ZBCDeviceHelper
                             CurrentOpenedZone.Add(zoneToWrite)
                         End If
                     End If
-                    If StartLBA < zoneToWrite.ZoneWritePointerLBA Then
+                    '有缓存，前面需dump
+                    If True Or StartLBA < zoneToWrite.ZoneWritePointerLBA Then
                         'WP在写入位置后面, 按需dump前后
                         If StartLBA > zoneToWrite.ZoneStartLBA Then
                             needDumpSegCount = 1
