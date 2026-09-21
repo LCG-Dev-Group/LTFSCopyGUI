@@ -3588,6 +3588,10 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
     Public Property iSCSIStopFlag As New AutoResetEvent(False)
     Public Property iSCSIRunningFlag As Boolean = False
     Private Sub ButtonZBCiSCSISvc_Click(sender As Object, e As EventArgs) Handles ButtonZBCiSCSISvc.Click
+        If IO.File.Exists("hmsmr-proxy.exe") Then
+            Process.Start("hmsmr-proxy.exe", $"--device {ConfTapeDrive} --transfer-bytes 8388608")
+            Exit Sub
+        End If
         If iSCSIRunningFlag Then
             iSCSIStopFlag.Set()
         Else
