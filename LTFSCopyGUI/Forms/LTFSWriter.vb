@@ -4003,10 +4003,23 @@ Public Class LTFSWriter
         If _treeRefreshInProgress OrElse e.Node Is Nothing OrElse e.Node.Tag Is Nothing Then Return
         TriggerTreeView1Event()
     End Sub
+    Public TVKeyCancelFlag As Boolean
     Private Sub TreeView1_KeyUp(sender As Object, e As KeyEventArgs) Handles TreeView1.KeyUp
         Select Case e.KeyCode
             Case Keys.ControlKey, Keys.LControlKey, Keys.RControlKey
-                TreeView1.CheckBoxes = Not TreeView1.CheckBoxes
+                If TVKeyCancelFlag Then
+                    TVKeyCancelFlag = False
+                Else
+                    TreeView1.CheckBoxes = Not TreeView1.CheckBoxes
+                End If
+        End Select
+    End Sub
+    Private Sub TreeView1_KeyDown(sender As Object, e As KeyEventArgs) Handles TreeView1.KeyDown
+        Select Case e.KeyCode
+            Case Keys.ControlKey, Keys.LControlKey, Keys.RControlKey
+                TVKeyCancelFlag = False
+            Case Keys.C, Keys.X, Keys.V, Keys.F
+                TVKeyCancelFlag = True
         End Select
     End Sub
     Private Sub TreeView1_NodeMouseClick(sender As Object, e As TreeNodeMouseClickEventArgs) Handles TreeView1.NodeMouseClick
