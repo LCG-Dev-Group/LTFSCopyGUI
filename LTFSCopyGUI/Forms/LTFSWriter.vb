@@ -1,6 +1,5 @@
 Imports System.Buffers
 Imports System.ComponentModel
-Imports System.Diagnostics
 Imports System.IO
 Imports System.IO.Pipelines
 Imports System.Runtime
@@ -7712,11 +7711,11 @@ Public Class LTFSWriter
     End Sub
 
     Private Sub StopFastReaderBufferWait()
-        Threading.Interlocked.Exchange(_fastReaderWaitSuppressed, 1)
         PipePause = False
         Dim waitCancellation = Threading.Volatile.Read(_fastReaderWaitCancellation)
         If waitCancellation IsNot Nothing Then
             Try
+                Threading.Interlocked.Exchange(_fastReaderWaitSuppressed, 1)
                 waitCancellation.Cancel()
             Catch ex As ObjectDisposedException
             End Try
