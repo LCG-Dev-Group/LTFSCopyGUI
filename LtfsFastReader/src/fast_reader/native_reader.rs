@@ -1013,7 +1013,7 @@ pub unsafe extern "system" fn lfr_is_done(context: *mut LfrContext) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-/// Waits until the requested amount of data is buffered or progress stops.
+/// Waits until the requested amount of data is buffered or the timeout expires.
 ///
 /// # Safety
 /// `context` must be a valid context pointer created by `lfr_create`.
@@ -1027,10 +1027,7 @@ pub unsafe extern "system" fn lfr_wait_until_buffered(
         Err(code) => return code,
     };
     let mut state = native_lock(&context.shared);
-    let stagnant_limit = Duration::from_millis(timeout_ms as u64);
-    let mut unchanged_since = Instant::now();
-    let mut last_buffered_bytes = state.buffered_bytes;
-    let mut last_occupied_slots = state.occupied_slots;
+    let started = Instant::now();
     loop {
         if state.cancelled {
             return LFR_CANCELLED;
@@ -1048,14 +1045,7 @@ pub unsafe extern "system" fn lfr_wait_until_buffered(
         if timeout_ms == u32::MAX {
             state = native_wait(&context.shared, state, "buffer wait");
         } else {
-            if state.buffered_bytes != last_buffered_bytes
-                || state.occupied_slots != last_occupied_slots
-            {
-                last_buffered_bytes = state.buffered_bytes;
-                last_occupied_slots = state.occupied_slots;
-                unchanged_since = Instant::now();
-            }
-            let timeout = stagnant_limit.saturating_sub(unchanged_since.elapsed());
+            let timeout = Duration::from_millis(timeout_ms as u64).saturating_sub(started.elapsed());
             if timeout.is_zero() {
                 return if context.shared.telemetry.bytes_read.load(Ordering::Acquire)
                     >= state.selected_bytes
@@ -1065,26 +1055,8 @@ pub unsafe extern "system" fn lfr_wait_until_buffered(
                     LFR_TIMEOUT
                 };
             }
-            let (next, result) =
-                native_wait_timeout(&context.shared, state, timeout, "timed buffer wait");
+            let (next, _) = native_wait_timeout(&context.shared, state, timeout, "timed buffer wait");
             state = next;
-            if result.timed_out() {
-                if state.buffered_bytes != last_buffered_bytes
-                    || state.occupied_slots != last_occupied_slots
-                {
-                    last_buffered_bytes = state.buffered_bytes;
-                    last_occupied_slots = state.occupied_slots;
-                    unchanged_since = Instant::now();
-                    continue;
-                }
-                return if context.shared.telemetry.bytes_read.load(Ordering::Acquire)
-                    >= state.selected_bytes
-                {
-                    LFR_OK
-                } else {
-                    LFR_TIMEOUT
-                };
-            }
         }
     }
 }
@@ -1379,5 +1351,3 @@ pub unsafe extern "system" fn lfr_destroy(context: *mut LfrContext) {
         destroy_started.elapsed().as_millis()
     );
 }
-
-

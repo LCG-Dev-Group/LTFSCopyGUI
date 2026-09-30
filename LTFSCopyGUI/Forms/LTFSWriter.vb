@@ -8393,6 +8393,7 @@ Public Class LTFSWriter
                         Dim lastpos As New TapeUtils.PositionData(driveHandle)
                         TapeUtils.SetBlockSize(driveHandle, plabel.blocksize)
                         For i As Integer = 0 To WriteList.Count - 1
+                            If useFastReader AndAlso i > 0 Then ResetFastReaderBufferWait()
                             'If i < WriteList.Count - 1 Then
                             '    Dim CFNum As Integer = i
                             '    Dim dl As New LTFSWriter.FileRecord.PreReadFinishedEventHandler(
