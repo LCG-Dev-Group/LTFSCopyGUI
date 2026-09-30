@@ -4004,6 +4004,7 @@ Public Class LTFSWriter
         TriggerTreeView1Event()
     End Sub
     Public TVKeyCancelFlag As Boolean
+    Public CtrlDown As Boolean = False
     Private Sub TreeView1_KeyUp(sender As Object, e As KeyEventArgs) Handles TreeView1.KeyUp
         Select Case e.KeyCode
             Case Keys.ControlKey, Keys.LControlKey, Keys.RControlKey
@@ -4012,13 +4013,16 @@ Public Class LTFSWriter
                 Else
                     TreeView1.CheckBoxes = Not TreeView1.CheckBoxes
                 End If
+                CtrlDown = False
         End Select
     End Sub
     Private Sub TreeView1_KeyDown(sender As Object, e As KeyEventArgs) Handles TreeView1.KeyDown
         Select Case e.KeyCode
             Case Keys.ControlKey, Keys.LControlKey, Keys.RControlKey
+                If CtrlDown Then Exit Select
                 TVKeyCancelFlag = False
-            Case Keys.C, Keys.X, Keys.V, Keys.F
+                CtrlDown = True
+            Case Keys.C, Keys.X, Keys.V, Keys.F, Keys.T
                 TVKeyCancelFlag = True
         End Select
     End Sub
@@ -7658,6 +7662,7 @@ Public Class LTFSWriter
         Try
             Dim before = fastProvider.GetPerformanceStats()
             Dim timer = Stopwatch.StartNew()
+            _fastReaderWaitCancellation = waitCancellation
             fastProvider.WaitForStreamFillFraction(fraction, waitCancellation.Token)
             timer.Stop()
             LogFastReaderFillStats(operation, before, fastProvider.GetPerformanceStats(), timer.Elapsed)
@@ -7665,6 +7670,7 @@ Public Class LTFSWriter
             PrintMsg($"fastreader {operation} wait cancelled", LogOnly:=True, IsWarn:=True)
         Finally
             Threading.Interlocked.CompareExchange(_fastReaderWaitCancellation, Nothing, waitCancellation)
+            ResetFastReaderBufferWait()
             waitCancellation.Dispose()
             PipeBufferLength = fastProvider.BufferedBytes
             PipePause = False
@@ -7863,7 +7869,7 @@ Public Class LTFSWriter
                 If SpeedLimit > 0 AndAlso CheckCount = 0 Then
                     Dim ts As Double = (Now - SpeedLimitLastTriggerTime).TotalSeconds
                     While SpeedLimit > 0 AndAlso ts > 0 AndAlso ((plabel.blocksize * CheckCycle / 1048576) / ts) > SpeedLimit
-                        Threading.Thread.Sleep(1)
+                        Threading.Thread.Sleep(0)
                         ts = (Now - SpeedLimitLastTriggerTime).TotalSeconds
                     End While
                     SpeedLimitLastTriggerTime = Now
@@ -15243,6 +15249,8 @@ Public Class LTFSWriter
                 If e.Control Then
                     Try
                         If TryBeginDirectTapePaste() Then
+                            TVKeyCancelFlag = True
+                            CtrlDown = True
                             e.Handled = True
                             e.SuppressKeyPress = True
                             Exit Select
@@ -15275,6 +15283,9 @@ Public Class LTFSWriter
                 End If
             Case Keys.C
                 If e.Control AndAlso Not e.Alt AndAlso Not e.Shift Then
+                    If TextBoxSelectedPath.Focused Then Exit Sub
+                    TVKeyCancelFlag = True
+                    CtrlDown = True
                     CopySelectedToAnotherTape(sender, e)
                     e.Handled = True
                     e.SuppressKeyPress = True
@@ -15318,6 +15329,8 @@ Public Class LTFSWriter
                 Search()
             Case Keys.F5
                 If e.Control Then
+                    TVKeyCancelFlag = True
+                    CtrlDown = True
                     e.SuppressKeyPress = True
                     e.Handled = True
                     If Not AllowOperation Then Exit Select
