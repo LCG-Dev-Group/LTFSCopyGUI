@@ -647,7 +647,7 @@ Namespace My
          LocalizedDescription("PropertyDescription_LTFSWriter_FastReaderResumeWatermarkFraction")>
         Public Property LTFSWriter_FastReaderResumeWatermarkFraction() As Double
             Get
-                Return CType(Me("LTFSWriter_FastReaderPauseWatermarkFraction"), Double)
+                Return CType(Me("LTFSWriter_FastReaderResumeWatermarkFraction"), Double)
             End Get
             Set(Value As Double)
                 Me("LTFSWriter_FastReaderResumeWatermarkFraction") = Value
