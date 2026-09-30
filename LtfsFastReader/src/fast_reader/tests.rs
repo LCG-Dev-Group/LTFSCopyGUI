@@ -1039,7 +1039,7 @@
     }
 
     #[test]
-    fn refill_wait_only_accepts_a_stagnant_short_tail_after_all_input_is_read() {
+    fn refill_wait_accepts_a_short_tail_after_all_input_is_read() {
         let config = native_test_config(4096, 32 * 1024);
         unsafe {
             let context = create_native_test_context(&config);
@@ -1061,7 +1061,7 @@
     }
 
     #[test]
-    fn refill_wait_restarts_its_no_change_window_when_slots_change() {
+    fn refill_wait_keeps_its_deadline_when_slots_change() {
         let config = native_test_config(4096, 32 * 1024);
         unsafe {
             let context = create_native_test_context(&config);
@@ -1073,19 +1073,20 @@
                 state.buffered_bytes = 4096;
                 state.occupied_slots = 1;
             }
-            shared.telemetry.bytes_read.store(8192, Ordering::Release);
-
             let notifier = Arc::clone(&shared);
             let update = thread::spawn(move || {
-                thread::sleep(Duration::from_millis(15));
-                let mut state = native_lock(&notifier);
-                // EOF changes slot occupancy without changing buffered bytes.
-                state.occupied_slots = 2;
-                notifier.changed.notify_all();
+                // Keep reporting slot progress beyond the wait deadline.
+                for index in 0..16 {
+                    thread::sleep(Duration::from_millis(25));
+                    let mut state = native_lock(&notifier);
+                    state.occupied_slots = if index % 2 == 0 { 2 } else { 1 };
+                    notifier.changed.notify_all();
+                }
             });
             let started = Instant::now();
-            assert_eq!(lfr_wait_until_buffered(context, 8192, 30), LFR_OK);
-            assert!(started.elapsed() >= Duration::from_millis(35));
+            assert_eq!(lfr_wait_until_buffered(context, 8192, 100), LFR_TIMEOUT);
+            assert!(started.elapsed() >= Duration::from_millis(100));
+            assert!(started.elapsed() < Duration::from_millis(300));
             update.join().unwrap();
             lfr_destroy(context);
         }

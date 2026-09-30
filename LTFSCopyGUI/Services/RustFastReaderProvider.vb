@@ -905,6 +905,8 @@ Public Class RustFastReaderProvider
         Dim waitTimer = Stopwatch.StartNew()
         Dim waitStartedLogged As Boolean = False
         Dim nextWarningMs As Long = RefillNoChangeMs
+        Dim lastBuffered = BufferedBytes
+        Dim lastOccupiedSlots = OccupiedSlotCount
         Dim nativeWaitSliceMs As UInteger = Math.Min(RefillNoChangeMs, BufferWaitSliceMs)
         While True
             ct.ThrowIfCancellationRequested()
@@ -968,6 +970,13 @@ Public Class RustFastReaderProvider
                 Return
             End If
             If result = ResultTimeout Then
+                Dim currentBuffered = BufferedBytes
+                Dim currentOccupiedSlots = OccupiedSlotCount
+                If currentBuffered <> lastBuffered OrElse currentOccupiedSlots <> lastOccupiedSlots Then
+                    lastBuffered = currentBuffered
+                    lastOccupiedSlots = currentOccupiedSlots
+                    nextWarningMs = waitTimer.ElapsedMilliseconds + RefillNoChangeMs
+                End If
                 If waitTimer.ElapsedMilliseconds >= nextWarningMs Then
                     Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(RustFastReaderProvider))
                         Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")
@@ -976,11 +985,11 @@ Public Class RustFastReaderProvider
                                     Log.Warning("Fast reader buffer refill made no progress. Fraction={Fraction} TargetBytes={TargetBytes} BufferedBytes={BufferedBytes} CapacityBytes={CapacityBytes} RemainingBytes={RemainingBytes} WaitedMilliseconds={WaitedMilliseconds} OccupiedSlots={OccupiedSlots}.",
                                                 boundedFraction,
                                                 target,
-                                                BufferedBytes,
+                                                currentBuffered,
                                                 BufferCapacityBytes,
                                                 Interlocked.Read(_remainingBytes),
                                                 waitTimer.ElapsedMilliseconds,
-                                                OccupiedSlotCount)
+                                                currentOccupiedSlots)
                                 End Using
                             End Using
                         End Using
