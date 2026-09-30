@@ -6914,8 +6914,16 @@ Public Class LTFSWriter
     Private _directCopyPasteConnecting As Integer
     Private _fastReaderWaitCancellation As CancellationTokenSource = Nothing
     Private _fastReaderWaitSuppressed As Integer
-    Private Const FastReaderPauseWatermarkFraction As Double = 0.15
-    Private Const FastReaderResumeWatermarkFraction As Double = 0.75
+    Private ReadOnly Property FastReaderPauseWatermarkFraction As Double
+        Get
+            Return My.Settings.LTFSWriter_FastReaderPauseWatermarkFraction
+        End Get
+    End Property
+    Private ReadOnly Property FastReaderResumeWatermarkFraction As Double
+        Get
+            Return My.Settings.LTFSWriter_FastReaderResumeWatermarkFraction
+        End Get
+    End Property
     Public Property PipeBufferLength As Long
         Get
             Return _PipeBufferLength
@@ -7676,9 +7684,9 @@ Public Class LTFSWriter
         End Try
     End Sub
 
-    Private Shared Function GetFastReaderWatermark(capacity As Long, fraction As Double) As Long
+    Private Function GetFastReaderWatermark(capacity As Long, fraction As Double) As Long
         If capacity <= 0 Then Return 0
-        Return Math.Min(capacity, CLng(Math.Ceiling(CDbl(capacity) * fraction)))
+        Return Math.Max(plabel.blocksize, Math.Min(capacity, CLng(Math.Ceiling(CDbl(capacity) * fraction))))
     End Function
 
     Private Sub WaitForFastReaderRefill(fastProvider As IFastReaderConsumer)

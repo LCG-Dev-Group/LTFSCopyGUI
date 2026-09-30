@@ -625,6 +625,34 @@ Namespace My
                 Me("LTFSWriter_WaitOnBufferEmpty") = Value
             End Set
         End Property
+        <Global.System.Configuration.UserScopedSettingAttribute(),
+         Global.System.Configuration.SettingsDescriptionAttribute("开始等待比例"),
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),
+         Global.System.Configuration.DefaultSettingValueAttribute("0.15"),
+         Category("LTFSWriter"),
+         LocalizedDescription("PropertyDescription_LTFSWriter_FastReaderPauseWatermarkFraction")>
+        Public Property LTFSWriter_FastReaderPauseWatermarkFraction() As Double
+            Get
+                Return CType(Me("LTFSWriter_FastReaderPauseWatermarkFraction"), Double)
+            End Get
+            Set(Value As Double)
+                Me("LTFSWriter_FastReaderPauseWatermarkFraction") = Value
+            End Set
+        End Property
+        <Global.System.Configuration.UserScopedSettingAttribute(),
+         Global.System.Configuration.SettingsDescriptionAttribute("停止等待比例"),
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),
+         Global.System.Configuration.DefaultSettingValueAttribute("0.75"),
+         Category("LTFSWriter"),
+         LocalizedDescription("PropertyDescription_LTFSWriter_FastReaderResumeWatermarkFraction")>
+        Public Property LTFSWriter_FastReaderResumeWatermarkFraction() As Double
+            Get
+                Return CType(Me("LTFSWriter_FastReaderPauseWatermarkFraction"), Double)
+            End Get
+            Set(Value As Double)
+                Me("LTFSWriter_FastReaderResumeWatermarkFraction") = Value
+            End Set
+        End Property
 
         <Global.System.Configuration.UserScopedSettingAttribute(),
          Global.System.Configuration.SettingsDescriptionAttribute("禁用分区"),

@@ -1056,4 +1056,10 @@ P0Size和P1Size如果都不为65535，则两者总和不得超过磁带容量</v
   <data name="PropertyDescription_LTFSWriter_WriterTreePageSize" xml:space="preserve">
     <value>单次展开目录数</value>
   </data>
+  <data name="PropertyDescription_LTFSWriter_FastReaderPauseWatermarkFraction" xml:space="preserve">
+    <value>开始等待比例</value>
+  </data>
+  <data name="PropertyDescription_LTFSWriter_FastReaderResumeWatermarkFraction" xml:space="preserve">
+    <value>停止等待比例</value>
+  </data>
 </root>

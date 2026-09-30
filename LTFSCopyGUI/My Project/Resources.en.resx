@@ -1015,4 +1015,10 @@ Disable when file fragment is intended to restore</value>
   <data name="PropertyDescription_LTFSWriter_WriterTreePageSize" xml:space="preserve">
     <value>Directory count on expansion</value>
   </data>
+  <data name="PropertyDescription_LTFSWriter_FastReaderPauseWatermarkFraction" xml:space="preserve">
+    <value>Fast reader pause fraction</value>
+  </data>
+  <data name="PropertyDescription_LTFSWriter_FastReaderResumeWatermarkFraction" xml:space="preserve">
+    <value>Fast reader resume fraction</value>
+  </data>
 </root>
