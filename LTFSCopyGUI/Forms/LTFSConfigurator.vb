@@ -2383,8 +2383,10 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                    TextBoxDebugOutput.Text &= vbCrLf & vbCrLf & "Param" & vbCrLf
                    If param IsNot Nothing AndAlso param.Length > 0 Then TextBoxDebugOutput.Text &= IOManager.Byte2Hex(param, True) & vbCrLf
                    TextBoxDebugOutput.Text &= vbCrLf & vbCrLf & "Sense" & vbCrLf
+                   Dim senseinfo As String = TapeUtils.ParseSenseData(sense)
+                   If sense(7) > 0 Then ReDim Preserve sense(sense(7) + 8 - 1)
                    If sense IsNot Nothing AndAlso sense.Length > 0 Then TextBoxDebugOutput.Text &= IOManager.Byte2Hex(sense, True) & vbCrLf
-                   TextBoxDebugOutput.Text &= TapeUtils.ParseSenseData(sense)
+                   TextBoxDebugOutput.Text &= senseinfo
                    TextBoxCDBData.Text = IOManager.Bytes2HexSplit(cdb)
                    TextBoxParamData.Text = IOManager.Bytes2HexSplit(param)
                End Sub)
@@ -3748,5 +3750,173 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
         Catch ex As Exception
             MessageBox.Show(ex.ToString())
         End Try
+    End Sub
+
+    Private Sub ButtonDiskCopy_Click(sender As Object, e As EventArgs) Handles ButtonDiskCopy.Click
+        Enabled = False
+        Dim LBA As ULong = CULng(NumericUpDownLBA.Value)
+        Dim sectorSize As Integer = CInt(NumericUpDownSectorSize.Value)
+        Dim blocklim As Integer = 524288
+        Dim batch As Integer = blocklim \ sectorSize
+        blocklim = batch * sectorSize
+        Dim progmsg As String = ""
+        Dim fin As Boolean = False
+        Dim src As String = TextBoxDevicePath.Text
+        If DisplayHelper.ShowInputDialog("Source Disk Path", "Source", src) <> DialogResult.OK Then
+            Invoke(Sub() Enabled = True)
+            Exit Sub
+        End If
+        Dim inputText As String = "0"
+        If DisplayHelper.ShowInputDialog("Source Disk Start LBA", "Start", inputText) <> DialogResult.OK Then
+            Invoke(Sub() Enabled = True)
+            Exit Sub
+        End If
+        Dim srcStartLBA As Long = Long.Parse(inputText)
+        Dim copyCount As Long = CLng(NumericUpDownWriteLBACount.Value)
+        If copyCount <= 0 Then
+            Invoke(Sub() Enabled = True)
+            Exit Sub
+        End If
+        Task.Run(Sub()
+                     While Not fin
+                         Threading.Thread.Sleep(100)
+                         Invoke(Sub() TextBoxDebugOutput.Text = progmsg)
+                     End While
+                     Invoke(Sub() TextBoxDebugOutput.Text = progmsg)
+                 End Sub)
+        Task.Run(Async Function()
+                     Dim senseData(63) As Byte
+                     Dim handle As IntPtr
+                     TapeUtils.OpenTapeDrive(ConfTapeDrive, handle)
+                     Dim srcHandle As IntPtr
+                     TapeUtils.OpenTapeDrive(src, srcHandle)
+                     Dim writeLBACount As Integer
+                     Dim stopflag As Boolean = False
+                     For i As ULong = LBA To CULng(LBA + copyCount - 1) Step CULng(batch)
+                         Invoke(Sub()
+                                    If Me.Enabled Then stopflag = True
+                                End Sub)
+                         If stopflag Then Exit For
+                         Dim currentLBA As ULong = i
+                         Dim writeData As Byte() = ArrayPool(Of Byte).Shared.Rent(blocklim)
+                         writeLBACount = Math.Min(batch, CInt(LBA + copyCount - i))
+                         Dim cdbsrc As Byte() = {&H28, 0,
+                                    CByte(CLng((i >> 24)) And &HFF),
+                                    CByte(CLng((i >> 16)) And &HFF),
+                                    CByte(CLng((i >> 8)) And &HFF),
+                                    CByte(CLng((i >> 0)) And &HFF),
+                                    0,
+                                    CByte((writeLBACount >> 8) And &HFF),
+                                    CByte((writeLBACount >> 0) And &HFF), 0}
+                         Dim readsucc As Boolean = False
+                         Dim writeSize As Integer = writeLBACount * sectorSize
+                         While Not readsucc
+                             If Not TapeUtils.SendSCSICommand(srcHandle, cdbsrc, writeData, writeSize, 1, Function(s As Byte()) As Boolean
+                                                                                                              senseData = s
+                                                                                                              Return True
+                                                                                                          End Function, 30) Then
+                                 Dim ErrCode As Integer = TapeUtils.LastWin32Error
+                                 Dim win32ex As New Win32Exception(ErrCode)
+                                 Select Case DisplayHelper.CountdownMessageBox.Show($"READ WinError{vbCrLf}Code: 0x{ErrCode.ToString("X8")}h{vbCrLf}{win32ex.Message}", My.Resources.ResText_Warning, 3)
+                                     Case DialogResult.Abort
+                                         TapeUtils.CloseTapeDrive(srcHandle)
+                                         stopflag = True
+                                         ArrayPool(Of Byte).Shared.Return(writeData)
+                                         Invoke(Sub() Enabled = True)
+                                         Throw win32ex
+                                     Case DialogResult.Retry
+                                         readsucc = False
+                                     Case DialogResult.Ignore
+                                         readsucc = True
+                                         Exit While
+                                 End Select
+                             ElseIf (senseData(2) And &HF) <> 0 Then
+                                 progmsg = $"READ sense err {TapeUtils.Byte2Hex(senseData, True)}{vbCrLf}"
+                                 Try
+                                     Throw New Exception("SCSI sense error")
+                                 Catch ex As Exception
+                                     Select Case DisplayHelper.CountdownMessageBox.Show($"{My.Resources.ResText_Error}{vbCrLf}{TapeUtils.ParseSenseData(senseData)}{vbCrLf}{vbCrLf}sense{vbCrLf}{TapeUtils.Byte2Hex(senseData, True)}{vbCrLf}{ex.StackTrace}", My.Resources.ResText_Warning, 3)
+                                         Case DialogResult.Abort
+                                             TapeUtils.CloseTapeDrive(srcHandle)
+                                             stopflag = True
+                                             ArrayPool(Of Byte).Shared.Return(writeData)
+                                             Invoke(Sub() Enabled = True)
+                                             Throw New Exception(TapeUtils.ParseSenseData(senseData))
+                                         Case DialogResult.Retry
+                                             readsucc = False
+                                         Case DialogResult.Ignore
+                                             readsucc = True
+                                             Exit While
+                                     End Select
+                                 End Try
+                             Else
+                                 readsucc = True
+                             End If
+                         End While
+
+                         Dim cdb As Byte() = {&H2A, 0,
+                                    CByte(CLng((i >> 24)) And &HFF),
+                                    CByte(CLng((i >> 16)) And &HFF),
+                                    CByte(CLng((i >> 8)) And &HFF),
+                                    CByte(CLng((i >> 0)) And &HFF),
+                                    0,
+                                    CByte((writeLBACount >> 8) And &HFF),
+                                    CByte((writeLBACount >> 0) And &HFF), 0}
+                         Dim writesucc As Boolean = False
+                         Await Task.Run(Sub()
+                                            While Not writesucc
+                                                If Not TapeUtils.SendSCSICommand(handle, cdb, writeData, writeSize, 0, Function(s As Byte()) As Boolean
+                                                                                                                           senseData = s
+                                                                                                                           Return True
+                                                                                                                       End Function, 30) Then
+                                                    Dim ErrCode As Integer = TapeUtils.LastWin32Error
+                                                    Dim win32ex As New Win32Exception(ErrCode)
+                                                    Select Case DisplayHelper.CountdownMessageBox.Show($"WRITE WinError{vbCrLf}Code: 0x{ErrCode.ToString("X8")}h{vbCrLf}{win32ex.Message}", My.Resources.ResText_Warning, 3)
+                                                        Case DialogResult.Abort
+                                                            TapeUtils.CloseTapeDrive(srcHandle)
+                                                            stopflag = True
+                                                            ArrayPool(Of Byte).Shared.Return(writeData)
+                                                            Invoke(Sub() Enabled = True)
+                                                            Throw win32ex
+                                                        Case DialogResult.Retry
+                                                            writesucc = False
+                                                        Case DialogResult.Ignore
+                                                            writesucc = True
+                                                            Exit While
+                                                    End Select
+                                                ElseIf (senseData(2) And &HF) <> 0 Then
+                                                    progmsg = $"WRITE sense err {TapeUtils.Byte2Hex(senseData, True)}{vbCrLf}"
+                                                    Try
+                                                        Throw New Exception("SCSI sense error")
+                                                    Catch ex As Exception
+                                                        Select Case DisplayHelper.CountdownMessageBox.Show($"{My.Resources.ResText_Error}{vbCrLf}{TapeUtils.ParseSenseData(senseData)}{vbCrLf}{vbCrLf}sense{vbCrLf}{TapeUtils.Byte2Hex(senseData, True)}{vbCrLf}{ex.StackTrace}", My.Resources.ResText_Warning, 60)
+                                                            Case DialogResult.Abort
+                                                                TapeUtils.CloseTapeDrive(srcHandle)
+                                                                stopflag = True
+                                                                ArrayPool(Of Byte).Shared.Return(writeData)
+                                                                Invoke(Sub() Enabled = True)
+                                                                Throw New Exception(TapeUtils.ParseSenseData(senseData))
+                                                            Case DialogResult.Retry
+                                                                writesucc = False
+                                                            Case DialogResult.Ignore
+                                                                writesucc = True
+                                                                Exit While
+                                                        End Select
+                                                    End Try
+                                                Else
+                                                    writesucc = True
+                                                End If
+                                            End While
+                                            ArrayPool(Of Byte).Shared.Return(writeData)
+                                            progmsg = $"LBA {LBA}>{currentLBA}>{LBA + copyCount - 1}"
+                                        End Sub)
+
+                     Next
+                     progmsg = $"LBA {LBA}>{LBA + writeLBACount - 1}>{LBA + copyCount - 1}"
+                     TapeUtils.CloseTapeDrive(srcHandle)
+                     TapeUtils.CloseTapeDrive(handle)
+                     fin = True
+                     Invoke(Sub() Enabled = True)
+                 End Function)
     End Sub
 End Class

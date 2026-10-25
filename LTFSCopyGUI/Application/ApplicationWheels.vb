@@ -1051,6 +1051,138 @@ Public NotInheritable Class DisplayHelper
         If result = DialogResult.OK Then Response = textBox.Text
         Return result
     End Function
+    Public Class CountdownMessageBox
+        ''' <summary>
+        ''' 显示带自动重试倒计时的 AbortRetryIgnore 对话框。
+        ''' 倒计时结束后自动返回 DialogResult.Retry。
+        ''' </summary>
+        Public Shared Function Show(text As String, caption As String, timeoutSeconds As Integer, Optional icon As MessageBoxIcon = MessageBoxIcon.None) As DialogResult
+            Using frm As New CountdownMessageBoxForm(text, caption, timeoutSeconds, icon)
+                Return frm.ShowDialog()
+            End Using
+        End Function
+    End Class
+
+
+    ''' <summary>
+    ''' 内部窗体，实现倒计时及三个按钮。
+    ''' </summary>
+    Friend Class CountdownMessageBoxForm
+        Inherits Form
+
+        Private ReadOnly _timeoutSeconds As Integer
+        Private _remainingSeconds As Integer
+
+        Private ReadOnly _messageLabel As Label
+        Private ReadOnly _retryButton As Button
+        Private ReadOnly _timer As Timer
+
+        Public Sub New(text As String, caption As String, timeoutSeconds As Integer, icon As MessageBoxIcon)
+            If timeoutSeconds < 0 Then
+                Throw New ArgumentOutOfRangeException(NameOf(timeoutSeconds), "倒计时秒数不能小于 0。")
+            End If
+            _timeoutSeconds = timeoutSeconds
+            _remainingSeconds = timeoutSeconds
+            Me.Text = caption
+            Me.FormBorderStyle = FormBorderStyle.FixedDialog
+            Me.StartPosition = FormStartPosition.CenterScreen
+            Me.ClientSize = New Size(460, 170)
+            Me.MinimizeBox = False
+            Me.MaximizeBox = False
+            Me.ShowInTaskbar = False
+            Me.AutoScaleMode = AutoScaleMode.Font
+            ' 提示图标
+            Dim iconBox As New PictureBox With {.Location = New Point(20, 22), .Size = New Size(36, 36), .SizeMode = PictureBoxSizeMode.StretchImage}
+            Select Case icon
+                Case MessageBoxIcon.Error,
+                     MessageBoxIcon.Hand,
+                     MessageBoxIcon.Stop
+                    iconBox.Image = SystemIcons.Error.ToBitmap()
+                Case MessageBoxIcon.Warning,
+                     MessageBoxIcon.Exclamation
+                    iconBox.Image = SystemIcons.Warning.ToBitmap()
+                Case MessageBoxIcon.Information,
+                     MessageBoxIcon.Asterisk
+                    iconBox.Image = SystemIcons.Information.ToBitmap()
+                Case MessageBoxIcon.Question
+                    iconBox.Image = SystemIcons.Question.ToBitmap()
+            End Select
+            Me.Controls.Add(iconBox)
+            ' 消息文本
+            _messageLabel = New Label With {.Text = text, .Location = New Point(72, 18), .Size = New Size(365, 75), .TextAlign = ContentAlignment.MiddleLeft}
+            Me.Controls.Add(_messageLabel)
+            ' 中止按钮
+            Dim abortButton As New Button With {.Text = "中止(&A)", .Size = New Size(105, 30), .Location = New Point(80, 118)}
+            AddHandler abortButton.Click,
+                Sub(sender, e)
+                    Finish(DialogResult.Abort)
+                End Sub
+            Me.Controls.Add(abortButton)
+            ' 重试按钮：倒计时显示在按钮上
+            _retryButton = New Button With {.Size = New Size(120, 30), .Location = New Point(195, 118)}
+            AddHandler _retryButton.Click,
+                Sub(sender, e)
+                    Finish(DialogResult.Retry)
+                End Sub
+            Me.Controls.Add(_retryButton)
+            ' 忽略按钮
+            Dim ignoreButton As New Button With {.Text = "忽略(&I)", .Size = New Size(105, 30), .Location = New Point(325, 118)}
+            AddHandler ignoreButton.Click,
+                Sub(sender, e)
+                    Finish(DialogResult.Ignore)
+                End Sub
+            Me.Controls.Add(ignoreButton)
+            ' 按钮显示初始倒计时
+            UpdateRetryButton()
+            ' 定时器
+            _timer = New Timer With {.Interval = 1000}
+            AddHandler _timer.Tick, AddressOf Timer_Tick
+            AddHandler Me.Shown, AddressOf Form_Shown
+            ' 点击标题栏关闭按钮时按中止处理
+            AddHandler Me.FormClosing, AddressOf Form_FormClosing
+            ' 避免回车键意外触发某个按钮
+            Me.CancelButton = abortButton
+        End Sub
+        Private Sub Form_Shown(sender As Object, e As EventArgs)
+            If _timeoutSeconds = 0 Then
+                Finish(DialogResult.Retry)
+            Else
+                _timer.Start()
+            End If
+        End Sub
+        Private Sub Timer_Tick(sender As Object, e As EventArgs)
+            _remainingSeconds -= 1
+            If _remainingSeconds <= 0 Then
+                Finish(DialogResult.Retry)
+            Else
+                UpdateRetryButton()
+            End If
+        End Sub
+        Private Sub UpdateRetryButton()
+            _retryButton.Text = String.Format("重试(&R) ({0})", _remainingSeconds)
+        End Sub
+        Private Sub Finish(result As DialogResult)
+            _timer.Stop()
+            Me.DialogResult = result
+            Me.Close()
+        End Sub
+        Private Sub Form_FormClosing(sender As Object, e As FormClosingEventArgs)
+            _timer.Stop()
+            ' 如果是用户点击标题栏的 X，返回 Abort
+            If Me.DialogResult = DialogResult.None Then
+                Me.DialogResult = DialogResult.Abort
+            End If
+        End Sub
+        Protected Overrides Sub Dispose(disposing As Boolean)
+            If disposing Then
+                If _timer IsNot Nothing Then
+                    _timer.Stop()
+                    _timer.Dispose()
+                End If
+            End If
+            MyBase.Dispose(disposing)
+        End Sub
+    End Class
 End Class
 
 ''' <summary>

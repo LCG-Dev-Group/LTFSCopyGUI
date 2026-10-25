@@ -585,6 +585,7 @@ Partial Public Class SCSIGUI
         _elementMenu = New ContextMenuStrip()
         AddMenuItem("新增子元素", AddressOf AddChildElement)
         AddMenuItem("新增同级元素", AddressOf AddSiblingElement)
+        AddMenuItem("新增多个同级元素", AddressOf AddMultipleSiblingElements)
         AddMenuItem("删除元素", AddressOf DeleteElement)
         _elementMenu.Items.Add(New ToolStripSeparator())
         AddMenuItem("上移", Sub(s, e) MoveElement(-1))
@@ -726,6 +727,40 @@ Partial Public Class SCSIGUI
         Dim idx As Integer
         If Not SelectedCollection(tvElements.SelectedNode, col, idx) Then Return
         col.Insert(idx + 1, New ScsiElementDef With {.Name = "NewField", .Kind = "Field", .Area = col(idx).Area, .FieldType = ScsiFieldType.IntegerValue, .BitOffset = 0, .BitLength = 8, .DefaultValue = "0"})
+        RefreshDefinitionTree()
+    End Sub
+
+    Private Sub AddMultipleSiblingElements(sender As Object, e As EventArgs)
+        If Not chkEdit.Checked Then Return
+
+        Dim col As List(Of ScsiElementDef) = Nothing
+        Dim idx As Integer
+        If Not SelectedCollection(tvElements.SelectedNode, col, idx) Then Return
+
+        ' 使用输入对话框获取新增数量；取消或输入无效内容时不修改模板。
+        Dim countText As String = ""
+        If DisplayHelper.ShowInputDialog("请输入要新增的同级元素数量：", "新增多个同级元素", countText) <> DialogResult.OK Then Return
+
+        Dim count As Integer
+        If Not Integer.TryParse(countText, count) OrElse count <= 0 Then Return
+        If count > 1000 Then
+            MessageBox.Show("一次最多新增 1000 个元素。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information)
+            Return
+        End If
+
+        Dim source As ScsiElementDef = col(idx)
+        For i As Integer = 1 To count
+            col.Insert(idx + i, New ScsiElementDef With {
+                .Name = "NewField",
+                .Kind = "Field",
+                .Area = source.Area,
+                .FieldType = ScsiFieldType.IntegerValue,
+                .BitOffset = 0,
+                .BitLength = 8,
+                .DefaultValue = "0"
+            })
+        Next
+
         RefreshDefinitionTree()
     End Sub
 

@@ -180,6 +180,8 @@ Partial Class LTFSConfigurator
         Me.保存ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
         Me.删除ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
         Me.DebugToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
+        Me.复制ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
+        Me.粘贴ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
         Me.TextBoxCDBData = New System.Windows.Forms.TextBox()
         Me.TextBoxDevicePath = New System.Windows.Forms.TextBox()
         Me.LabelSCSIIOCtl = New System.Windows.Forms.Label()
@@ -187,8 +189,7 @@ Partial Class LTFSConfigurator
         Me.SaveFileDialog1 = New System.Windows.Forms.SaveFileDialog()
         Me.SaveFileDialog2 = New System.Windows.Forms.SaveFileDialog()
         Me.OpenFileDialog1 = New System.Windows.Forms.OpenFileDialog()
-        Me.复制ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
-        Me.粘贴ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
+        Me.ButtonDiskCopy = New System.Windows.Forms.Button()
         Me.ContextMenuStripRefreshDeviceList.SuspendLayout()
         Me.Panel1.SuspendLayout()
         Me.ContextMenuStripLTFSWriter.SuspendLayout()
@@ -1070,6 +1071,7 @@ Partial Class LTFSConfigurator
         '
         'TabPageZBC
         '
+        Me.TabPageZBC.Controls.Add(Me.ButtonDiskCopy)
         Me.TabPageZBC.Controls.Add(Me.ButtonZBCiSCSISvc)
         Me.TabPageZBC.Controls.Add(Me.ButtonResetAllZones)
         Me.TabPageZBC.Controls.Add(Me.ButtonRestoreLBA)
@@ -1286,6 +1288,16 @@ Partial Class LTFSConfigurator
         Me.DebugToolStripMenuItem.Name = "DebugToolStripMenuItem"
         resources.ApplyResources(Me.DebugToolStripMenuItem, "DebugToolStripMenuItem")
         '
+        '复制ToolStripMenuItem
+        '
+        Me.复制ToolStripMenuItem.Name = "复制ToolStripMenuItem"
+        resources.ApplyResources(Me.复制ToolStripMenuItem, "复制ToolStripMenuItem")
+        '
+        '粘贴ToolStripMenuItem
+        '
+        Me.粘贴ToolStripMenuItem.Name = "粘贴ToolStripMenuItem"
+        resources.ApplyResources(Me.粘贴ToolStripMenuItem, "粘贴ToolStripMenuItem")
+        '
         'TextBoxCDBData
         '
         resources.ApplyResources(Me.TextBoxCDBData, "TextBoxCDBData")
@@ -1320,15 +1332,11 @@ Partial Class LTFSConfigurator
         '
         Me.OpenFileDialog1.FileName = "OpenFileDialog1"
         '
-        '复制ToolStripMenuItem
+        'ButtonDiskCopy
         '
-        Me.复制ToolStripMenuItem.Name = "复制ToolStripMenuItem"
-        resources.ApplyResources(Me.复制ToolStripMenuItem, "复制ToolStripMenuItem")
-        '
-        '粘贴ToolStripMenuItem
-        '
-        Me.粘贴ToolStripMenuItem.Name = "粘贴ToolStripMenuItem"
-        resources.ApplyResources(Me.粘贴ToolStripMenuItem, "粘贴ToolStripMenuItem")
+        resources.ApplyResources(Me.ButtonDiskCopy, "ButtonDiskCopy")
+        Me.ButtonDiskCopy.Name = "ButtonDiskCopy"
+        Me.ButtonDiskCopy.UseVisualStyleBackColor = True
         '
         'LTFSConfigurator
         '
@@ -1559,4 +1567,5 @@ Partial Class LTFSConfigurator
     Friend WithEvents ButtonZBCiSCSISvc As Button
     Friend WithEvents 复制ToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents 粘贴ToolStripMenuItem As ToolStripMenuItem
+    Friend WithEvents ButtonDiskCopy As Button
 End Class
