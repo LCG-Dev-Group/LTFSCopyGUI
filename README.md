@@ -3,7 +3,7 @@
 ![LTFSCopyGUIIcon](./docs/logo.png)
 
 > [!WARNING]
-> LTFSCopyGUI is a **source-available** software. If you wish to make any changes, please first consult the contributors through any available platform/IM.
+> LTFSCopyGUI is a **source-available** software. If you wish to make any changes, please first consult the contributors through any available platform/IM, or create an issue on the project repository.
 >
 > LTFSCopyGUI **is not designed for enterprise-level stability**, and many of its other features are **highly risky**. If you do not have the ability to troubleshoot and recover from failures on your own, please consider using commercial backup software.
 
