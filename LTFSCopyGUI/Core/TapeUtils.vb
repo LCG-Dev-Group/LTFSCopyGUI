@@ -517,7 +517,14 @@ Public Class TapeUtils
             Return data.MaximumBlockLength
         End Operator
     End Class
-    Public Shared Property GlobalBlockLimit As Integer = 1048576
+    Public Shared Property GlobalBlockLimit As Integer
+        Get
+            Return My.Settings.TapeUtils_TransferLength
+        End Get
+        Set(value As Integer)
+            My.Settings.TapeUtils_TransferLength = value
+        End Set
+    End Property
 #Region "SCSIOP_READ"
     Public Shared Function ReadBlock(handle As IntPtr, Optional ByRef sense As Byte() = Nothing, Optional ByVal BlockSizeLimit As UInteger = &H80000, Optional ByVal Truncate As Boolean = False) As Byte()
         If DriverTypeSetting = DriverType.TapeStream Then

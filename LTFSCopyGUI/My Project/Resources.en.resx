@@ -1021,4 +1021,7 @@ Disable when file fragment is intended to restore</value>
   <data name="PropertyDescription_LTFSWriter_FastReaderResumeWatermarkFraction" xml:space="preserve">
     <value>Fast reader resume fraction</value>
   </data>
+  <data name="PropertyDescription_TapeUtils_TransferLength" xml:space="preserve">
+    <value>Transfer length</value>
+  </data>
 </root>

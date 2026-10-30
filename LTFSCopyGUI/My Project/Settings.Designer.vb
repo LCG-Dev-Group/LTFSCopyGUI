@@ -1051,6 +1051,23 @@ Namespace My
                 TapeUtils.DriverTypeSetting = Value
             End Set
         End Property
+        '''<summary>
+        '''传输长度限制
+        '''</summary>
+        <Global.System.Configuration.UserScopedSettingAttribute(),
+         Global.System.Configuration.SettingsDescriptionAttribute("传输长度限制"),
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),
+         Global.System.Configuration.DefaultSettingValueAttribute("524288"),
+         Category("TapeUtils"),
+         LocalizedDescription("PropertyDescription_TapeUtils_TransferLength")>
+        Public Property TapeUtils_TransferLength() As Integer
+            Get
+                Return CType(Me("TapeUtils_TransferLength"), Integer)
+            End Get
+            Set
+                Me("TapeUtils_TransferLength") = Value
+            End Set
+        End Property
         <XmlIgnore>
         Public ReadOnly Property cfgPath As String
             Get

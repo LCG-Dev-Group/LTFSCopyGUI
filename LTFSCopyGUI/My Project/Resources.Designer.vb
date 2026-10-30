@@ -923,6 +923,15 @@ Namespace My.Resources
         End Property
         
         '''<summary>
+        '''  查找类似 传输长度限制 的本地化字符串。
+        '''</summary>
+        Friend ReadOnly Property PropertyDescription_TapeUtils_TransferLength() As String
+            Get
+                Return ResourceManager.GetString("PropertyDescription_TapeUtils_TransferLength", resourceCulture)
+            End Get
+        End Property
+        
+        '''<summary>
         '''  查找类似 资源 的本地化字符串。
         '''</summary>
         Friend ReadOnly Property ResText_() As String
