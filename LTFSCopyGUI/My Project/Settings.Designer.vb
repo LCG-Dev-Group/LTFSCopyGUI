@@ -1134,6 +1134,7 @@ Namespace My
                 IO.Directory.CreateDirectory(cfgPath)
             End If
             IO.File.WriteAllText(cfgFile, SettingImportExport.GetSerializedText())
+            IO.File.WriteAllText(Settings.driveSettingFile, (New TapeUtils()).GetSerializedText())
         End Sub
 
         Private Sub MySettings_SettingsLoaded(sender As Object, e As SettingsLoadedEventArgs) Handles Me.SettingsLoaded
