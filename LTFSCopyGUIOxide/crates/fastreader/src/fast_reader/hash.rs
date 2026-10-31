@@ -160,7 +160,7 @@ impl HashSet {
         if let Some(h) = self.blake3.as_ref() {
             parts.push(format!(
                 "BLAKE3={}",
-                h.finalize().to_hex().to_string().to_uppercase()
+                hex(h.finalize().as_bytes())
             ));
         }
         if let Some(h) = self.xxh3.as_ref() {

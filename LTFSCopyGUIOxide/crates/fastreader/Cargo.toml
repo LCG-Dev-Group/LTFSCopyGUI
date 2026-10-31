@@ -1,0 +1,24 @@
+[package]
+name = "ltfscopy-fastreader"
+version = "0.1.0"
+edition.workspace = true
+autobins = false
+
+[lib]
+name = "ltfscopy_fastreader"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "ltfscopy-fastreader-bench"
+path = "src/bin/ltfscopy-fastreader-bench.rs"
+
+[dependencies]
+blake3 = { workspace = true }
+crc32fast = { workspace = true }
+md-5 = { workspace = true }
+mimalloc = { workspace = true }
+rustc-hash = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+xxhash-rust = { workspace = true }
+windows-sys = { workspace = true }

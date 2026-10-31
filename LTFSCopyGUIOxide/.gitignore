@@ -1,0 +1,5 @@
+/logs/
+/data/
+
+# Keep the benchmark source despite the repository-wide bin ignore rule.
+!crates/*/src/bin/

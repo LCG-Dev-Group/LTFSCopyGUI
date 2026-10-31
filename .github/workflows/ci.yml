@@ -45,10 +45,10 @@ jobs:
                   }
 
             - name: Test FastReader
-              run: cargo test --manifest-path LtfsFastReader/Cargo.toml
+              run: cargo test --manifest-path LTFSCopyGUIOxide/Cargo.toml -p ltfscopy-fastreader
 
             - name: Test LtfsSchema
-              run: cargo test --manifest-path LtfsSchema/Cargo.toml
+              run: cargo test --manifest-path LTFSCopyGUIOxide/Cargo.toml -p ltfscopy-schema
 
             - name: Build LTFSCopyGUI, FastReader, and LtfsSchema
               run: msbuild LTFSCopyGUI.sln /m /t:Build /p:Configuration=Release /p:Platform=x64
@@ -58,8 +58,7 @@ jobs:
               run: |
                   $requiredFiles = @(
                     "LTFSCopyGUI/bin/x64/Release/LTFSCopyGUI.exe",
-                    "LTFSCopyGUI/bin/x64/Release/ltfscopy_fastreader.dll",
-                    "LTFSCopyGUI/bin/x64/Release/ltfscopy_schema.dll"
+                    "LTFSCopyGUI/bin/x64/Release/ltfscopy_oxide.dll"
                   )
 
                   foreach ($requiredFile in $requiredFiles) {

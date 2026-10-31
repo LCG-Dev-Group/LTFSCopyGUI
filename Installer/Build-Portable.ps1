@@ -79,7 +79,7 @@ try {
         -DestinationDirectory $stagingDirectory `
         -ExcludedTopLevelDirectories @()
 
-    foreach ($requiredFile in @('LTFSCopyGUI.exe', 'ltfscopy_fastreader.dll')) {
+    foreach ($requiredFile in @('LTFSCopyGUI.exe', 'ltfscopy_oxide.dll')) {
         $requiredPath = Join-Path $stagingDirectory $requiredFile
         if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
             throw "Portable payload is missing required file: $requiredFile"

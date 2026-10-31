@@ -8,7 +8,7 @@ Imports System.Threading
 Imports Serilog
 Imports Serilog.Context
 
-' Control-plane wrapper for ltfscopy_fastreader.dll. File payloads never enter
+' Control-plane wrapper for ltfscopy_oxide.dll. File payloads never enter
 ' CLR memory: Rust owns every slot and TapeUtils.Write consumes its pointer
 ' directly before AdvanceSlot releases it back to Rust.
 Public Class RustFastReaderProvider
@@ -84,7 +84,7 @@ Public Class RustFastReaderProvider
     End Class
 
     Private NotInheritable Class NativeMethods
-        Public Const DllName As String = "ltfscopy_fastreader.dll"
+        Public Const DllName As String = "ltfscopy_oxide.dll"
 
         <DllImport(DllName, ExactSpelling:=True, CallingConvention:=CallingConvention.Winapi)>
         Public Shared Function lfr_abi_version() As UInteger
@@ -1264,7 +1264,7 @@ Public Class RustFastReaderProvider
         Dim directory As New DirectoryInfo(Application.StartupPath)
         While directory IsNot Nothing
             Dim candidate = Path.Combine(directory.FullName,
-                                         "LtfsFastReader",
+                                         "LTFSCopyGUIOxide",
                                          "target",
                                          "x86_64-win7-windows-msvc",
                                          "release",

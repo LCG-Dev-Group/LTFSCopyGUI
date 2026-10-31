@@ -361,3 +361,7 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Cargo build output, including workspace members and pre-migration caches.
+target/
+target-clippy/

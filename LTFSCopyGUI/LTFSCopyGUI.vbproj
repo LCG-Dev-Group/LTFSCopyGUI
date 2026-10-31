@@ -544,24 +544,15 @@
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.VisualBasic.targets" />
   <PropertyGroup>
-    <FastReaderCargoProfile>release</FastReaderCargoProfile>
-    <FastReaderCargoOutputDirectory>release</FastReaderCargoOutputDirectory>
-    <FastReaderCargoProfile Condition="'$(Configuration)' == 'Debug'">dev</FastReaderCargoProfile>
-    <FastReaderCargoOutputDirectory Condition="'$(Configuration)' == 'Debug'">debug</FastReaderCargoOutputDirectory>
-    <SchemaCargoProfile>release</SchemaCargoProfile>
-    <SchemaCargoOutputDirectory>release</SchemaCargoOutputDirectory>
-    <SchemaCargoProfile Condition="'$(Configuration)' == 'Debug'">dev</SchemaCargoProfile>
-    <SchemaCargoOutputDirectory Condition="'$(Configuration)' == 'Debug'">debug</SchemaCargoOutputDirectory>
+    <OxideCargoProfile>release</OxideCargoProfile>
+    <OxideCargoOutputDirectory>release</OxideCargoOutputDirectory>
+    <OxideCargoProfile Condition="'$(Configuration)' == 'Debug'">dev</OxideCargoProfile>
+    <OxideCargoOutputDirectory Condition="'$(Configuration)' == 'Debug'">debug</OxideCargoOutputDirectory>
   </PropertyGroup>
-  <Target Name="BuildFastReader" AfterTargets="Build">
-    <Exec Command="cargo +nightly build -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --profile $(FastReaderCargoProfile) --lib --manifest-path &quot;$(MSBuildProjectDirectory)\..\LtfsFastReader\Cargo.toml&quot;" WorkingDirectory="$(MSBuildProjectDirectory)\..\LtfsFastReader" />
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LtfsFastReader\target\x86_64-win7-windows-msvc\$(FastReaderCargoOutputDirectory)\ltfscopy_fastreader.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LtfsFastReader\target\x86_64-win7-windows-msvc\$(FastReaderCargoOutputDirectory)\ltfscopy_fastreader.pdb" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(MSBuildProjectDirectory)\..\LtfsFastReader\target\x86_64-win7-windows-msvc\$(FastReaderCargoOutputDirectory)\ltfscopy_fastreader.pdb')" />
-  </Target>
-  <Target Name="BuildSchemaNative" AfterTargets="Build">
-    <Exec Command="cargo +nightly build -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --profile $(SchemaCargoProfile) --lib --manifest-path &quot;$(MSBuildProjectDirectory)\..\LtfsSchema\Cargo.toml&quot;" WorkingDirectory="$(MSBuildProjectDirectory)\..\LtfsSchema" />
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LtfsSchema\target\x86_64-win7-windows-msvc\$(SchemaCargoOutputDirectory)\ltfscopy_schema.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LtfsSchema\target\x86_64-win7-windows-msvc\$(SchemaCargoOutputDirectory)\ltfscopy_schema.pdb" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(MSBuildProjectDirectory)\..\LtfsSchema\target\x86_64-win7-windows-msvc\$(SchemaCargoOutputDirectory)\ltfscopy_schema.pdb')" />
+  <Target Name="BuildOxideNative" AfterTargets="Build">
+    <Exec Command="cargo +nightly build -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --profile $(OxideCargoProfile) --lib -p ltfscopy-oxide --manifest-path &quot;$(MSBuildProjectDirectory)\..\LTFSCopyGUIOxide\Cargo.toml&quot;" WorkingDirectory="$(MSBuildProjectDirectory)\..\LTFSCopyGUIOxide" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LTFSCopyGUIOxide\target\x86_64-win7-windows-msvc\$(OxideCargoOutputDirectory)\ltfscopy_oxide.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\LTFSCopyGUIOxide\target\x86_64-win7-windows-msvc\$(OxideCargoOutputDirectory)\ltfscopy_oxide.pdb" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="Exists('$(MSBuildProjectDirectory)\..\LTFSCopyGUIOxide\target\x86_64-win7-windows-msvc\$(OxideCargoOutputDirectory)\ltfscopy_oxide.pdb')" />
   </Target>
   <PropertyGroup>
     <PreBuildEvent>"$(ProjectDir)Build\BuildVersionPropagator.exe" "$(ProjectDir)Build\Build.vb"</PreBuildEvent>

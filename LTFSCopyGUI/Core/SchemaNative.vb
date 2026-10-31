@@ -37,7 +37,7 @@ Friend NotInheritable Class NativeStoreDirectorySortResultData
 End Class
 
 Friend Module NativeSchemaXml
-    Private Const NativeDll As String = "ltfscopy_schema.dll"
+    Private Const NativeDll As String = "ltfscopy_oxide.dll"
     Friend Const StatusOk As Integer = 0
     Friend Const StatusError As Integer = -1
     Friend Const StatusInvalidArgument As Integer = -2

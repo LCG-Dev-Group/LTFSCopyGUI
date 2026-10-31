@@ -7,7 +7,7 @@ Imports System.Text
 Imports System.Threading
 
 Friend NotInheritable Class DirectTapeCopyNative
-    Friend Const DllName As String = "ltfscopy_fastreader.dll"
+    Friend Const DllName As String = "ltfscopy_oxide.dll"
     Friend Const BridgeAbiVersion As UInteger = 1UI
     Friend Const ResultOk As Integer = 0
     Friend Const ResultTimeout As Integer = 1
@@ -165,9 +165,9 @@ Friend NotInheritable Class DirectTapeCopyNative
         Dim directory As New DirectoryInfo(Application.StartupPath)
         While directory IsNot Nothing
             For Each targetName As String In {"x86_64-pc-windows-msvc", "x86_64-win7-windows-msvc"}
-                Dim candidate = Path.Combine(directory.FullName, "LtfsFastReader", "target", targetName, "release", DllName)
+                Dim candidate = Path.Combine(directory.FullName, "LTFSCopyGUIOxide", "target", targetName, "release", DllName)
                 If File.Exists(candidate) Then Return candidate
-                candidate = Path.Combine(directory.FullName, "LtfsFastReader", "target", "release", DllName)
+                candidate = Path.Combine(directory.FullName, "LTFSCopyGUIOxide", "target", "release", DllName)
                 If File.Exists(candidate) Then Return candidate
             Next
             directory = directory.Parent

@@ -1,19 +1,24 @@
 [package]
-name = "ltfscopy-fastreader"
+name = "ltfscopy-oxide"
 version = "0.1.0"
-edition = "2024"
-autobins = false
+edition.workspace = true
 
 [lib]
-name = "ltfscopy_fastreader"
-path = "src/main.rs"
-crate-type = ["cdylib", "rlib"]
-
-[[bin]]
-name = "ltfscopy-fastreader-bench"
-path = "src/bin/ltfscopy-fastreader-bench.rs"
+name = "ltfscopy_oxide"
+crate-type = ["cdylib"]
 
 [dependencies]
+ltfscopy-fastreader = { path = "crates/fastreader" }
+ltfscopy-schema = { path = "crates/schema" }
+
+[workspace]
+members = ["crates/fastreader", "crates/schema"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+
+[workspace.dependencies]
 blake3 = "1.8"
 crc32fast = "1.5"
 md-5 = "0.11"
@@ -32,6 +37,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Memory",
     "Win32_System_Threading",
 ] }
+hashbrown = "0.17.1"
+quick-xml = { version = "0.42.0", default-features = false }
+rayon = "1.12.0"
+memmap2 = "0.9.11"
 
 [profile.release]
 lto = true
