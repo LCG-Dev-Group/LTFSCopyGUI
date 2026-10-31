@@ -154,3 +154,18 @@ jobs:
                   name: LTFSCopyGUI-portable-${{ github.sha }}
                   path: Installer/LTFSCopyGUI-*-portable.zip
                   if-no-files-found: error
+
+            # Debug uses the same portable payload, without an Inno Setup invocation.
+            - name: Build Debug application and native crates
+              run: msbuild LTFSCopyGUI.sln /m /t:Build /p:Configuration=Debug /p:Platform=x64
+
+            - name: Build Debug portable archive
+              shell: pwsh
+              run: .\Installer\Build-Portable.ps1 -Configuration Debug -OutputPath Installer/LTFSCopyGUI-debug.zip
+
+            - name: Upload Debug portable artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: LTFSCopyGUI-debug-${{ github.sha }}
+                  path: Installer/LTFSCopyGUI-debug.zip
+                  if-no-files-found: error

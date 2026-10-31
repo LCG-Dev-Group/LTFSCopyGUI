@@ -72,6 +72,7 @@ impl LfrBridgeContext {
 
     fn set_error(&self, error: impl std::fmt::Display) {
         let text = error.to_string();
+        debug_log!("event=bridge-error\tcontext={self:p}\tmessage={text:?}");
         if let Ok(mut local) = self.local_error.lock() {
             *local = text.clone();
         }
@@ -143,6 +144,12 @@ fn bridge_publish(
             "bridge slot payload is too large",
         ));
     }
+    debug_log!(
+        "event=bridge-publish-begin\tcontext={context:p}\tfile={file_index}\toffset={file_offset}\tbytes={}\tflags={flags}\toccupied={}\tbuffered={}",
+        data.len(),
+        header.occupied_slots.load(Ordering::Acquire),
+        header.buffered_bytes.load(Ordering::Acquire)
+    );
     let wait_started = Instant::now();
     match bridge_wait_semaphore(context, context.empty.0, u32::MAX) {
         LFR_OK => {}
@@ -153,11 +160,17 @@ fn bridge_publish(
         wait_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
         Ordering::Relaxed,
     );
+    debug_log!(
+        "event=bridge-publish-ready\tcontext={context:p}\tfile={file_index}\toffset={file_offset}\twait_us={}",
+        wait_started.elapsed().as_micros()
+    );
     if context.cancelled() {
         unsafe { ReleaseSemaphore(context.empty.0, 1, null_mut()) };
         return Err(cancelled_error());
     }
 
+    #[cfg(all(debug_assertions, not(test)))]
+    let copy_started = Instant::now();
     let sequence = header.write_index.load(Ordering::Relaxed);
     // The producer is single-writer by contract.  Keep this cross-process
     // mutation explicit instead of manufacturing a Rust mutable reference
@@ -189,6 +202,10 @@ fn bridge_publish(
     header
         .bytes_published
         .fetch_add(data.len() as u64, Ordering::Relaxed);
+    debug_log!(
+        "event=bridge-publish-end\tcontext={context:p}\tfile={file_index}\tsequence={sequence}\tcopy_us={}",
+        copy_started.elapsed().as_micros()
+    );
     if unsafe { ReleaseSemaphore(context.full.0, 1, null_mut()) } == 0 {
         return Err(io::Error::last_os_error());
     }
@@ -297,6 +314,7 @@ pub unsafe extern "system" fn lfr_bridge_create_consumer(
         Ok(value) => value,
         Err(code) => return code,
     };
+    debug_log!("event=bridge-open\tname={name:?}");
     let mapping_name = bridge_name(&name, "mapping");
     let mapping = unsafe {
         CreateFileMappingW(
@@ -373,6 +391,13 @@ pub unsafe extern "system" fn lfr_bridge_create_consumer(
         worker_thread: Mutex::new(None),
         local_error: Mutex::new(String::new()),
     });
+    debug_log!(
+        "event=bridge-open-ready\tname={name:?}\tcontext={:p}\tslot_size={}\tslot_count={}\thash_mask={}",
+        &*context,
+        context.header().slot_size,
+        context.header().slot_count,
+        context.header().hash_mask
+    );
     unsafe { *output = Box::into_raw(context) };
     LFR_OK
 }
@@ -396,6 +421,7 @@ pub unsafe extern "system" fn lfr_bridge_open_producer(
         Ok(value) => value,
         Err(code) => return code,
     };
+    debug_log!("event=bridge-open\tname={name:?}");
     let mapping_name = bridge_name(&name, "mapping");
     let mapping = unsafe { OpenFileMappingW(FILE_MAP_ALL_ACCESS, 0, mapping_name.as_ptr()) };
     if mapping.is_null() {
@@ -467,6 +493,13 @@ pub unsafe extern "system" fn lfr_bridge_open_producer(
         worker_thread: Mutex::new(None),
         local_error: Mutex::new(String::new()),
     });
+    debug_log!(
+        "event=bridge-open-ready\tname={name:?}\tcontext={:p}\tslot_size={}\tslot_count={}\thash_mask={}",
+        &*context,
+        context.header().slot_size,
+        context.header().slot_count,
+        context.header().hash_mask
+    );
     unsafe { *output = Box::into_raw(context) };
     LFR_OK
 }
@@ -621,7 +654,17 @@ pub unsafe extern "system" fn lfr_bridge_acquire_slot(
     if current.is_some() {
         return LFR_INVALID;
     }
+    debug_log!(
+        "event=bridge-acquire-begin\tcontext={context:p}\tfile={expected_file_index}\ttimeout_ms={timeout_ms}"
+    );
+    #[cfg(all(debug_assertions, not(test)))]
+    let acquire_started = Instant::now();
     let wait_result = bridge_wait_semaphore(context, context.full.0, timeout_ms);
+    debug_log!(
+        "event=bridge-acquire-wait-end\tcontext={context:p}\tfile={expected_file_index}\tresult={wait_result}\twait_us={}\toccupied={}",
+        acquire_started.elapsed().as_micros(),
+        context.header().occupied_slots.load(Ordering::Acquire)
+    );
     if wait_result != LFR_OK {
         if wait_result == LFR_TIMEOUT
             && context.header().producer_done.load(Ordering::Acquire) != 0
@@ -662,6 +705,14 @@ pub unsafe extern "system" fn lfr_bridge_acquire_slot(
             flags: slot.flags,
         };
     }
+    debug_log!(
+        "event=bridge-acquired\tcontext={context:p}\tfile={}\ttoken={}\toffset={}\tbytes={}\tflags={}",
+        slot.file_index,
+        slot.token,
+        slot.file_offset,
+        slot.length,
+        slot.flags
+    );
     *current = Some(slot.token);
     LFR_OK
 }
@@ -692,6 +743,11 @@ pub unsafe extern "system" fn lfr_bridge_release_slot(
     if slot.token != token {
         return LFR_INVALID;
     }
+    debug_log!(
+        "event=bridge-release\tcontext={context:p}\tfile={}\ttoken={token}\tbytes={}",
+        slot.file_index,
+        slot.length
+    );
     let length = slot.length as u64;
     context
         .header()
@@ -778,6 +834,7 @@ pub unsafe extern "system" fn lfr_bridge_cancel(context: *mut LfrBridgeContext) 
         Ok(value) => value,
         Err(code) => return code,
     };
+    debug_log!("event=bridge-cancel\tcontext={context:p}");
     context.header().cancelled.store(1, Ordering::Release);
     unsafe { SetEvent(context.cancel_event.0) };
     if let Ok(worker) = context.worker_thread.lock()
@@ -801,6 +858,7 @@ pub unsafe extern "system" fn lfr_bridge_producer_complete(context: *mut LfrBrid
     if context.role != BridgeRole::Producer {
         return LFR_INVALID;
     }
+    debug_log!("event=bridge-producer-complete\tcontext={context:p}");
     context.header().producer_done.store(1, Ordering::Release);
     LFR_OK
 }
@@ -838,6 +896,12 @@ fn scsi_command(
         },
         sense: [0; 64],
     };
+    // Paired events identify a blocked driver call as well as completed slow I/O.
+    debug_log!(
+        "event=scsi-begin\thandle={handle:p}\tcdb={cdb:02X?}\tbytes={data_length}\ttimeout_s={timeout_seconds}"
+    );
+    #[cfg(all(debug_assertions, not(test)))]
+    let scsi_started = Instant::now();
     let mut returned = 0u32;
     let ok = unsafe {
         DeviceIoControl(
@@ -852,8 +916,22 @@ fn scsi_command(
         )
     };
     if ok == 0 {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        debug_log!(
+            "event=scsi-error\thandle={handle:p}\topcode={}\telapsed_us={}\terror={error}",
+            cdb[0],
+            scsi_started.elapsed().as_micros()
+        );
+        return Err(error);
     }
+    debug_log!(
+        "event=scsi-end\thandle={handle:p}\topcode={}\telapsed_us={}\ttransfer={}\tstatus={}\tsense={:02X?}",
+        cdb[0],
+        scsi_started.elapsed().as_micros(),
+        request.pass.DataTransferLength,
+        request.pass.ScsiStatus,
+        request.sense
+    );
     Ok(request)
 }
 
@@ -993,6 +1071,10 @@ fn bridge_read_block_with_retry(
             if context.cancelled() {
                 return Err(cancelled_error());
             }
+            debug_log!(
+                "event=tape-read-attempt\tcontext={context:p}\tpartition={partition}\tblock={block}\trequested={allocation_length}\tattempt={attempt}\tlocate={}",
+                need_locate || attempt > 0
+            );
             let read_started = Instant::now();
             let result = if need_locate || attempt > 0 {
                 scsi_locate(handle, partition, block, timeout_seconds).and_then(|_| {
@@ -1006,6 +1088,10 @@ fn bridge_read_block_with_retry(
                 read_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                 Ordering::Relaxed,
             );
+            debug_log!(
+                "event=tape-read-result\tcontext={context:p}\tpartition={partition}\tblock={block}\telapsed_us={}\tresult={result:?}",
+                read_started.elapsed().as_micros()
+            );
             match result {
                 Ok(length) => return Ok(length),
                 Err(error) => last_error = Some(error),
@@ -1013,6 +1099,9 @@ fn bridge_read_block_with_retry(
             need_locate = true;
             if attempt < automatic_retries {
                 let delay = retry_delays.get(attempt as usize).copied().unwrap_or(4);
+                debug_log!(
+                    "event=tape-retry-delay\tcontext={context:p}\tblock={block}\tdelay_s={delay}"
+                );
                 bridge_wait_retry(context, delay)?;
             }
         }
@@ -1021,6 +1110,7 @@ fn bridge_read_block_with_retry(
             "source tape read failed after {} retries at partition={} block={}: {error}",
             automatic_retries, partition, block
         );
+        debug_log!("event=tape-retry-prompt-begin\tcontext={context:p}\tmessage={message:?}");
         let retry = retry_callback.map_or(0, |callback| unsafe {
             callback(
                 user_data,
@@ -1030,6 +1120,7 @@ fn bridge_read_block_with_retry(
                 block,
             )
         });
+        debug_log!("event=tape-retry-prompt-end\tcontext={context:p}\tretry={retry}");
         if retry == 1 {
             need_locate = true;
             continue;
@@ -1076,6 +1167,11 @@ pub unsafe extern "system" fn lfr_bridge_stream_tape_file(
     {
         return LFR_INVALID;
     }
+    debug_log!(
+        "event=tape-file-begin\tcontext={context:p}\tfile={file_index}\tlength={file_length}\tblock_size={source_block_size}\textents={extent_count}\ttimeout_s={timeout_seconds}\tretries={automatic_retries}"
+    );
+    #[cfg(all(debug_assertions, not(test)))]
+    let file_started = Instant::now();
     let mut values = if extent_count == 0 {
         Vec::new()
     } else {
@@ -1124,6 +1220,14 @@ pub unsafe extern "system" fn lfr_bridge_stream_tape_file(
         let mut logical_offset = 0u64;
 
         for extent in &values {
+            debug_log!(
+                "event=tape-extent\tcontext={context:p}\tfile={file_index}\tpartition={}\tblock={}\tbyte_offset={}\tfile_offset={}\tbytes={}",
+                extent.partition,
+                extent.start_block,
+                extent.byte_offset,
+                extent.file_offset,
+                extent.byte_count
+            );
             let mut remaining = extent.byte_count;
             let mut byte_offset = extent.byte_offset as usize;
             let mut physical_block = extent.start_block;
@@ -1171,6 +1275,11 @@ pub unsafe extern "system" fn lfr_bridge_stream_tape_file(
                             hash_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                             Ordering::Relaxed,
                         );
+                        debug_log!(
+                            "event=tape-hash\tcontext={context:p}\tfile={file_index}\toffset={logical_offset}\tbytes={}\telapsed_us={}",
+                            target_buffer.len(),
+                            hash_started.elapsed().as_micros()
+                        );
                         bridge_publish(context, file_index, logical_offset, &target_buffer, 0, "")?;
                         logical_offset += target_buffer.len() as u64;
                         context
@@ -1199,6 +1308,11 @@ pub unsafe extern "system" fn lfr_bridge_stream_tape_file(
                 hash_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                 Ordering::Relaxed,
             );
+            debug_log!(
+                "event=tape-hash\tcontext={context:p}\tfile={file_index}\toffset={logical_offset}\tbytes={}\telapsed_us={}",
+                target_buffer.len(),
+                hash_started.elapsed().as_micros()
+            );
             bridge_publish(context, file_index, logical_offset, &target_buffer, 0, "")?;
             logical_offset += target_buffer.len() as u64;
             context
@@ -1224,6 +1338,13 @@ pub unsafe extern "system" fn lfr_bridge_stream_tape_file(
         Ok(())
     })();
 
+    debug_log!(
+        "event=tape-file-end\tcontext={context:p}\tfile={file_index}\telapsed_us={}\tresult={result:?}\tscsi_total_ns={}\thash_total_ns={}\tpublish_wait_total_ns={}",
+        file_started.elapsed().as_micros(),
+        context.header().read_wait_ns.load(Ordering::Relaxed),
+        context.header().hash_ns.load(Ordering::Relaxed),
+        context.header().publish_wait_ns.load(Ordering::Relaxed)
+    );
     if let Ok(mut worker) = context.worker_thread.lock() {
         worker.take();
     }

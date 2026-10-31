@@ -1,18 +1,21 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string] $OutputPath
+    [string] $OutputPath,
+
+    [ValidateSet("Release", "Debug")]
+    [string] $Configuration = "Release"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $installerDirectory = $PSScriptRoot
-$releaseDirectory = [System.IO.Path]::GetFullPath((Join-Path $installerDirectory '..\LTFSCopyGUI\bin\x64\Release'))
+$buildDirectory = [System.IO.Path]::GetFullPath((Join-Path $installerDirectory "..\LTFSCopyGUI\bin\x64\$Configuration"))
 $deployDirectory = [System.IO.Path]::GetFullPath((Join-Path $installerDirectory 'deploy'))
 
-if (-not [System.IO.Directory]::Exists($releaseDirectory)) {
-    throw "Release output directory does not exist: $releaseDirectory"
+if (-not [System.IO.Directory]::Exists($buildDirectory)) {
+    throw "$Configuration output directory does not exist: $buildDirectory"
 }
 
 if (-not [System.IO.Directory]::Exists($deployDirectory)) {
@@ -68,9 +71,9 @@ function Copy-PayloadFiles {
 }
 
 try {
-    # Match the [Files] entries in LCG.iss for a fresh install. These Release
+    # Match the [Files] entries in LCG.iss for a fresh install. These build
     # directories are supplied by deploy instead, so avoid copying them twice.
-    Copy-PayloadFiles -SourceDirectory $releaseDirectory `
+    Copy-PayloadFiles -SourceDirectory $buildDirectory `
         -DestinationDirectory $stagingDirectory `
         -ExcludedTopLevelDirectories @('config', 'log', 'logpages', 'schema')
 

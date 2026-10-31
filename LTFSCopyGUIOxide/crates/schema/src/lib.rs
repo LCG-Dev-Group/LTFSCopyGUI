@@ -1,5 +1,9 @@
 #![allow(clippy::missing_safety_doc)]
 
+#[cfg(all(debug_assertions, not(test)))]
+const DEBUG_LOG_PREFIX: &str = "lsc";
+include!("../../../debug_log.rs");
+
 mod ffi;
 pub use ffi::{
     lsc_file_copy_string, lsc_file_copy_xattr_string, lsc_file_destroy, lsc_file_get_extent,
@@ -104,6 +108,7 @@ fn last_error() -> &'static Mutex<String> {
 fn set_last_error(message: impl Into<String>) {
     if let Ok(mut value) = last_error().lock() {
         *value = message.into();
+        debug_log!("event=schema-error\tmessage={value:?}");
     }
 }
 
@@ -111,7 +116,16 @@ fn ffi_call<F>(call: F) -> i32
 where
     F: FnOnce() -> Result<(), String> + std::panic::UnwindSafe,
 {
-    match std::panic::catch_unwind(call) {
+    // Keep operation names and timing entirely out of Release builds.
+    debug_log!(
+        "event=schema-call-begin\toperation={}",
+        std::any::type_name::<F>()
+    );
+    #[cfg(all(debug_assertions, not(test)))]
+    let started = std::time::Instant::now();
+
+    // Preserve the existing FFI error conversion while recording completion.
+    let result = match std::panic::catch_unwind(call) {
         Ok(Ok(())) => LSC_OK,
         Ok(Err(error)) => {
             set_last_error(error);
@@ -121,7 +135,15 @@ where
             set_last_error("ltfscopy_schema panicked while servicing an FFI call");
             LSC_ERROR
         }
-    }
+    };
+
+    // The operation and thread identify the corresponding begin event.
+    debug_log!(
+        "event=schema-call-end\toperation={}\tresult={result}\telapsed_us={}",
+        std::any::type_name::<F>(),
+        started.elapsed().as_micros()
+    );
+    result
 }
 
 fn ffi_call_value<T, F>(call: F, output: *mut T) -> i32
@@ -132,7 +154,16 @@ where
         set_last_error("output pointer is null");
         return LSC_INVALID_ARGUMENT;
     }
-    match std::panic::catch_unwind(call) {
+    // Keep operation names and timing entirely out of Release builds.
+    debug_log!(
+        "event=schema-call-begin\toperation={}",
+        std::any::type_name::<F>()
+    );
+    #[cfg(all(debug_assertions, not(test)))]
+    let started = std::time::Instant::now();
+
+    // Preserve the existing FFI error conversion while recording completion.
+    let result = match std::panic::catch_unwind(call) {
         Ok(Ok(value)) => {
             // SAFETY: the caller supplied a non-null output pointer and owns it.
             unsafe { *output = value };
@@ -146,7 +177,15 @@ where
             set_last_error("ltfscopy_schema panicked while servicing an FFI call");
             LSC_ERROR
         }
-    }
+    };
+
+    // The operation and thread identify the corresponding begin event.
+    debug_log!(
+        "event=schema-call-end\toperation={}\tresult={result}\telapsed_us={}",
+        std::any::type_name::<F>(),
+        started.elapsed().as_micros()
+    );
+    result
 }
 
 fn invalid(message: impl Into<String>) -> String {
