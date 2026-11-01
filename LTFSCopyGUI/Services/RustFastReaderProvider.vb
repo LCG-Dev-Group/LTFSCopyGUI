@@ -225,6 +225,9 @@ Public Class RustFastReaderProvider
     Private _started As Boolean
     Private _streamStarted As Boolean
     Private _cancelRequested As Integer
+    ' Serialize UI polling and remote cancellation with native context destruction.
+    ' Slot reads/writes and disposal remain owned by the writer thread.
+    Private ReadOnly _lifetimeLock As New Object()
     Private _disposed As Integer
     Private ReadOnly _logSessionId As String = $"fastreader-{Guid.NewGuid().ToString("N").Substring(0, 8)}"
 
@@ -263,8 +266,10 @@ Public Class RustFastReaderProvider
 
     Public ReadOnly Property BufferedBytes As Long Implements IFastReaderConsumer.BufferedBytes
         Get
-            If Not HasContext() Then Return 0
-            Return CLng(NativeMethods.lfr_buffered_bytes(Context))
+            SyncLock _lifetimeLock
+                If Not HasContext() Then Return 0
+                Return CLng(NativeMethods.lfr_buffered_bytes(Context))
+            End SyncLock
         End Get
     End Property
 
@@ -1003,6 +1008,12 @@ Public Class RustFastReaderProvider
     End Sub
 
     Public Sub Cancel() Implements IFastReaderConsumer.Cancel
+        SyncLock _lifetimeLock
+            CancelCore()
+        End SyncLock
+    End Sub
+
+    Private Sub CancelCore()
         If Interlocked.Exchange(_cancelRequested, 1) <> 0 Then Return
         Dim result As Integer = ResultInvalid
         If HasContext() Then result = NativeMethods.lfr_cancel(Context)
@@ -1026,6 +1037,12 @@ Public Class RustFastReaderProvider
     End Sub
 
     Public Sub Dispose() Implements IDisposable.Dispose
+        SyncLock _lifetimeLock
+            DisposeCore()
+        End SyncLock
+    End Sub
+
+    Private Sub DisposeCore()
         If Interlocked.Exchange(_disposed, 1) <> 0 Then Return
         Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(RustFastReaderProvider))
             Using categoryScope As IDisposable = LogContext.PushProperty("Category", "FastReader")

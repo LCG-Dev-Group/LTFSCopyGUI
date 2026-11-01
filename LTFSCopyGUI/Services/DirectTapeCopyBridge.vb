@@ -278,6 +278,9 @@ Public NotInheritable Class DirectTapeCopyBridgeConsumer
     Private _module As IntPtr
     Private ReadOnly _capacity As Long
     Private _remaining As Long
+    ' Serialize UI polling and remote cancellation with native context destruction.
+    ' Slot reads/writes and disposal remain owned by the writer thread.
+    Private ReadOnly _lifetimeLock As New Object()
     Private _disposed As Integer
     Private _peerError As String
 
@@ -307,7 +310,9 @@ Public NotInheritable Class DirectTapeCopyBridgeConsumer
 
     Public ReadOnly Property BufferedBytes As Long Implements IFastReaderConsumer.BufferedBytes
         Get
-            Return If(_context = IntPtr.Zero, 0L, CLng(DirectTapeCopyNative.lfr_bridge_buffered_bytes(_context)))
+            SyncLock _lifetimeLock
+                Return If(_context = IntPtr.Zero, 0L, CLng(DirectTapeCopyNative.lfr_bridge_buffered_bytes(_context)))
+            End SyncLock
         End Get
     End Property
 
@@ -392,6 +397,12 @@ Public NotInheritable Class DirectTapeCopyBridgeConsumer
     End Function
 
     Public Sub Cancel() Implements IFastReaderConsumer.Cancel
+        SyncLock _lifetimeLock
+            CancelCore()
+        End SyncLock
+    End Sub
+
+    Private Sub CancelCore()
         If _context <> IntPtr.Zero Then DirectTapeCopyNative.lfr_bridge_cancel(_context)
     End Sub
 
@@ -405,6 +416,12 @@ Public NotInheritable Class DirectTapeCopyBridgeConsumer
     End Sub
 
     Public Sub Dispose() Implements IDisposable.Dispose
+        SyncLock _lifetimeLock
+            DisposeCore()
+        End SyncLock
+    End Sub
+
+    Private Sub DisposeCore()
         If Interlocked.Exchange(_disposed, 1) <> 0 Then Return
         If _context <> IntPtr.Zero Then
             DirectTapeCopyNative.lfr_bridge_cancel(_context)
