@@ -1645,16 +1645,29 @@ Public Class LTFSWriter
             Next
 
             If UnwrittenFiles IsNot Nothing Then
-                For i As Integer = UnwrittenFiles.Count - 1 To 0 Step -1
-                    Dim value As FileRecord = UnwrittenFiles(i)
-                    If recordSet.Contains(value) Then
-                        UnwrittenFiles.RemoveAt(i)
-                        If value IsNot Nothing AndAlso value.File IsNot Nothing Then _pendingSize -= value.File.length
-                    End If
-                Next
+                ' Compact once instead of shifting the remaining queue for every removed record.
+                UnwrittenFiles.RemoveAll(Function(value As FileRecord)
+                                             If Not recordSet.Contains(value) Then Return False
+                                             If value IsNot Nothing AndAlso value.File IsNot Nothing Then _pendingSize -= value.File.length
+                                             Return True
+                                         End Function)
             End If
-            For Each record As FileRecord In recordSet
-                RemovePendingIndexUnsafe(record)
+
+            ' Scan each affected name index once, preserving renamed keys and replacement records.
+            Dim directories As New HashSet(Of ltfsindex.directory)(DirectoryRecordComparer.Instance)
+            For Each record In recordSet
+                If record.ParentDirectory IsNot Nothing Then directories.Add(record.ParentDirectory)
+            Next
+
+            ' Remove only entries still pointing at this completed batch.
+            For Each directory In directories
+                Dim byName As Dictionary(Of String, FileRecord) = Nothing
+                If Not _pendingByDirectory.TryGetValue(directory, byName) Then Continue For
+                Dim staleKeys = byName.Where(Function(pair) recordSet.Contains(pair.Value)).Select(Function(pair) pair.Key).ToList()
+                For Each key In staleKeys
+                    byName.Remove(key)
+                Next
+                If byName.Count = 0 Then _pendingByDirectory.Remove(directory)
             Next
         End SyncLock
     End Sub
@@ -3604,9 +3617,12 @@ Public Class LTFSWriter
     End Function
 
     Private Function GetSelectedListViewFiles() As List(Of ltfsindex.file)
-        Dim result As New List(Of ltfsindex.file)(ListView1.SelectedIndices.Count)
-        For i As Integer = 0 To ListView1.SelectedIndices.Count - 1
-            Dim selectedFile As ltfsindex.file = GetListViewFile(ListView1.SelectedIndices(i))
+        ' Snapshot once: indexing SelectedIndices repeatedly walks the native selection from the start.
+        Dim indices(ListView1.SelectedIndices.Count - 1) As Integer
+        ListView1.SelectedIndices.CopyTo(indices, 0)
+        Dim result As New List(Of ltfsindex.file)(indices.Length)
+        For Each index In indices
+            Dim selectedFile As ltfsindex.file = GetListViewFile(index)
             If selectedFile IsNot Nothing Then result.Add(selectedFile)
         Next
         Return result
@@ -13455,13 +13471,18 @@ Public Class LTFSWriter
             .GenerationNumber = schema.generationnumber,
             .SourceBlockSize = plabel.blocksize}
         Dim seenPaths As New HashSet(Of String)(StringComparer.Ordinal)
-        Dim selectedItems = GetSelectedListViewItems()
-        If CurrentFocus Is ListView1 AndAlso selectedItems.Count > 0 Then
+        If CurrentFocus Is ListView1 AndAlso ListView1.SelectedIndices.Count > 0 Then
             Dim parent = TryCast(ListView1.Tag, ltfsindex.directory)
-            For Each item In selectedItems
-                Dim file = TryCast(item.Tag, ltfsindex.file)
-                If file Is Nothing Then Continue For
-                If parent IsNot Nothing AndAlso parent.UnwrittenFiles IsNot Nothing AndAlso parent.UnwrittenFiles.Contains(file) Then Continue For
+            Dim pending As New HashSet(Of ltfsindex.file)
+            If parent IsNot Nothing AndAlso parent.UnwrittenFiles IsNot Nothing Then
+                SyncLock parent.UnwrittenFiles
+                    pending.UnionWith(parent.UnwrittenFiles)
+                End SyncLock
+            End If
+
+            ' Read file identities without rendering every selected row or rescanning pending files.
+            For Each file In GetSelectedListViewFiles()
+                If pending.Contains(file) Then Continue For
                 AddDirectManifestFile(manifest, file, file.name, seenPaths)
             Next
         Else
@@ -13737,13 +13758,29 @@ Public Class LTFSWriter
         Next
 
         Dim staged As New List(Of FileRecord)
+        ' Reuse materialized directory names; lazy directories already have an on-disk name index.
+        Dim existingByDirectory As New Dictionary(Of ltfsindex.directory, ILookup(Of String, ltfsindex.file))(DirectoryReferenceComparer.Instance)
         Dim overwrite = 覆盖已有文件ToolStripMenuItem.Checked
         For Each entry In manifest.Files
             Dim separator = entry.RelativePath.LastIndexOf("\"c)
             Dim parentPath = If(separator < 0, String.Empty, entry.RelativePath.Substring(0, separator))
             Dim name = If(separator < 0, entry.RelativePath, entry.RelativePath.Substring(separator + 1))
             Dim parent = EnsureDirectTargetDirectory(targetRoot, parentPath, directoryMap)
-            Dim existing = parent.FindFilesByName(name).FirstOrDefault(Function(value) String.Equals(value.name, name, StringComparison.Ordinal))
+            Dim existing As ltfsindex.file
+            If parent.HasUnmaterializedLazyContents Then
+                existing = parent.FindFilesByName(name).FirstOrDefault()
+            Else
+                Dim byName As ILookup(Of String, ltfsindex.file) = Nothing
+                If Not existingByDirectory.TryGetValue(parent, byName) Then
+                    byName = parent.EnumerateLazyFiles().Where(Function(value) value IsNot Nothing).ToLookup(Function(value) value.name, StringComparer.Ordinal)
+                    existingByDirectory.Add(parent, byName)
+                End If
+
+                ' Preserve first-match behavior when the directory contains duplicate names.
+                existing = byName(name).FirstOrDefault()
+            End If
+
+            ' Stage new records separately so the lookup continues to describe committed files only.
             If existing IsNot Nothing AndAlso Not overwrite Then Continue For
             Dim targetFile As New ltfsindex.file With {
                 .name = name,

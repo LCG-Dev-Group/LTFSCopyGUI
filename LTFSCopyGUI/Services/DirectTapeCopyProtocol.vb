@@ -153,7 +153,11 @@ Friend NotInheritable Class DirectTapeCopyProtocol
         While offset < values.Count
             Dim count = Math.Min(256, values.Count - offset)
             While True
-                Dim batch = values.Skip(offset).Take(count).ToList()
+                ' Index directly: Enumerable.Skip rescans every preceding batch on .NET Framework.
+                Dim batch As New List(Of T)(count)
+                For index As Integer = offset To offset + count - 1
+                    batch.Add(values(index))
+                Next
                 Try
                     WriteMessage(stream, messageType, batch)
                     offset += count
