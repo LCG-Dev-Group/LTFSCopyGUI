@@ -3754,7 +3754,7 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
 
     Private Sub ButtonDiskCopy_Click(sender As Object, e As EventArgs) Handles ButtonDiskCopy.Click
         Enabled = False
-        Dim LBA As ULong = CULng(NumericUpDownLBA.Value)
+        Dim LBA As Long = CLng(NumericUpDownLBA.Value)
         Dim sectorSize As Integer = CInt(NumericUpDownSectorSize.Value)
         Dim blocklim As Integer = 524288
         Dim batch As Integer = blocklim \ sectorSize
@@ -3792,19 +3792,19 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                      TapeUtils.OpenTapeDrive(src, srcHandle)
                      Dim writeLBACount As Integer
                      Dim stopflag As Boolean = False
-                     For i As ULong = LBA To CULng(LBA + copyCount - 1) Step CULng(batch)
+                     For i As Long = LBA To LBA + copyCount - 1 Step batch
                          Invoke(Sub()
                                     If Me.Enabled Then stopflag = True
                                 End Sub)
                          If stopflag Then Exit For
-                         Dim currentLBA As ULong = i
+                         Dim currentLBA As Long = i
                          Dim writeData As Byte() = ArrayPool(Of Byte).Shared.Rent(blocklim)
-                         writeLBACount = Math.Min(batch, CInt(LBA + copyCount - i))
+                         writeLBACount = CInt(Math.Min(batch, LBA + copyCount - i))
                          Dim cdbsrc As Byte() = {&H28, 0,
-                                    CByte(CLng((i >> 24)) And &HFF),
-                                    CByte(CLng((i >> 16)) And &HFF),
-                                    CByte(CLng((i >> 8)) And &HFF),
-                                    CByte(CLng((i >> 0)) And &HFF),
+                                    CByte((i >> 24) And &HFF),
+                                    CByte((i >> 16) And &HFF),
+                                    CByte((i >> 8) And &HFF),
+                                    CByte((i >> 0) And &HFF),
                                     0,
                                     CByte((writeLBACount >> 8) And &HFF),
                                     CByte((writeLBACount >> 0) And &HFF), 0}
@@ -3855,10 +3855,10 @@ DatasetResidue = {ts.CurrentSetResidueBytes}{vbCrLf}"
                          End While
 
                          Dim cdb As Byte() = {&H2A, 0,
-                                    CByte(CLng((i >> 24)) And &HFF),
-                                    CByte(CLng((i >> 16)) And &HFF),
-                                    CByte(CLng((i >> 8)) And &HFF),
-                                    CByte(CLng((i >> 0)) And &HFF),
+                                    CByte((i >> 24) And &HFF),
+                                    CByte((i >> 16) And &HFF),
+                                    CByte((i >> 8) And &HFF),
+                                    CByte((i >> 0) And &HFF),
                                     0,
                                     CByte((writeLBACount >> 8) And &HFF),
                                     CByte((writeLBACount >> 0) And &HFF), 0}

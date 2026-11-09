@@ -74,12 +74,15 @@ Public NotInheritable Class BitCodec
         Return CLng(New SafeMathParser(expr).ParseComparison())
     End Function
 
-    ' Formula v1: supports integer constants, + - * / parentheses, and <GUID>.length tokens.
-    ' Keep formulas deterministic and side-effect free; do not use VB Eval or scripting.
-    Public Shared Function EvaluateLengthFormula(formula As String, lengthById As Func(Of String, Long)) As Long
+    ' Formula 支持：
+    '   <GUID>.length：引用字段长度，单位为字节
+    '   <GUID>.value ：引用字段的数值
+    ' 支持 + - * / 和括号。
+    Public Shared Function EvaluateLengthFormula(formula As String, lengthById As Func(Of String, Long), valueById As Func(Of String, Long)) As Long
         If String.IsNullOrWhiteSpace(formula) Then Return 0
-        Dim expr = Regex.Replace(formula, "<([0-9a-fA-F\-]+)>\.length",
-            Function(m) lengthById(m.Groups(1).Value).ToString(CultureInfo.InvariantCulture))
+        ' 先替换 .length，再替换 .value。
+        Dim expr As String = Regex.Replace(formula, "<([0-9a-fA-F\-]+)>\.length", Function(m) lengthById(m.Groups(1).Value).ToString(CultureInfo.InvariantCulture), RegexOptions.IgnoreCase)
+        expr = Regex.Replace(expr, "<([0-9a-fA-F\-]+)>\.value", Function(m) valueById(m.Groups(1).Value).ToString(CultureInfo.InvariantCulture), RegexOptions.IgnoreCase)
         Return CLng(New SafeMathParser(expr).Parse())
     End Function
 
@@ -119,6 +122,10 @@ Public NotInheritable Class BitCodec
                     Dim d = Factor()
                     If d = 0 Then Throw New DivideByZeroException()
                     v /= d
+                ElseIf Take("\"c) Then
+                    Dim d = Factor()
+                    If d = 0 Then Throw New DivideByZeroException()
+                    v = Math.Truncate(v / d)
                 Else
                     Exit Do
                 End If

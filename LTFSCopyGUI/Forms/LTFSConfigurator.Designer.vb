@@ -147,6 +147,7 @@ Partial Class LTFSConfigurator
         Me.ButtonTest = New System.Windows.Forms.Button()
         Me.ButtonRDErrRateLog = New System.Windows.Forms.Button()
         Me.TabPageZBC = New System.Windows.Forms.TabPage()
+        Me.ButtonDiskCopy = New System.Windows.Forms.Button()
         Me.ButtonZBCiSCSISvc = New System.Windows.Forms.Button()
         Me.ButtonResetAllZones = New System.Windows.Forms.Button()
         Me.ButtonRestoreLBA = New System.Windows.Forms.Button()
@@ -189,7 +190,6 @@ Partial Class LTFSConfigurator
         Me.SaveFileDialog1 = New System.Windows.Forms.SaveFileDialog()
         Me.SaveFileDialog2 = New System.Windows.Forms.SaveFileDialog()
         Me.OpenFileDialog1 = New System.Windows.Forms.OpenFileDialog()
-        Me.ButtonDiskCopy = New System.Windows.Forms.Button()
         Me.ContextMenuStripRefreshDeviceList.SuspendLayout()
         Me.Panel1.SuspendLayout()
         Me.ContextMenuStripLTFSWriter.SuspendLayout()
@@ -1095,6 +1095,12 @@ Partial Class LTFSConfigurator
         Me.TabPageZBC.Name = "TabPageZBC"
         Me.TabPageZBC.UseVisualStyleBackColor = True
         '
+        'ButtonDiskCopy
+        '
+        resources.ApplyResources(Me.ButtonDiskCopy, "ButtonDiskCopy")
+        Me.ButtonDiskCopy.Name = "ButtonDiskCopy"
+        Me.ButtonDiskCopy.UseVisualStyleBackColor = True
+        '
         'ButtonZBCiSCSISvc
         '
         resources.ApplyResources(Me.ButtonZBCiSCSISvc, "ButtonZBCiSCSISvc")
@@ -1135,7 +1141,7 @@ Partial Class LTFSConfigurator
         'NumericUpDownWriteLBACount
         '
         resources.ApplyResources(Me.NumericUpDownWriteLBACount, "NumericUpDownWriteLBACount")
-        Me.NumericUpDownWriteLBACount.Maximum = New Decimal(New Integer() {2147483647, 0, 0, 0})
+        Me.NumericUpDownWriteLBACount.Maximum = New Decimal(New Integer() {-1, -1, 0, 0})
         Me.NumericUpDownWriteLBACount.Minimum = New Decimal(New Integer() {1, 0, 0, 0})
         Me.NumericUpDownWriteLBACount.Name = "NumericUpDownWriteLBACount"
         Me.NumericUpDownWriteLBACount.Value = New Decimal(New Integer() {1, 0, 0, 0})
@@ -1155,7 +1161,7 @@ Partial Class LTFSConfigurator
         'NumericUpDownSectorSize
         '
         resources.ApplyResources(Me.NumericUpDownSectorSize, "NumericUpDownSectorSize")
-        Me.NumericUpDownSectorSize.Maximum = New Decimal(New Integer() {65535, 0, 0, 0})
+        Me.NumericUpDownSectorSize.Maximum = New Decimal(New Integer() {16777216, 0, 0, 0})
         Me.NumericUpDownSectorSize.Name = "NumericUpDownSectorSize"
         Me.NumericUpDownSectorSize.Value = New Decimal(New Integer() {4096, 0, 0, 0})
         '
@@ -1327,16 +1333,6 @@ Partial Class LTFSConfigurator
         '
         Me.SaveFileDialog2.FileName = "Dump.bin"
         resources.ApplyResources(Me.SaveFileDialog2, "SaveFileDialog2")
-        '
-        'OpenFileDialog1
-        '
-        Me.OpenFileDialog1.FileName = "OpenFileDialog1"
-        '
-        'ButtonDiskCopy
-        '
-        resources.ApplyResources(Me.ButtonDiskCopy, "ButtonDiskCopy")
-        Me.ButtonDiskCopy.Name = "ButtonDiskCopy"
-        Me.ButtonDiskCopy.UseVisualStyleBackColor = True
         '
         'LTFSConfigurator
         '

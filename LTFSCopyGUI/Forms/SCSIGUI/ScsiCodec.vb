@@ -221,9 +221,18 @@ Public NotInheritable Class ScsiCodec
             If d Is Nothing OrElse String.IsNullOrWhiteSpace(d.Formula) Then Continue For
             Dim result = BitCodec.EvaluateLengthFormula(d.Formula,
                 Function(id)
-                    Dim target = all.FirstOrDefault(Function(x) String.Equals(x.Definition.Id, id, StringComparison.OrdinalIgnoreCase))
-                    If target Is Nothing Then Throw New InvalidOperationException("长度公式引用的元素不存在：" & id)
+                    Dim target = all.FirstOrDefault(Function(x) x.Definition IsNot Nothing AndAlso String.Equals(x.Definition.Id, id, StringComparison.OrdinalIgnoreCase))
+                    If target Is Nothing Then
+                        Throw New InvalidOperationException("公式引用的元素不存在：" & id)
+                    End If
                     Return CLng((ElementExtentBits(target) + 7) \ 8)
+                End Function,
+                Function(id)
+                    Dim target = all.FirstOrDefault(Function(x) x.Definition IsNot Nothing AndAlso String.Equals(x.Definition.Id, id, StringComparison.OrdinalIgnoreCase))
+                    If target Is Nothing Then
+                        Throw New InvalidOperationException("公式引用的元素不存在：" & id)
+                    End If
+                    Return ParseInteger(target.Value)
                 End Function)
             node.Value = result
         Next
@@ -447,8 +456,11 @@ Public NotInheritable Class ScsiCodec
         End Select
     End Sub
     ' 获取 Field 的实际字节长度。
-    ' LengthFieldId 非空时，在当前 Page 实例内查找对应长度字段，
-    ' 避免多个相同 Page 模板实例之间串用长度值。
+    ' LengthFieldId 非空时：
+    ' 1. 如果当前字段属于 Page，优先在当前 Page 实例内查找；
+    ' 2. 如果当前字段不属于 Page，则允许引用当前指令的其他顶层节点，
+    '    例如 Param 中的 Read Data 引用 CDB 中的 Transfer Length；
+    ' 3. 不允许 Page 内部字段在局部找不到时随意引用其他 Page 的同 GUID 字段。
     Private Shared Function GetFieldByteLength(node As ScsiValueNode) As Integer
         Dim d = node.Definition
         If Not String.IsNullOrWhiteSpace(d.LengthFieldId) Then
@@ -460,19 +472,33 @@ Public NotInheritable Class ScsiCodec
                 End If
                 pageNode = pageNode.Parent
             End While
-            If pageNode Is Nothing Then
-                Throw New InvalidOperationException("字段 " & d.Name & " 引用了动态长度，但找不到所属 Page 实例。")
-            End If
-            ' 仅在当前 Page 实例内查找，不能在整个 _currentNodes 中全局查找。
-            Dim lengthNode = Flatten(New List(Of ScsiValueNode) From {pageNode}).FirstOrDefault(Function(n) n.Definition IsNot Nothing AndAlso String.Equals(n.Definition.Id, d.LengthFieldId, StringComparison.OrdinalIgnoreCase))
-            If lengthNode Is Nothing Then
-                Throw New InvalidOperationException("字段 " & d.Name & " 引用的长度字段不存在：" & d.LengthFieldId)
+            Dim lengthNode As ScsiValueNode = Nothing
+            If pageNode IsNot Nothing Then
+                ' Page 内字段：只允许在当前 Page 实例中查找。
+                lengthNode = Flatten(New List(Of ScsiValueNode) From {pageNode}).FirstOrDefault(Function(n) n.Definition IsNot Nothing AndAlso String.Equals(n.Definition.Id, d.LengthFieldId, StringComparison.OrdinalIgnoreCase))
+                If lengthNode Is Nothing Then
+                    Throw New InvalidOperationException("字段 " & d.Name & " 引用的长度字段不存在：" & d.LengthFieldId)
+                End If
+            Else
+                ' 顶层字段：允许引用当前指令中其他区域的字段，
+                ' 例如 Param 中的 Binary 字段引用 CDB 中的长度字段。
+                Dim allNodes = If(_currentNodes, New List(Of ScsiValueNode)())
+                lengthNode = Flatten(allNodes).FirstOrDefault(Function(n) n.Definition IsNot Nothing AndAlso String.Equals(n.Definition.Id, d.LengthFieldId, StringComparison.OrdinalIgnoreCase))
+                If lengthNode Is Nothing Then
+                    Throw New InvalidOperationException("字段 " & d.Name & " 引用的长度字段不存在：" & d.LengthFieldId)
+                End If
             End If
             Dim lengthValue As Long = ParseInteger(lengthNode.Value)
             If lengthValue < 0 OrElse lengthValue > Integer.MaxValue Then
                 Throw New InvalidOperationException("字段 " & d.Name & " 的动态长度无效。")
             End If
             Return CInt(lengthValue)
+        End If
+        ' ByteLength = -1：
+        ' 生成时，Binary 字段长度由输入的十六进制数据实际字节数决定。
+        ' 解析时由 DecodeField 单独处理，不通过此处计算剩余长度。
+        If d.FieldType = ScsiFieldType.Binary AndAlso d.ByteLength = -1 AndAlso String.IsNullOrWhiteSpace(d.ByteLengthExpression) Then
+            Return ParseHexBytes(Convert.ToString(If(node.Value, ""), CultureInfo.InvariantCulture)).Length
         End If
         Dim configuredLength = GetConfiguredByteLength(node)
         Return If(configuredLength > 0, configuredLength, (d.BitLength + 7) \ 8)
@@ -528,9 +554,20 @@ Public NotInheritable Class ScsiCodec
             node.Value = Encoding.ASCII.GetString(source, bitOffset \ 8, count).TrimEnd(ChrW(0), " "c)
             Return
         ElseIf d.FieldType = ScsiFieldType.Binary Then
-            Dim count = GetFieldByteLength(node)
-            If bitOffset Mod 8 <> 0 OrElse bitOffset \ 8 + count > Math.Min(source.Length, limitBytes) Then Return
-            node.Value = String.Join(" ", source.Skip(bitOffset \ 8).Take(count).Select(Function(b) b.ToString("X2")))
+            If bitOffset Mod 8 <> 0 Then Return
+            Dim startByte As Integer = bitOffset \ 8
+            Dim maxBytes As Integer = Math.Min(source.Length, limitBytes)
+            ' ByteLength = -1：解析当前有效数据区域中剩余的全部字节。
+            If d.ByteLength = -1 AndAlso String.IsNullOrWhiteSpace(d.ByteLengthExpression) AndAlso String.IsNullOrWhiteSpace(d.LengthFieldId) Then
+                If startByte > maxBytes Then Return
+                Dim count As Integer = maxBytes - startByte
+                node.Value = String.Join(" ", source.Skip(startByte).Take(count).Select(Function(b) b.ToString("X2")))
+                Return
+            End If
+            ' 其他情况继续使用原有长度计算逻辑。
+            Dim fixedCount As Integer = GetFieldByteLength(node)
+            If startByte + fixedCount > maxBytes Then Return
+            node.Value = String.Join(" ", source.Skip(startByte).Take(fixedCount).Select(Function(b) b.ToString("X2")))
             Return
         End If
         If bitOffset + d.BitLength > Math.Min(source.Length, limitBytes) * 8 Then Return
