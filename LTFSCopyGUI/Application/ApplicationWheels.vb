@@ -1058,6 +1058,7 @@ Public NotInheritable Class DisplayHelper
         ''' </summary>
         Public Shared Function Show(text As String, caption As String, timeoutSeconds As Integer, Optional icon As MessageBoxIcon = MessageBoxIcon.None) As DialogResult
             Using frm As New CountdownMessageBoxForm(text, caption, timeoutSeconds, icon)
+                ApplyDynamicFormLayout(frm)
                 Return frm.ShowDialog()
             End Using
         End Function
